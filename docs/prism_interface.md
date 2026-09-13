@@ -416,7 +416,7 @@ decode, bit un-stuffing, CRC16 residual check, payload and CRC pushed to
 FIFO A), answers with ACK, answers IN from the response the CPU queued in
 FIFO B (PID, payload, CRC16) or with NAK, and handles the host's ACK.  The
 test runs a GET_DESCRIPTOR setup, a NAKed IN, a 4-byte IN response and a
-bit-stuffed OUT.  `PRISM_ONLY=usb` runs just this test.
+bit-stuffed OUT.  `TESTCASE=test_usb_device` runs just this test.
 
 Features added to make it fit (all in the register maps above):
 

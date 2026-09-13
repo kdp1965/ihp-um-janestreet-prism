@@ -64,9 +64,15 @@ back over the debug UART (uo_out[6], 4 Mbaud) as one line per check.
 
 ### Debugging aids
 
+- The PRISM unit test is one cocotb test per subject (`test.py` lists
+  them: registers, state table, one per chroma, fractured), each starting
+  from reset, so `TESTCASE=test_usb_device MODULE=user_peripherals.prism.test
+  make -f test_basic.mk` runs a single one (`make -f test_basic.mk clean`
+  first if a program test built `sim_build` last).  The test classes live in
+  `user_peripherals/prism/prism_tests.py`, the bench (clock, bus, CFGMEM and
+  chroma loading) in `bench.py`, the external device models in `models.py`
+  and the register map in `regs.py`.
 - `PRISM_TRACE=1` (with the PRISM unit test) logs every state change of
   shard 0 with the input word, outputs, counters and latched inputs;
-  `PRISM_TRACE_ALL=1` logs every clock of the gpio24 chroma instead;
-  `PRISM_TRACE_MAX` caps the number of lines and `PRISM_SKIP_ENCODER=1`
-  skips the (long) encoder chroma.
+  `PRISM_TRACE_MAX` caps the number of lines.
 - `test_cfgmem_probe.py` (see its header) logs CFGMEM bus accesses.

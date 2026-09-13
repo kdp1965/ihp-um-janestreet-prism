@@ -126,9 +126,17 @@ class UsbHost:
         self.dp_in, self.dm_in = dp_in, dm_in
         self.dp_out, self.dm_out, self.oe_out = dp_out, dm_out, oe_out
         self.host_dp, self.host_dm = 0, 1
+        self.task = None
         self.idle()
+
+    def start(self):
         import cocotb
-        cocotb.start_soon(self.mirror())
+        self.task = cocotb.start_soon(self.mirror())
+
+    def stop(self):
+        if self.task is not None:
+            self.task.kill()
+            self.task = None
 
     async def mirror(self):
         """The bus: while the device drives (OE), its inputs see its own
