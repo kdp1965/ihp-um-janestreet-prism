@@ -31,6 +31,13 @@ module tt_um_pettit_js_prism (
     /* verilator lint_on SYNCASYNCNET */
     always @(negedge clk) rst_reg_n <= rst_n;
 
+    // The peripherals (and the PRISM's ~1500 flops behind them) get the reset
+    // re-registered on the rising edge: their reset tree then has a full
+    // cycle instead of the half cycle after rst_reg_n, and they leave reset
+    // half a cycle after the CPU, long before it can talk to them.
+    reg rst_peri_n;
+    always @(posedge clk) rst_peri_n <= rst_reg_n;
+
     // Bidirs are used for SPI interface
     wire [3:0] qspi_data_in = {uio_in[5:4], uio_in[2:1]};
     wire [3:0] qspi_data_out;
@@ -188,7 +195,7 @@ module tt_um_pettit_js_prism (
 
     tinyQV_peripherals i_peripherals (
         .clk(clk),
-        .rst_n(rst_reg_n),
+        .rst_n(rst_peri_n),
 
         .ui_in(ui_in_sync),
         .ui_in_1ff(ui_in_sync0),
@@ -242,7 +249,7 @@ module tt_um_pettit_js_prism (
 
     uart_tx #(.CLK_HZ(64_000_000), .BIT_RATE(4_000_000)) i_debug_uart_tx(
         .clk(clk),
-        .resetn(rst_reg_n),
+        .resetn(rst_peri_n),
         .uart_txd(debug_uart_txd),
         .uart_tx_en(debug_uart_tx_start),
         .uart_tx_data(data_to_write[7:0]),

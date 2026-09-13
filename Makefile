@@ -16,7 +16,7 @@ else
 RUN = sh -c
 endif
 
-.PHONY: tt-8x4 venv config harden clean shell test
+.PHONY: tt-8x4 venv config harden harden-tt clean shell test
 
 venv:
 	$(PYTHON) -m venv .venv-tt
@@ -34,6 +34,13 @@ config: tt-8x4
 harden: config
 	rm -rf runs/wokwi
 	$(RUN) "python3 flow.py wokwi"
+
+# Exactly what the Tiny Tapeout GDS action runs: tt_tool.py --harden invokes
+# `python -m librelane ... src/config_merged.json` from the repo root, where
+# librelane_plugin_prism_pdn.py is discovered and meta.substituting_steps in
+# src/config.json inserts the stripe step.  Output in runs/wokwi as well.
+harden-tt: config
+	$(RUN) "PATH=\$$PATH:$(CURDIR)/.venv-tt/bin .venv-tt/bin/python tt/tt_tool.py --harden --ihp --no-docker"
 
 test:
 	$(RUN) "make -C test"

@@ -22,3 +22,4 @@ tt/
 .venv-tt/
 test/programs/*/obj/
 test/results_*.xml
+__pycache__/

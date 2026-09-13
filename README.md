@@ -17,26 +17,38 @@ branches use `sg13cmos5l_*` cells (same pin names). LibreLane defines the
 ## Hardening locally
 
 The single-layer Tiny Tapeout PDN cannot reach the macros' Metal4 power pins
-on its own (pdngen carves its stripes around macros), so `flow.py` runs the
-Classic flow with one extra step (`odb_stripes.py`) that draws the tile
-stripes across each macro's pin columns. Macros are placed at
-x = 1.44 + 50k um so their stripes sit on the tile's 50 um grid, and on row
-boundaries (n x 3.78 um).
+on its own (pdngen carves its stripes around macros), so the flow gets one
+extra step, `Project.ExtendPowerStripes` (`odb_stripes.py`), that draws the
+tile stripes across each macro's pin columns.  The step is a LibreLane
+plugin (`librelane_plugin_prism_pdn.py`): LibreLane imports any
+`librelane_plugin_*` module it finds on the Python path, and running
+`python -m librelane` from the repository root, which is what
+`tt_tool.py --harden` and therefore the Tiny Tapeout GDS action do, puts the
+root on that path.  `meta.substituting_steps` in `src/config.json` then
+inserts the step after `OpenROAD.GeneratePDN`.  Nothing has to be installed
+and the CI build gets the same connected macro power as the local one.
 
-    git clone -b cmos https://github.com/htfab/tt-support-tools tt   # once
+Macros are placed at x = 1.44 + 50k um so their stripes sit on the tile's
+50 um grid, and on row boundaries (n x 3.78 um).
+
+    git clone -b cmos-8x4 https://github.com/kdp1965/tt-support-tools tt   # once
     make venv          # once: Python environment for tt_tool.py (.venv-tt)
-    make harden        # tt_tool.py --create-user-config --ihp, then flow.py
+    make harden-tt     # exactly what CI runs: tt_tool.py --harden --ihp --no-docker
+    make harden        # alternative: flow.py (same step, inserted in Python)
 
 The tile is 8x4 (1724.16 x 710.64 um, the size allowed by the Jane Street
-competition). The `cmos` branch of the TT tools has no 8x4 template, so
-`make config` first installs ours from `tt_8x4/` (see its README); the CFGMEM
-macros sit in two columns at x = 801.44 and 1351.44 um, the right column
-flush with the last PDN-aligned slot and the columns one extra 50 um stripe
-pitch apart for routing between them.
+competition).  The upstream `cmos` branch of the TT tools has no 8x4 template;
+the `cmos-8x4` branch of the fork adds ours from `tt_8x4/` (see its README),
+and the GitHub workflows point the actions at that branch.  `make config`
+also installs the template into an upstream checkout.  The CFGMEM macros sit
+in two columns at x = 751.44 and 1351.44 um (the right column flush with the
+last PDN-aligned slot, twelve 50 um stripe pitches between the columns for
+the vertical routing channel), four per column: rows 0 and 96 are flipped
+(`FS`, data pins facing up), rows 67 and 163 upright (data pins facing down),
+so each pair faces one of two 44-row standard-cell areas and the two middle
+macros stand back to back across a 6-row channel.
 
-Results land in `runs/wokwi/final/`. The GitHub `gds` workflow runs the
-plain Tiny Tapeout action, which has no such step, so the CI-built GDS will
-report the macro power pins unconnected until that is resolved upstream.
+Results land in `runs/wokwi/final/`.
 
 ---
 

@@ -29,3 +29,16 @@ set_output_delay -clock [get_clocks $::env(CLOCK_PORT)] -max $spi_clk_setup_dela
 # Delays on user outputs
 set_output_delay -clock [get_clocks $::env(CLOCK_PORT)] -min 1 {uo_out}
 set_output_delay -clock [get_clocks $::env(CLOCK_PORT)] -max 2 {uo_out}
+
+# ---- project additions ------------------------------------------------------
+# PRISM inputs in raw mode go from the pin straight into the decision trees
+# (an asynchronous relationship by choice: the 1-flop / 2-flop modes exist
+# for synchronous use).  Do not time their setup against the falling-edge
+# input model; hold is still checked.
+set_false_path -setup -from [get_ports {ui_in[*]}]
+
+# The fracture configuration bit only changes while the PRISM is disabled;
+# it fans out to the bank-select and output masking logic, so give it two
+# cycles rather than let it dominate the state -> SIT -> state loop.
+set_multicycle_path -setup 2 -through [get_nets {i_peripherals.i_prism.i_prism.cfg_fractured}]
+set_multicycle_path -hold 1 -through [get_nets {i_peripherals.i_prism.i_prism.cfg_fractured}]

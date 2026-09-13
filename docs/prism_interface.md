@@ -237,6 +237,37 @@ shard's CFG0 plus the common enable, `prism_load_chroma_ex()` adds the pin
 mux and `prism_load_shards()` fractures with two chromas.  `test/programs/
 sdk_check` runs that driver on the RTL (`make sdk_check` in `test/`).
 
+## 4d. Floorplan and timing (item 1, Phase 6)
+
+Macros: two columns at x = 751.44 / 1351.44 um (the left column moved one
+50 um stripe pitch further left to widen the vertical channel), four per
+column.  The 70 data pins of each macro are on its south edge, so rows 0
+and 96 are flipped (`FS`, pins up) and rows 67 and 163 upright (pins down):
+each pair faces one of two 44-row open areas (rows 23-66 and 119-162) where
+its standard cells go, and the two middle macros stand back to back across
+a 6-row channel (rows 90-95).  y = 3.78, 257.04, 366.66, 619.92 um.  The
+stripe step accepts R0 and MX since a vertical flip keeps the pin columns.  The stripe-extension step is now a LibreLane plugin
+(`librelane_plugin_prism_pdn.py`) inserted through `meta.substituting_steps`
+in `src/config.json`, so the stock Tiny Tapeout harden connects the macro
+power too (`make harden-tt` runs exactly that).
+
+Timing after Phases 1-4 roughly doubled the cell count (13.7k -> 26.9k,
+utilization 34% -> 46%).  Decisions taken to close the typical corner,
+which is the one the flow treats as fatal:
+
+- `ui_in` setup paths are false paths (hold still checked): in raw mode
+  the pins feed the decision trees combinationally by choice, and the TT
+  input model leaves only 35% of the period for that.
+- `cfg_fractured` gets a 2-cycle multicycle path: it only changes while
+  the PRISM is disabled, and it was the head of the worst slow-corner path
+  (bank-select mux -> CFGMEM read -> decision -> state).
+- The peripherals' reset is re-registered on the rising edge
+  (`rst_peri_n` in project.v): the ~1500 PRISM flops behind it gave the
+  negedge `rst_reg_n` tree only a half cycle, the tightest internal path.
+- `MAX_TRANSITION_CONSTRAINT` 0.75 ns, `MAX_FANOUT_CONSTRAINT` 8 and
+  `PNR_CORNERS` = typ + slow so the resizer repairs the slow corner too
+  (the fatal check stays on the PDK's `TIMING_VIOLATION_CORNERS`).
+
 ## 5. FIFO storage, item 9: SRAM spike result
 
 `RM_IHPSG13_2P_64x32_c2` is reachable from the cmos5l PDK

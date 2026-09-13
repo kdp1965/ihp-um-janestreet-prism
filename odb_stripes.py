@@ -51,13 +51,16 @@ def extend(reader, layer):
             if mterm is None:
                 print(f"[WARNING] macro {inst.getName()} has no pin {net_name}")
                 continue
-            if inst.getOrient() != "R0":
+            # R0 (N) or MX (FS, flipped about the x axis): both keep the pin
+            # x positions, and the stripes drawn here span the full core height
+            # so the pins' y positions do not matter.
+            if inst.getOrient() not in ("R0", "MX"):
                 raise click.ClickException(
                     f"{inst.getName()} is placed with orientation {inst.getOrient()}; "
-                    "only R0 (N) is supported by this step"
+                    "only R0 (N) and MX (FS) are supported by this step"
                 )
             ib = inst.getBBox()
-            ox, oy = ib.xMin(), ib.yMin()  # macro origin in tile coordinates (R0)
+            ox, oy = ib.xMin(), ib.yMin()  # macro origin in tile coordinates
             for mpin in mterm.getMPins():
                 for box in mpin.getGeometry():
                     if box.getTechLayer().getName() != layer:

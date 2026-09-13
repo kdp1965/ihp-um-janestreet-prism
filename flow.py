@@ -6,6 +6,10 @@ Tiny Tapeout PDN cannot reach macro pins otherwise; pdngen carves its stripes
 around macros). Reads src/config_merged.json, which tt_tool.py creates from
 src/config.json and the tile template (see Makefile / run_flow.sh).
 
+`make harden-tt` runs the same thing the Tiny Tapeout action runs
+(tt_tool.py --harden); the step is inserted there by the plugin module and
+meta.substituting_steps instead of this file.
+
     python3 flow.py [run-tag]      inside the LibreLane nix shell, PDK_ROOT set
 """
 import os
@@ -13,17 +17,13 @@ import sys
 
 from librelane.flows.classic import Classic
 from librelane.steps import OpenROAD
-from librelane.steps.odb import OdbpyStep
+
+# The step lives in the LibreLane plugin module so the stock Tiny Tapeout
+# harden (python -m librelane from the repo root) picks it up too; see
+# librelane_plugin_prism_pdn.py and meta.substituting_steps in src/config.json.
+from librelane_plugin_prism_pdn import ExtendPowerStripes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-
-
-class ExtendPowerStripes(OdbpyStep):
-    id = "Project.ExtendPowerStripes"
-    name = "Extend Power Stripes Over Macros"
-
-    def get_script_path(self):
-        return os.path.join(HERE, "odb_stripes.py")
 
 
 class ProjectFlow(Classic):

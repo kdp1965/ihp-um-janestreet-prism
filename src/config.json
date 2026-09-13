@@ -1,4 +1,10 @@
 {
+  "meta": {
+    "flow": "Classic",
+    "substituting_steps": {
+      "+OpenROAD.GeneratePDN": "Project.ExtendPowerStripes"
+    }
+  },
   "//1": "pdngen's connectivity check runs before flow.py's stripe step bridges the macro pins; LVS is the verdict",
   "PL_TARGET_DENSITY_PCT": 55,
   "CLOCK_PERIOD": 14,
@@ -45,29 +51,29 @@
       "instances": {
         "i_peripherals.CFGMEMS_LEFT[0].cfgmem_lo": {
           "location": [
-            801.44,
+            751.44,
             3.78
           ],
-          "orientation": "N"
+          "orientation": "FS"
         },
         "i_peripherals.CFGMEMS_LEFT[0].cfgmem_hi": {
           "location": [
-            801.44,
-            181.44
+            751.44,
+            257.04
           ],
           "orientation": "N"
         },
         "i_peripherals.CFGMEMS_LEFT[1].cfgmem_lo": {
           "location": [
-            801.44,
-            359.1
+            751.44,
+            366.66
           ],
-          "orientation": "N"
+          "orientation": "FS"
         },
         "i_peripherals.CFGMEMS_LEFT[1].cfgmem_hi": {
           "location": [
-            801.44,
-            536.76
+            751.44,
+            619.92
           ],
           "orientation": "N"
         }
@@ -105,26 +111,26 @@
             1351.44,
             3.78
           ],
-          "orientation": "N"
+          "orientation": "FS"
         },
         "i_peripherals.CFGMEMS[2].cfgmem_hi": {
           "location": [
             1351.44,
-            181.44
+            257.04
           ],
           "orientation": "N"
         },
         "i_peripherals.CFGMEMS[3].cfgmem_lo": {
           "location": [
             1351.44,
-            359.1
+            366.66
           ],
-          "orientation": "N"
+          "orientation": "FS"
         },
         "i_peripherals.CFGMEMS[3].cfgmem_hi": {
           "location": [
             1351.44,
-            536.76
+            619.92
           ],
           "orientation": "N"
         }
@@ -166,7 +172,10 @@
     "i_peripherals\\.CFGMEMS\\\\?\\[3\\\\?\\]\\.cfgmem_lo VPWR VGND VPWR VGND",
     "i_peripherals\\.CFGMEMS\\\\?\\[3\\\\?\\]\\.cfgmem_hi VPWR VGND VPWR VGND"
   ],
-  "meta": {
-    "flow": "Classic"
-  }
+  "MAX_TRANSITION_CONSTRAINT": 0.75,
+  "MAX_FANOUT_CONSTRAINT": 8,
+  "PNR_CORNERS": [
+    "nom_typ_1p20V_25C",
+    "nom_slow_1p08V_125C"
+  ]
 }
