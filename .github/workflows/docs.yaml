@@ -15,3 +15,6 @@ jobs:
 
       - name: Build docs
         uses: TinyTapeout/tt-gds-action/docs@ihp-cmos5l
+        with:
+          tools-repo: kdp1965/tt-support-tools
+          tools-ref: cmos-8x4

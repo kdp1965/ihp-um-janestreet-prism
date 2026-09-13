@@ -17,3 +17,6 @@ jobs:
 
       - name: FPGA bitstream for TT ASIC Sim (ICE40UP5K)
         uses: TinyTapeout/tt-gds-action/fpga/ice40up5k@ihp-cmos5l
+        with:
+          tools-repo: kdp1965/tt-support-tools
+          tools-ref: cmos-8x4

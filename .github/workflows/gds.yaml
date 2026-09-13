@@ -17,6 +17,10 @@ jobs:
         uses: TinyTapeout/tt-gds-action@ihp-cmos5l
         with:
           pdk: ihp-sg13cmos5l
+          # htfab/tt-support-tools@cmos has no 8x4 template for CMOS5L; this
+          # branch is that tree plus tt_8x4/ (see tt_8x4/README.md)
+          tools-repo: kdp1965/tt-support-tools
+          tools-ref: cmos-8x4
 
   precheck:
     needs: gds
@@ -24,6 +28,9 @@ jobs:
     steps:
       - name: Run Tiny Tapeout Precheck
         uses: TinyTapeout/tt-gds-action/precheck@ihp-cmos5l
+        with:
+          tools-repo: kdp1965/tt-support-tools
+          tools-ref: cmos-8x4
 
   gl_test:
     needs: gds
