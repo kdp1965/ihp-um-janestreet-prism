@@ -108,6 +108,13 @@ module chroma_gpio24
    localparam [0:0]  SHIFT_LOAD_ONE     = 1'b0;
    localparam [0:0]  COMM_LOAD_ONE      = 1'b0;
    localparam [1:0]  IN_SYNC_SEL        = 2'd0;  // 0 = 2-flop sync, 1 = 1 flop, 2 = raw pins
+   localparam [1:0]  CRC_MODE           = 2'd0;  // 0 off, 1 = CRC8, 2 = CRC16, 3 = CRC32
+   localparam [0:0]  CRC_REFLECT        = 1'b0;  // 1 = LSB-first LFSR (reflected polynomial)
+   localparam [0:0]  FIFO_DIR_TX        = 1'b0;  // 0 = RX (FSM pushes, host reads), 1 = TX (host writes, FSM pops)
+   localparam [0:0]  SEMA_SET_WINS      = 1'b0;  // semaphore set beats clear in the same cycle
+   localparam [0:0]  CRC_INIT_ONES      = 1'b0;  // OUT_CRC_CLEAR presets all ones instead of zero
+   localparam [0:0]  CRC_XOR_OUT        = 1'b0;  // complement the CRC on OUT_LOAD_CRC
+   localparam [0:0]  CRC_SRC_OUT        = 1'b0;  // 0 = CRC over the shifter input bit, 1 = over its output bit
    localparam [20:0] PINMUX             = 21'h7EFE0;  // uo_out[7:1] sources
    localparam [0:0]  COUNT2_DEC         = 1'b0;  // No count2 decrement
    localparam [0:0]  LATCH2             = 1'b0;  // Use prism_out[2] as input latch enable
@@ -220,7 +227,8 @@ module chroma_gpio24
       cond_out[1]    = 1'b0;
       pinmux_reg     = PINMUX;
       gpio_store     = 1'b0;
-      ctrl_reg       = {12'h0, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE, WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC,
+      ctrl_reg       = {4'h0, CRC_SRC_OUT, CRC_XOR_OUT, CRC_INIT_ONES, SEMA_SET_WINS, FIFO_DIR_TX,
+                        CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE, WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC,
                         COUNT32, SHIFT_24_EN, SHIFT_DIR, SHIFT_EN, LATCH_IN_OUT, CLR_NOT_LOAD, 4'h0, SHIFT_IN_SEL};
 
       // =========================================================

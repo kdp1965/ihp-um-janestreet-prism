@@ -34,6 +34,10 @@ module prism_datapath
     input  wire        o_count2_dec,
     input  wire        o_count2_clear,
     input  wire        o_comm_load,       // OUT_COMM_LOAD
+    input  wire        o_fifo_pop,        // OUT_FIFO_WR_RD in TX mode: comm <= FIFO head
+    input  wire  [7:0] fifo_data,         // FIFO head
+    input  wire        o_load_crc,        // OUT_LOAD_CRC: selected shifter <= CRC value
+    input  wire [31:0] crc_data,          // CRC value (with xor_out applied)
     input  wire        shift_in,          // serial input bit (selected pin)
 
     // configuration (CFG0 bits, see prism_periph.v / docs/prism_interface.md)
@@ -128,6 +132,13 @@ module prism_datapath
                 if (shift_wide)
                     shift_count <= shift_load_one ? 5'd1 : 5'd0;
             end
+            else if (o_load_crc && shift_wide)
+            begin
+                // Transmit the checksum: load the wide shifter from the CRC
+                count1      <= crc_data & mask;
+                count1_wrap <= 1'b0;
+                shift_count <= shift_load_one ? 5'd1 : 5'd0;
+            end
             else if (o_count1_step)
             begin
                 if (count_up)
@@ -171,6 +182,18 @@ module prism_datapath
             if (o_comm_load)
             begin
                 comm       <= preload[7:0];
+                comm_count <= comm_load_one ? 3'd1 : 3'd0;
+            end
+            else if (o_fifo_pop)
+            begin
+                // TX FIFO: next byte to send
+                comm       <= fifo_data;
+                comm_count <= comm_load_one ? 3'd1 : 3'd0;
+            end
+            else if (o_load_crc && !shift_wide)
+            begin
+                // Transmit the checksum: load the 8-bit shifter from the CRC
+                comm       <= crc_data[7:0];
                 comm_count <= comm_load_one ? 3'd1 : 3'd0;
             end
             else if (shift_comm_en)

@@ -36,9 +36,9 @@ const uint32_t chroma_spislave[] =
    0x0a00ff00, 0x00000000, 0x00000000, 0x00000340, 
    0x0a00ff00, 0x00000000, 0x00000000, 0x00000340, 
    0x0a00ff00, 0x00000000, 0x00000000, 0x00000340, 
-   0x0a00ff02, 0x00000000, 0x00000010, 0x00000340, 
+   0x0a00ff02, 0x01000000, 0x00000010, 0x00000340, 
    0x0a005500, 0x00000000, 0x00000030, 0x0000035d, 
-   0x0afe5500, 0x08000000, 0x00000050, 0x00000342, 
+   0x0afe5501, 0x08000000, 0x00000050, 0x00000342, 
    0x0afeaa00, 0x00800000, 0x00000040, 0x00000342, 
    0x0a00ff00, 0x00800000, 0x00000040, 0x00000340, 
    0x0afeaa08, 0x00000000, 0x00000020, 0x00000342, 
@@ -47,5 +47,5 @@ const uint32_t chroma_spislave[] =
 };
 const uint32_t chroma_spislave_count   = 128;
 const uint32_t chroma_spislave_width   = 128;
-const uint32_t chroma_spislave_ctrlReg = 0x00002102;
+const uint32_t chroma_spislave_ctrlReg = 0x00102102;
 const uint32_t chroma_spislave_pinmuxReg = 0x001FFFE7;

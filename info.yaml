@@ -24,6 +24,8 @@ project:
     - "user_peripherals/uart/uart_tx.v"
     - "user_peripherals/prism/prism_periph.v"
     - "user_peripherals/prism/prism_datapath.v"
+    - "user_peripherals/prism/prism_fifo.v"
+    - "user_peripherals/prism/prism_crc.v"
     - "user_peripherals/prism/latch_shift_reg.v"
     - "user_peripherals/prism/latch_loader.v"
     - "user_peripherals/prism/prism.v"

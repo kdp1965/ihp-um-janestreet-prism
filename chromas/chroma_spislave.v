@@ -100,6 +100,13 @@ module chroma_spislave
    localparam [0:0]  SHIFT_LOAD_ONE     = 1'b0;
    localparam [0:0]  COMM_LOAD_ONE      = 1'b0;
    localparam [1:0]  IN_SYNC_SEL        = 2'd0;  // 0 = 2-flop sync, 1 = 1 flop, 2 = raw pins
+   localparam [1:0]  CRC_MODE           = 2'd1;  // CRC8 over the received bits  // 0 off, 1 = CRC8, 2 = CRC16, 3 = CRC32
+   localparam [0:0]  CRC_REFLECT        = 1'b0;  // 1 = LSB-first LFSR (reflected polynomial)
+   localparam [0:0]  FIFO_DIR_TX        = 1'b0;  // 0 = RX (FSM pushes, host reads), 1 = TX (host writes, FSM pops)
+   localparam [0:0]  SEMA_SET_WINS      = 1'b0;  // semaphore set beats clear in the same cycle
+   localparam [0:0]  CRC_INIT_ONES      = 1'b0;  // OUT_CRC_CLEAR presets all ones instead of zero
+   localparam [0:0]  CRC_XOR_OUT        = 1'b0;  // complement the CRC on OUT_LOAD_CRC
+   localparam [0:0]  CRC_SRC_OUT        = 1'b0;  // 0 = CRC over the shifter input bit, 1 = over its output bit
    localparam [20:0] PINMUX             = 21'h1FFFE7;  // uo_out[7:1] sources
    localparam [0:0]  COUNT2_DEC         = 1'b0;  // No count2 decrement
    localparam [0:0]  LATCH2             = 1'b1;  // Use prism_out[2] as input latch enable
@@ -128,6 +135,8 @@ module chroma_spislave
    reg            latch_out;      // OUT_LATCH
    reg            count2_dec;     // OUT_COUNT2_DEC
    reg            comm_load;      // OUT_COMM_LOAD
+   reg            fifo_wr;        // OUT_FIFO_WR_RD (RX: push comm)
+   reg            crc_update;     // OUT_CRC_UPDATE
    reg  [1:0]     latched_out;
    reg            count1_dec;
    reg            count1_load;
@@ -157,12 +166,14 @@ module chroma_spislave
    // PRISM outputs (prism_periph.v OUT_* numbering)
    assign out_data[3:0]        = pin_out[3:0];
    assign out_data[4]          = latch_out;         // OUT_LATCH (input latch strobe)
+   assign out_data[5]          = fifo_wr;           // OUT_FIFO_WR_RD
    assign out_data[6]          = count1_dec;        // OUT_COUNT1_INC_DEC
    assign out_data[7]          = count1_load;       // OUT_COUNT1_CLEAR_LOAD
    assign out_data[8]          = shift_en;          // OUT_SHIFT
    assign out_data[9]          = count2_inc;        // OUT_COUNT2_INC
    assign out_data[10]         = count2_dec;        // OUT_COUNT2_DEC
    assign out_data[11]         = count2_clear;      // OUT_COUNT2_CLEAR
+   assign out_data[13]         = crc_update;        // OUT_CRC_UPDATE
    assign out_data[14]         = host_irq;          // OUT_HOST_INTERRUPT
    assign out_data[16]         = comm_load;         // OUT_COMM_LOAD
    // out_data[5], [13:12], [15], [20:17] unused by this chroma (left unmapped)
@@ -206,10 +217,13 @@ module chroma_spislave
       latch_out      = 1'b0;
       count2_dec     = 1'b0;
       comm_load      = 1'b0;
+      fifo_wr        = 1'b0;
+      crc_update     = 1'b0;
       cond_out[1]    = 1'b0;
       pinmux_reg     = PINMUX;
       cond_out[0]    = 1'b0;
-      ctrl_reg       = {12'h0, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE, WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC,
+      ctrl_reg       = {4'h0, CRC_SRC_OUT, CRC_XOR_OUT, CRC_INIT_ONES, SEMA_SET_WINS, FIFO_DIR_TX,
+                        CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE, WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC,
                         COUNT32, SHIFT_24_EN, SHIFT_DIR, SHIFT_EN, LATCH_IN_OUT, CLR_NOT_LOAD, 4'h0, SHIFT_IN_SEL};
 
       // Send registered shift_out data to cond_out so it says steady during
@@ -273,8 +287,10 @@ module chroma_spislave
             // Wait for falling SCLK
             if (!pin_in[PIN_SCLK])
             begin
-               // Shift MOSI into comm (and the next MSB out)
+               // Shift MOSI into comm (and the next MSB out); the CRC sees
+               // the same input bit
                shift_en   = 1'b1;
+               crc_update = 1'b1;
                next_state = STATE_CHECK_COUNT;
             end
             else if (pin_in[PIN_CSB])
@@ -294,10 +310,10 @@ module chroma_spislave
 
       STATE_GEN_INTERRUPT:
          begin
-            // Byte received: interrupt the host.  comm holds the received
-            // byte until the next byte starts; the host must read it and
-            // stage the next TX byte in preload before then (a real FIFO
-            // comes with Phase 4).
+            // Byte received: push it into the RX FIFO and interrupt the
+            // host, which stages the next TX byte in preload before the
+            // next byte starts.
+            fifo_wr    = 1'b1;          // OUT_FIFO_WR_RD (RX push)
             host_irq   = 1'b1;          // OUT_HOST_INTERRUPT
             next_state = STATE_FIRST_SCLK;
          end

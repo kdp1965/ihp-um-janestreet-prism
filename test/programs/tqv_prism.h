@@ -86,7 +86,13 @@
 #define PRISM_SH_COMM           0x12    /* byte */
 #define PRISM_SH_HOST           0x14    /* host_in[1:0] */
 #define PRISM_SH_TOGGLE         0x15    /* byte write: toggle host_in[0], clear IRQ */
-#define PRISM_SH_FLAGS          0x18    /* RO datapath flags */
+#define PRISM_SH_FLAGS          0x18    /* RO datapath flags: [10] crc_ok [9] fifo_full [8] fifo_empty ... */
+#define PRISM_SH_CFG1           0x1c    /* [19:16] FIFO almost-empty level, [23:20] almost-full level */
+#define PRISM_SH_FIFO           0x20    /* byte: write pushes (TX mode), read pops (RX mode) */
+#define PRISM_SH_FIFO_STATUS    0x24    /* see PRISM_FIFO_*; any write flushes */
+#define PRISM_SH_CRC_POLY       0x28
+#define PRISM_SH_CRC            0x2c    /* read value; write = preset */
+#define PRISM_SH_CRC_EXPECTED   0x30
 
 /* Shard 0 shortcuts */
 #define PRISM_REG_CFG0          (PRISM_SHARD_BASE(0) + PRISM_SH_CFG0)
@@ -100,6 +106,19 @@
 #define PRISM_REG_HOST          (PRISM_SHARD_BASE(0) + PRISM_SH_HOST)
 #define PRISM_REG_TOGGLE        (PRISM_SHARD_BASE(0) + PRISM_SH_TOGGLE)
 #define PRISM_REG_FLAGS         (PRISM_SHARD_BASE(0) + PRISM_SH_FLAGS)
+#define PRISM_REG_CFG1          (PRISM_SHARD_BASE(0) + PRISM_SH_CFG1)
+#define PRISM_REG_FIFO          (PRISM_SHARD_BASE(0) + PRISM_SH_FIFO)
+#define PRISM_REG_FIFO_STATUS   (PRISM_SHARD_BASE(0) + PRISM_SH_FIFO_STATUS)
+#define PRISM_REG_CRC_POLY      (PRISM_SHARD_BASE(0) + PRISM_SH_CRC_POLY)
+#define PRISM_REG_CRC           (PRISM_SHARD_BASE(0) + PRISM_SH_CRC)
+#define PRISM_REG_CRC_EXPECTED  (PRISM_SHARD_BASE(0) + PRISM_SH_CRC_EXPECTED)
+
+/* FIFO status bits */
+#define PRISM_FIFO_EMPTY        (1u << 0)
+#define PRISM_FIFO_FULL         (1u << 1)
+#define PRISM_FIFO_ALMOST_EMPTY (1u << 2)
+#define PRISM_FIFO_ALMOST_FULL  (1u << 3)
+#define PRISM_FIFO_COUNT(v)     (((v) >> 8) & 0x1f)
 
 /* CFG0 bits (prism_datapath.v) */
 #define PRISM_CFG_SHIFT_IN_SEL(n) ((n) & 3)
@@ -116,7 +135,13 @@
 #define PRISM_CFG_SHIFT_LOAD_ONE (1u << 16)
 #define PRISM_CFG_COMM_LOAD_ONE (1u << 17)
 #define PRISM_CFG_IN_SYNC_SEL(n) (((n) & 3u) << 18)  /* 0 = 2 flops, 1 = 1 flop, 2 = raw pins */
+#define PRISM_CFG_CRC_MODE(n)   (((n) & 3u) << 20)   /* 0 off, 1 CRC8, 2 CRC16, 3 CRC32 */
+#define PRISM_CFG_CRC_REFLECT   (1u << 22)
+#define PRISM_CFG_FIFO_DIR_TX   (1u << 23)   /* 0 = RX (FSM pushes, host reads), 1 = TX (host writes, FSM pops) */
 #define PRISM_CFG_SEMA_SET_WINS (1u << 24)
+#define PRISM_CFG_CRC_INIT_ONES (1u << 25)
+#define PRISM_CFG_CRC_XOR_OUT   (1u << 26)
+#define PRISM_CFG_CRC_SRC_OUT   (1u << 27)   /* CRC over the shifter output bit instead of its input bit */
 
 /* Interrupt lines (TinyQV user interrupts): shard 0 = 8, shard 1 = 9 */
 #define PRISM_IRQ_SHARD0        8

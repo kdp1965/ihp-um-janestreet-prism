@@ -20,7 +20,7 @@ From `changes.md` item 12, with the spares filled in as suggestions.
 | 2 | pin_out[2] | muxable to uo_out[7:1] |
 | 3 | pin_out[3] | muxable to uo_out[7:1] |
 | 4 | OUT_LATCH | re-capture the in_prev flops selected by the firing tree (edge-detect ack); also usable in the default word for free-running capture |
-| 5 | OUT_FIFO_WR_RD | FIFO push (TX side) / pop (RX side) as configured |
+| 5 | OUT_FIFO_WR_RD | FIFO push of comm (RX mode) / pop into comm (TX mode), per CFG0 fifo_dir (Phase 4) |
 | 6 | OUT_COUNT1_INC_DEC | count1 step, direction from config (count up / down) |
 | 7 | OUT_COUNT1_CLEAR_LOAD | clear, or load from preload, per config |
 | 8 | OUT_SHIFT | shift the 24/32-bit or the 8-bit shifter (config selects which) |
@@ -32,7 +32,7 @@ From `changes.md` item 12, with the spares filled in as suggestions.
 | 14 | OUT_HOST_INTERRUPT | set the shard's sticky interrupt flag once per assertion (edge-detected in the peripheral, not re-armed every clock the state persists); two interrupt lines to the host, one per shard |
 | 15 | OUT_SEMA_CLEAR | clear the semaphore the other shard set for us; setting the semaphore towards the other shard rides on this shard's OUT_SEMA_SET (see below) |
 | 16 | OUT_MANCHESTER_EN | suggestion: enable the Manchester / NRZI encoder-decoder block if added |
-| 17 | OUT_COUNT3_STEP | suggestion: a third small counter (bit timer + bit counter + byte counter is a common need) |
+| 17 | OUT_LOAD_CRC | load the selected shifter (comm or count1) from the CRC value to transmit the checksum (Phase 4; the third-counter idea moved to a later spare) |
 | 18 | OUT_FIFO_SEL | suggestion: select RX/TX FIFO for bit 5 when both exist |
 | 19 | OUT_SEMA_SET | set the sticky semaphore seen by the other shard (set/clear same-cycle priority per shard config bit) |
 | 20 | spare | |
@@ -196,6 +196,46 @@ The halt line is now combinational for that one cycle, which also removed
 the extra registered `halt_r` term from the datapath enable: a single step
 now applies the stepped state's datapath outputs (previously the step
 cycle was gated off, so stepping through a counting state never counted).
+
+## 4b. FIFO and CRC per shard (items 8, 9, Phase 4)
+
+As built in `prism_fifo.v` / `prism_crc.v`, one of each per shard:
+
+FIFO: 16 x 8 bits, standard cells.  Direction is CFG0[23] `fifo_dir`:
+RX (0) the FSM pushes `comm` with OUT_FIFO_WR_RD and the host pops by
+reading +0x20; TX (1) the host pushes by writing +0x20 and OUT_FIFO_WR_RD
+pops the head into `comm` (a load: comm_count follows `comm_load_one`).
+Push on full and pop on empty are ignored.  +0x24 reads
+{count[12:8], almost_full[3], almost_empty[2], full[1], empty[0]}; any
+write flushes.  CFG1[19:16] / [23:20] are the almost-empty (count <=)
+and almost-full (count >= 16 - level) levels.  Inputs 20 empty, 21 full,
+26 almost_full, 27 almost_empty.  Contents survive PRISM disable, so a TX
+FIFO can be filled before the FSM starts.
+
+CRC: 32-bit bit-serial LFSR, programmable polynomial (+0x28), width from
+CFG0[21:20] `crc_mode` (8 / 16 / 32), CFG0[22] `crc_reflect` (shift right,
+reflected polynomial; width independent so USB CRC5 = poly 0x14 also
+works), CFG0[25] `crc_init_ones` (OUT_CRC_CLEAR presets all ones or zero),
+CFG0[27] `crc_src` (0 = the shifter's input bit, 1 = its output bit; take
+it in the same cycle as OUT_SHIFT), CFG0[26] `crc_xor_out` (complement
+when loaded into a shifter).  +0x2C reads the value, a write presets it;
++0x30 is the expected value; input 22 `crc_ok` = value == expected over the
+width.  New output 17 OUT_LOAD_CRC loads the selected shifter (comm or
+count1, per `shift_wide`) from the CRC so the checksum can be sent.
+
+Chromas: `chroma_spislave` pushes received bytes into the RX FIFO and runs
+a CRC8 over the received bits; `chroma_uart_tx` (new) is an 8N1
+transmitter fed from the TX FIFO that appends the CRC8 on request.
+
+## 4c. Host software (item 11, Phase 5)
+
+The tinyQV-sdk driver (`prism.h` / `prism.c`) covers this design with
+`-DPRISM_CONFIG=PRISM_CONFIG_JANESTREET` (`prism_cfg_janestreet.h` holds the
+register map above; `tinyQV-js.a` or `prism_js.o`).  The sky25a API is kept:
+per-shard calls act on `prism_set_shard()`, `prism_set_ctrl()` writes the
+shard's CFG0 plus the common enable, `prism_load_chroma_ex()` adds the pin
+mux and `prism_load_shards()` fractures with two chromas.  `test/programs/
+sdk_check` runs that driver on the RTL (`make sdk_check` in `test/`).
 
 ## 5. FIFO storage, item 9: SRAM spike result
 

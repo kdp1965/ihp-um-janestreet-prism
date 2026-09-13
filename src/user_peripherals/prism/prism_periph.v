@@ -27,25 +27,38 @@
 //     +0x10  COUNTS   {comm_count, shift_count, comm, compare, count2}; byte lanes 0-2 writable
 //     +0x14  HOST     host_in[1:0]; byte +0x15 write toggles host_in[0] and clears the interrupt
 //     +0x18  FLAGS    RO datapath flags
+//     +0x1C  CFG1     [19:16] FIFO almost-empty level, [23:20] FIFO almost-full level
+//     +0x20  FIFO     byte: write pushes (TX mode), read pops (RX mode)
+//     +0x24  FIFO_STATUS {count[12:8], almost_full[3], almost_empty[2], full[1], empty[0]}; any write flushes
+//     +0x28  CRC_POLY
+//     +0x2C  CRC      value; write = preset
+//     +0x30  CRC_EXPECTED
 //
 // CFG0 bits (chroma ctrl_reg; the datapath ones are decoded in prism_datapath.v):
 //     1:0  shift_in_sel      6 clr_not_load     7 latch_in_out    8 shift_en
 //     9    shift_dir        10 shift_wide      11 count32        12 count2_dec_en
 //     13   latch_en         14 count_up        15 wrap_preload   16 shift_load_one
 //     17   comm_load_one    19:18 in_sync_sel (0 = 2 flops, 1 = 1 flop, 2/3 = raw pins)
+//     21:20 crc_mode (0 off, 1 = 8, 2 = 16, 3 = 32 bits)   22 crc_reflect
+//     23   fifo_dir (0 = RX: FSM pushes comm, host reads; 1 = TX: host writes, FSM pops into comm)
 //     24   sema_set_wins (semaphore set beats clear in the same cycle)
+//     25   crc_init_ones    26 crc_xor_out (complement on OUT_LOAD_CRC)
+//     27   crc_src (0 = shifter input bit, 1 = shifter output bit)
 //
 // Output bits (changes.md item 12):
 //     0-3  pin_out[3:0]        4  OUT_LATCH             5  OUT_FIFO_WR_RD (Phase 4)
 //     6    OUT_COUNT1_INC_DEC  7  OUT_COUNT1_CLEAR_LOAD 8  OUT_SHIFT
 //     9    OUT_COUNT2_INC     10  OUT_COUNT2_DEC       11  OUT_COUNT2_CLEAR
 //     12   OUT_CRC_CLEAR      13  OUT_CRC_UPDATE       14  OUT_HOST_INTERRUPT
-//     15   OUT_SEMA_CLEAR     16  OUT_COMM_LOAD        19  OUT_SEMA_SET
+//     15   OUT_SEMA_CLEAR     16  OUT_COMM_LOAD        17  OUT_LOAD_CRC (selected shifter <= CRC)
+//     19   OUT_SEMA_SET
 //
 // Input bits (per shard):
 //     6:0  ui_in[6:0] (sync select)  7 shift_data   9:8 host_in   10 count1_term
 //     11   count2_cmp   13:12 latched_in (or latched outputs)   14 shift_term
-//     15   count2_eq_comm   23 count1_wrap   24 sema_in   25 other_shard_halt
+//     15   count2_eq_comm   20 fifo_empty   21 fifo_full   22 crc_ok
+//     23   count1_wrap   24 sema_in   25 other_shard_halt
+//     26   fifo_almost_full   27 fifo_almost_empty
 
 `default_nettype none
 
@@ -106,13 +119,20 @@ module tqvp_prism (
     localparam  OUT_HOST_INTERRUPT    = 14;
     localparam  OUT_SEMA_CLEAR        = 15;
     localparam  OUT_COMM_LOAD         = 16;
+    localparam  OUT_LOAD_CRC          = 17;
     localparam  OUT_SEMA_SET          = 19;
 
     // CFG0 bits used here (the rest live in prism_datapath.v)
     localparam  CFG_LATCH_IN_OUT      = 7;
     localparam  CFG_LATCH_EN          = 13;
     localparam  CFG_IN_SYNC_SEL       = 18;   // [19:18]
+    localparam  CFG_CRC_MODE          = 20;   // [21:20]
+    localparam  CFG_CRC_REFLECT       = 22;
+    localparam  CFG_FIFO_DIR          = 23;
     localparam  CFG_SEMA_SET_WINS     = 24;
+    localparam  CFG_CRC_INIT_ONES     = 25;
+    localparam  CFG_CRC_XOR_OUT       = 26;
+    localparam  CFG_CRC_SRC           = 27;
 
     // Common register addresses
     localparam [8:0] REG_CTRL       = 9'h000;
@@ -130,6 +150,15 @@ module tqvp_prism (
     localparam [6:0] SH_HOST    = 7'h14;
     localparam [6:0] SH_TOGGLE  = 7'h15;   // byte
     localparam [6:0] SH_FLAGS   = 7'h18;
+    localparam [6:0] SH_CFG1    = 7'h1C;
+    localparam [6:0] SH_FIFO    = 7'h20;
+    localparam [6:0] SH_FIFO_ST = 7'h24;
+    localparam [6:0] SH_CRC_POLY= 7'h28;
+    localparam [6:0] SH_CRC     = 7'h2C;
+    localparam [6:0] SH_CRC_EXP = 7'h30;
+
+    localparam  FIFO_DEPTH  = 16;
+    localparam  FIFO_AW     = 4;
 
     wire                prism_enable;
     wire                prism_wr;
@@ -155,6 +184,12 @@ module tqvp_prism (
     wire [32*SHARDS-1:0] count1_v;
     wire [32*SHARDS-1:0] counts_v;
     wire [32*SHARDS-1:0] flags_v;
+    wire [32*SHARDS-1:0] cfg1_v;
+    wire [32*SHARDS-1:0] fifo_st_v;
+    wire [8*SHARDS-1:0]  fifo_head_v;
+    wire [32*SHARDS-1:0] crc_poly_v;
+    wire [32*SHARDS-1:0] crc_v;
+    wire [32*SHARDS-1:0] crc_exp_v;
     wire [2*SHARDS-1:0]  host_in_v;
     wire [SHARDS-1:0]    irq_v;
     wire [SHARDS-1:0]    sema_v;            // semaphore as seen by shard s
@@ -266,6 +301,22 @@ module tqvp_prism (
             wire [PRISM_INPUTS-1:0]   in_s;
             wire  [3:0]               pin_out = out_s[3:0];
             wire                      sema_clr = exec & out_s[OUT_SEMA_CLEAR];
+            wire                      shift_in_bit = pin_in[{1'b0, cfg0[1:0]}];
+            // FIFO / CRC
+            wire [31:0]               cfg1;
+            wire [31:0]               crc_poly;
+            wire [31:0]               crc_exp;
+            wire                      cfg1_en, crc_poly_en, crc_exp_en;
+            wire                      fifo_dir = cfg0[CFG_FIFO_DIR];
+            wire                      fifo_op  = exec & out_s[OUT_FIFO_WR_RD];
+            wire                      fifo_rd  = (data_read_n != 2'b11) && win && (shard_off[6:2] == SH_FIFO[6:2]);
+            wire                      fifo_wr  = prism_wr && win && shard_off == SH_FIFO;
+            wire                      fifo_flush = prism_wr && win && shard_off == SH_FIFO_ST;
+            wire  [7:0]               fifo_head;
+            wire  [FIFO_AW:0]         fifo_count;
+            wire                      fifo_empty, fifo_full, fifo_ae, fifo_af;
+            wire [31:0]               crc_value, crc_out;
+            wire                      crc_ok;
 
             // halt_s covers the debugger halt and the cycle a conditional
             // breakpoint fires, so that cycle's outputs never reach the datapath
@@ -289,7 +340,11 @@ module tqvp_prism (
                 .o_count2_dec     ( out_s[OUT_COUNT2_DEC]              ),
                 .o_count2_clear   ( out_s[OUT_COUNT2_CLEAR]            ),
                 .o_comm_load      ( out_s[OUT_COMM_LOAD]               ),
-                .shift_in         ( pin_in[{1'b0, cfg0[1:0]}]          ),
+                .o_fifo_pop       ( out_s[OUT_FIFO_WR_RD] & fifo_dir   ),
+                .fifo_data        ( fifo_head                          ),
+                .o_load_crc       ( out_s[OUT_LOAD_CRC]                ),
+                .crc_data         ( crc_out                            ),
+                .shift_in         ( shift_in_bit                       ),
                 .cfg              ( cfg0                               ),
                 .preload          ( preload                            ),
                 .compare          ( compare                            ),
@@ -313,6 +368,49 @@ module tqvp_prism (
                 .shift_data       ( shift_data                         )
             );
 
+            // FIFO: RX (fifo_dir = 0) FSM pushes comm / host pops by reading,
+            //       TX (fifo_dir = 1) host pushes by writing / FSM pops into comm
+            prism_fifo #( .DEPTH ( FIFO_DEPTH ), .AW ( FIFO_AW ) ) i_fifo
+            (
+                .clk          ( clk                              ),
+                .rst_n        ( rst_n                            ),
+                .flush        ( fifo_flush                       ),
+                .push         ( fifo_dir ? fifo_wr : fifo_op     ),
+                .push_data    ( fifo_dir ? data_in[7:0] : comm   ),
+                .pop          ( fifo_dir ? fifo_op : fifo_rd     ),
+                .ae_level     ( cfg1[16 +: FIFO_AW]              ),
+                .af_level     ( cfg1[20 +: FIFO_AW]              ),
+                .head         ( fifo_head                        ),
+                .count        ( fifo_count                       ),
+                .empty        ( fifo_empty                       ),
+                .full         ( fifo_full                        ),
+                .almost_empty ( fifo_ae                          ),
+                .almost_full  ( fifo_af                          )
+            );
+
+            // CRC over the bit the shifter is receiving (crc_src = 0) or
+            // transmitting (crc_src = 1) in the cycle OUT_CRC_UPDATE is set
+            prism_crc i_crc
+            (
+                .clk          ( clk                              ),
+                .rst_n        ( rst_n                            ),
+                .enable       ( prism_enable                     ),
+                .clear        ( exec & out_s[OUT_CRC_CLEAR]      ),
+                .update       ( exec & out_s[OUT_CRC_UPDATE]     ),
+                .bit_in       ( cfg0[CFG_CRC_SRC] ? shift_data : shift_in_bit ),
+                .mode         ( cfg0[CFG_CRC_MODE +: 2]          ),
+                .reflect      ( cfg0[CFG_CRC_REFLECT]            ),
+                .init_ones    ( cfg0[CFG_CRC_INIT_ONES]          ),
+                .xor_out      ( cfg0[CFG_CRC_XOR_OUT]            ),
+                .poly         ( crc_poly                         ),
+                .expected     ( crc_exp                          ),
+                .wr           ( prism_wr && win && shard_off == SH_CRC ),
+                .wr_data      ( data_in                          ),
+                .value        ( crc_value                        ),
+                .out_value    ( crc_out                          ),
+                .ok           ( crc_ok                           )
+            );
+
             // PRISM inputs for this shard
             assign in_s[6:0]   = pin_in;
             assign in_s[7]     = shift_data;
@@ -322,13 +420,18 @@ module tqvp_prism (
             assign in_s[13:12] = cfg0[CFG_LATCH_IN_OUT] ? {latched_out[6], latched_out[1]} : latched_in;
             assign in_s[14]    = shift_term;
             assign in_s[15]    = count2_eq_comm;
-            assign in_s[22:16] = 7'h0;              // in_prev / FIFO / CRC (later phases)
+            assign in_s[19:16] = 4'h0;              // in_prev[3:2], spare
+            assign in_s[20]    = fifo_empty;
+            assign in_s[21]    = fifo_full;
+            assign in_s[22]    = crc_ok;
             assign in_s[23]    = count1_wrap;
             assign in_s[24]    = sema;
             assign in_s[25]    = halt_r_v[1-s];     // other shard halted (registered: the live
                                                     // halt includes the conditional break, which
                                                     // depends on this shard's inputs)
-            assign in_s[31:26] = 6'h0;
+            assign in_s[26]    = fifo_af;
+            assign in_s[27]    = fifo_ae;
+            assign in_s[31:28] = 4'h0;
 
             // Output pins: uo_out[k+1] source select PINMUX[3k+2:3k]
             //   0-3 pin_out[3:0], 4 cond_out[0], 5 cond_out[1], 6 shift_data,
@@ -414,8 +517,35 @@ module tqvp_prism (
             assign cfg0_en    = win && shard_off == SH_CFG0;
             assign pinmux_en  = win && shard_off == SH_PINMUX;
             assign preload_en = win && shard_off == SH_PRELOAD;
+            assign cfg1_en     = win && shard_off == SH_CFG1;
+            assign crc_poly_en = win && shard_off == SH_CRC_POLY;
+            assign crc_exp_en  = win && shard_off == SH_CRC_EXP;
 
 `ifndef SYNTH_FPGA
+            prism_latch_reg #( .WIDTH ( 32 ) ) cfg1_reg
+            (
+                .rst_n      ( rst_n         ),
+                .enable     ( cfg1_en       ),
+                .wr         ( latch_wr      ),
+                .data_in    ( latch_data    ),
+                .data_out   ( cfg1          )
+            );
+            prism_latch_reg #( .WIDTH ( 32 ) ) crc_poly_reg
+            (
+                .rst_n      ( rst_n         ),
+                .enable     ( crc_poly_en   ),
+                .wr         ( latch_wr      ),
+                .data_in    ( latch_data    ),
+                .data_out   ( crc_poly      )
+            );
+            prism_latch_reg #( .WIDTH ( 32 ) ) crc_exp_reg
+            (
+                .rst_n      ( rst_n         ),
+                .enable     ( crc_exp_en    ),
+                .wr         ( latch_wr      ),
+                .data_in    ( latch_data    ),
+                .data_out   ( crc_exp       )
+            );
             prism_latch_reg #( .WIDTH ( 32 ) ) cfg0_reg
             (
                 .rst_n      ( rst_n         ),
@@ -444,24 +574,34 @@ module tqvp_prism (
             reg [31:0] cfg0_r;
             reg [20:0] pinmux_r;
             reg [31:0] preload_r;
+            reg [31:0] cfg1_r, crc_poly_r, crc_exp_r;
             always @(posedge clk or negedge rst_n)
             begin
                 if (~rst_n)
                 begin
-                    cfg0_r    <= 32'h0;
-                    pinmux_r  <= 21'h0;
-                    preload_r <= 32'h0;
+                    cfg0_r     <= 32'h0;
+                    pinmux_r   <= 21'h0;
+                    preload_r  <= 32'h0;
+                    cfg1_r     <= 32'h0;
+                    crc_poly_r <= 32'h0;
+                    crc_exp_r  <= 32'h0;
                 end
                 else
                 begin
-                    if (cfg0_en & prism_wr)    cfg0_r    <= data_in;
-                    if (pinmux_en & prism_wr)  pinmux_r  <= data_in[20:0];
-                    if (preload_en & prism_wr) preload_r <= data_in;
+                    if (cfg0_en & prism_wr)     cfg0_r     <= data_in;
+                    if (pinmux_en & prism_wr)   pinmux_r   <= data_in[20:0];
+                    if (preload_en & prism_wr)  preload_r  <= data_in;
+                    if (cfg1_en & prism_wr)     cfg1_r     <= data_in;
+                    if (crc_poly_en & prism_wr) crc_poly_r <= data_in;
+                    if (crc_exp_en & prism_wr)  crc_exp_r  <= data_in;
                 end
             end
-            assign cfg0    = cfg0_r;
-            assign pinmux  = pinmux_r;
-            assign preload = preload_r;
+            assign cfg0     = cfg0_r;
+            assign pinmux   = pinmux_r;
+            assign preload  = preload_r;
+            assign cfg1     = cfg1_r;
+            assign crc_poly = crc_poly_r;
+            assign crc_exp  = crc_exp_r;
 `endif
 
             // Export for the read mux and cross-shard use
@@ -470,8 +610,15 @@ module tqvp_prism (
             assign preload_v[32*s +: 32] = preload;
             assign count1_v [32*s +: 32] = count1;
             assign counts_v [32*s +: 32] = {comm_count, shift_count, comm, compare, count2};
-            assign flags_v  [32*s +: 32] = {24'h0, latched_in, shift_data, shift_term, count2_eq_comm,
+            assign flags_v  [32*s +: 32] = {21'h0, crc_ok, fifo_full, fifo_empty,
+                                            latched_in, shift_data, shift_term, count2_eq_comm,
                                             count2_cmp, count1_wrap, count1_term};
+            assign cfg1_v    [32*s +: 32] = cfg1;
+            assign fifo_st_v [32*s +: 32] = {19'h0, fifo_count, 4'h0, fifo_af, fifo_ae, fifo_full, fifo_empty};
+            assign fifo_head_v[8*s +: 8]  = fifo_head;
+            assign crc_poly_v[32*s +: 32] = crc_poly;
+            assign crc_v     [32*s +: 32] = crc_value;
+            assign crc_exp_v [32*s +: 32] = crc_exp;
             assign host_in_v[2*s +: 2]   = host_in;
             assign irq_v[s]              = irq;
             assign sema_v[s]             = sema;
@@ -533,6 +680,12 @@ module tqvp_prism (
                 SH_COUNTS:  reg_word = counts_v [32*shard_sel +: 32];
                 SH_HOST:    reg_word = {30'h0, host_in_v[2*shard_sel +: 2]};
                 SH_FLAGS:   reg_word = flags_v  [32*shard_sel +: 32];
+                SH_CFG1:    reg_word = cfg1_v   [32*shard_sel +: 32];
+                SH_FIFO:    reg_word = {24'h0, fifo_head_v[8*shard_sel +: 8]};
+                SH_FIFO_ST: reg_word = fifo_st_v[32*shard_sel +: 32];
+                SH_CRC_POLY:reg_word = crc_poly_v[32*shard_sel +: 32];
+                SH_CRC:     reg_word = crc_v    [32*shard_sel +: 32];
+                SH_CRC_EXP: reg_word = crc_exp_v[32*shard_sel +: 32];
                 default:    reg_word = 32'h0;
             endcase
         end

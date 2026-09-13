@@ -256,6 +256,29 @@ static void test_prism_gpio24(void)
     v = prism_read(PRISM_REG_PRELOAD);
     check("PRISM shard0 preload untouched", v == 0, v);
 
+    /* Shard 1 FIFO in TX mode: the host pushes, reads do not pop, a write to
+       the status register flushes.  Works with the PRISM disabled. */
+    prism_write(PRISM_SHARD_BASE(1) + PRISM_SH_CFG0, PRISM_CFG_FIFO_DIR_TX);
+    prism_write_byte(PRISM_SHARD_BASE(1) + PRISM_SH_FIFO, 0x11);
+    prism_write_byte(PRISM_SHARD_BASE(1) + PRISM_SH_FIFO, 0x22);
+    prism_write_byte(PRISM_SHARD_BASE(1) + PRISM_SH_FIFO, 0x33);
+    v = prism_read(PRISM_SHARD_BASE(1) + PRISM_SH_FIFO_STATUS);
+    check("PRISM shard1 fifo count", PRISM_FIFO_COUNT(v) == 3 && !(v & PRISM_FIFO_EMPTY), v);
+    v = prism_read(PRISM_SHARD_BASE(1) + PRISM_SH_FIFO);
+    check("PRISM shard1 fifo head", v == 0x11, v);
+    v = prism_read(PRISM_SHARD_BASE(1) + PRISM_SH_FIFO);
+    check("PRISM shard1 fifo head holds (TX)", v == 0x11, v);
+    prism_write(PRISM_SHARD_BASE(1) + PRISM_SH_FIFO_STATUS, 0);
+    v = prism_read(PRISM_SHARD_BASE(1) + PRISM_SH_FIFO_STATUS);
+    check("PRISM shard1 fifo flush", (v & PRISM_FIFO_EMPTY) && PRISM_FIFO_COUNT(v) == 0, v);
+    prism_write(PRISM_SHARD_BASE(1) + PRISM_SH_CRC_POLY, 0x04C11DB7u);
+    prism_write(PRISM_SHARD_BASE(1) + PRISM_SH_CRC_EXPECTED, 0xDEBB20E3u);
+    v = prism_read(PRISM_SHARD_BASE(1) + PRISM_SH_CRC_POLY);
+    check("PRISM shard1 crc poly", v == 0x04C11DB7u, v);
+    v = prism_read(PRISM_SHARD_BASE(1) + PRISM_SH_CRC_EXPECTED);
+    check("PRISM shard1 crc expected", v == 0xDEBB20E3u, v);
+    prism_write(PRISM_SHARD_BASE(1) + PRISM_SH_CFG0, 0);
+
     prism_write(PRISM_REG_CTRL, PRISM_CTRL_ENABLE);
     v = prism_read(PRISM_REG_CTRL);
     check("PRISM enable", (v & PRISM_CTRL_ENABLE) != 0, v);

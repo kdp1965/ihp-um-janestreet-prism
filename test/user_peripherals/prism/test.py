@@ -6,6 +6,7 @@ from user_peripherals.prism.chroma_ws2812 import *
 from user_peripherals.prism.chroma_spislave import *
 from user_peripherals.prism.chroma_encoder import *
 from user_peripherals.prism.chroma_gpio24 import *
+from user_peripherals.prism.chroma_uart_tx import *
 from user_peripherals.prism.encoder import *
 
 from tqv import TinyQV
@@ -33,6 +34,28 @@ REG_COMM    = 0x112
 REG_HOST    = 0x114       # host_in[1:0]
 REG_TOGGLE  = 0x115       # byte write: toggle host_in[0], clear interrupt
 REG_FLAGS   = 0x118
+REG_CFG1    = 0x11C
+REG_FIFO    = 0x120       # byte: write pushes (TX mode), read pops (RX mode)
+REG_FIFO_ST = 0x124       # {count[12:8], af[3], ae[2], full[1], empty[0]}; write flushes
+REG_CRC_POLY= 0x128
+REG_CRC     = 0x12C       # read value, write preset
+REG_CRC_EXP = 0x130
+CFG_FIFO_DIR_TX = 1 << 23
+
+def crc_bits(bits, poly=0x07, width=8, init=0):
+    ''' Bit model of prism_crc.v, non-reflected: feed bits in wire order '''
+    mask = (1 << width) - 1
+    crc = init
+    for b in bits:
+        fb = ((crc >> (width - 1)) & 1) ^ b
+        crc = ((crc << 1) ^ (poly if fb else 0)) & mask
+    return crc
+
+def crc_bytes_msb_first(data, **kw):
+    return crc_bits([(d >> (7 - i)) & 1 for d in data for i in range(8)], **kw)
+
+def crc_bytes_lsb_first(data, **kw):
+    return crc_bits([(d >> i) & 1 for d in data for i in range(8)], **kw)
 SHARD1      = 0x080       # add to a REG_* above for the shard 1 window (0x180)
 IRQ0_MASK   = 0x80000000  # CTRL bit 31: shard 0 interrupt
 IRQ1_MASK   = 0x20000000  # CTRL bit 29: shard 1 interrupt
@@ -177,6 +200,74 @@ async def test_project(dut):
 
             # Clear spi_transfer so we don't send over and over
             spi_transfer = False;
+
+    uart_rx_bytes = []
+    async def simulate_uart_rx():
+        ''' 8N1 receiver on uo_out[1]: sample mid-bit from the start edge '''
+        nonlocal chroma, uart_rx_bytes
+        period = 64
+        while True:
+            await RisingEdge(dut.clk)
+            if chroma != 'uart_tx':
+                continue
+            if int(dut.uo_out.value) & 0x2:
+                continue
+            # start bit seen: sample the 8 data bits and the stop bit
+            byte = 0
+            for i in range(9):
+                for k in range(period if i else period + period // 2):
+                    await RisingEdge(dut.clk)
+                bit = (int(dut.uo_out.value) >> 1) & 1
+                if i < 8:
+                    byte |= bit << i
+                else:
+                    assert bit == 1, "framing error"
+            uart_rx_bytes.append(byte)
+            dut._log.info(f"    UART RX: {byte:02X}")
+
+    async def test_chroma_uart_tx():
+        nonlocal chroma, uart_rx_bytes
+
+        await tqv.write_word_reg(0x00, 0x00000000)
+        chroma = ''
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        await load_chroma(chroma_uart_tx, chroma_uart_tx_ctrlReg, chroma_uart_tx_pinmuxReg)
+
+        # bit period 64 clocks (preload = period - 2), CRC8 poly 0x07
+        await tqv.write_word_reg(REG_PRELOAD, 62)
+        await tqv.write_word_reg(REG_CRC_POLY, 0x07)
+        uart_rx_bytes = []
+        chroma = 'uart_tx'
+
+        data = [0x55, 0xA3, 0x0F]
+        for b in data:
+            await tqv.write_byte_reg(REG_FIFO, b)
+        for i in range(3 * 10 * 64 + 400):
+            await RisingEdge(dut.clk)
+        assert uart_rx_bytes == data, uart_rx_bytes
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 0x1 == 1
+        assert await tqv.read_word_reg(REG_CRC) == crc_bytes_lsb_first(data)
+
+        # Ask for the CRC trailer
+        dut._log.info(f"    Requesting CRC trailer")
+        await tqv.write_word_reg(REG_HOST, 1)
+        for i in range(10 * 64 + 400):
+            await RisingEdge(dut.clk)
+        assert uart_rx_bytes == data + [crc_bytes_lsb_first(data)], uart_rx_bytes
+        assert await tqv.read_word_reg(0) & IRQ0_MASK != 0
+        dbg_status = await tqv.read_word_reg(REG_DBG_STATUS)
+        assert (dbg_status & 0x1f) == 9                                        # WAIT_ACK
+
+        # Acknowledge: the FSM clears the CRC and idles
+        await tqv.write_word_reg(REG_HOST, 0)
+        await tqv.write_byte_reg(0x03, 0x80)
+        for i in range(20):
+            await RisingEdge(dut.clk)
+        dbg_status = await tqv.read_word_reg(REG_DBG_STATUS)
+        assert (dbg_status & 0x1f) == 0
+        assert await tqv.read_word_reg(REG_CRC) == 0
+        assert await tqv.read_word_reg(0) & IRQ0_MASK == 0
+        chroma = ''
 
     async def simulate_ws2822_slave():
         nonlocal chroma, grb
@@ -411,6 +502,11 @@ async def test_project(dut):
         # at the first SCLK of each byte
         await tqv.write_word_reg(REG_PRELOAD, tx_bytes[0])
 
+        # CRC8 (poly 0x07) over the received bits; received bytes land in
+        # the RX FIFO (fifo_dir = 0)
+        await tqv.write_word_reg(REG_CRC_POLY, 0x07)
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 0x1 == 1
+
         # Start a transfer; the master model pauses after every byte until
         # the host has read comm, cleared the interrupt and staged the next byte
         spi_transfer = True
@@ -440,6 +536,15 @@ async def test_project(dut):
         # nothing may be pending now (checks the byte-write clear path)
         dut._log.info(f"    Testing if Interrupt is clear after service")
         assert await tqv.read_word_reg(0) & 0x80000000 == 0
+
+        # Received bytes were pushed into the RX FIFO: pop them by reading
+        dut._log.info(f"    Testing RX FIFO and CRC8")
+        st = await tqv.read_word_reg(REG_FIFO_ST)
+        assert (st >> 8) & 0x1F == len(spi_data), f"{st:#x}"
+        for rx in spi_data:
+            assert await tqv.read_byte_reg(REG_FIFO) == rx
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 0x1 == 1
+        assert await tqv.read_word_reg(REG_CRC) == crc_bytes_msb_first(spi_data)
 
     # ===================================================================================
     # Test the WS2812 Chroma
@@ -649,6 +754,7 @@ async def test_project(dut):
     cocotb.start_soon(simulate_74595())
     cocotb.start_soon(simulate_spimaster())
     cocotb.start_soon(simulate_ws2822_slave())
+    cocotb.start_soon(simulate_uart_rx())
 
     clocks_per_phase = 600 
     encoder0 = Encoder(dut.clk, dut.ui_in[0], dut.ui_in[1], clocks_per_phase = clocks_per_phase, noise_cycles = clocks_per_phase / 8)
@@ -694,6 +800,34 @@ async def test_project(dut):
     assert await tqv.read_byte_reg(REG_COMPARE) == 0x34
     assert await tqv.read_word_reg(REG_CFG0) == 0
     await tqv.write_word_reg(REG_CFG0 + SHARD1, 0)
+
+    # FIFO in TX mode: host pushes, reads do not pop, status write flushes;
+    # CRC registers.  Both with the PRISM disabled, on both shards.
+    dut._log.info("Testing FIFO and CRC registers")
+    for base in (0, SHARD1):
+        await tqv.write_word_reg(REG_CFG0 + base, CFG_FIFO_DIR_TX)
+        assert await tqv.read_word_reg(REG_FIFO_ST + base) & 0x1F01 == 0x0001   # empty, count 0
+        for b in (0x11, 0x22, 0x33):
+            await tqv.write_byte_reg(REG_FIFO + base, b)
+        st = await tqv.read_word_reg(REG_FIFO_ST + base)
+        assert (st >> 8) & 0x1F == 3 and st & 0x3 == 0, f"{st:#x}"
+        assert await tqv.read_byte_reg(REG_FIFO + base) == 0x11
+        assert await tqv.read_byte_reg(REG_FIFO + base) == 0x11               # TX: no pop on read
+        for b in range(13):
+            await tqv.write_byte_reg(REG_FIFO + base, 0x40 + b)
+        st = await tqv.read_word_reg(REG_FIFO_ST + base)
+        assert (st >> 8) & 0x1F == 16 and st & 0x2, f"{st:#x}"                  # full
+        await tqv.write_byte_reg(REG_FIFO + base, 0xEE)                        # dropped
+        assert (await tqv.read_word_reg(REG_FIFO_ST + base) >> 8) & 0x1F == 16
+        await tqv.write_word_reg(REG_FIFO_ST + base, 0)                        # flush
+        assert await tqv.read_word_reg(REG_FIFO_ST + base) & 0x1F01 == 0x0001
+        await tqv.write_word_reg(REG_CRC_POLY + base, 0x04C11DB7)
+        await tqv.write_word_reg(REG_CRC_EXP + base, 0xDEBB20E3)
+        assert await tqv.read_word_reg(REG_CRC_POLY + base) == 0x04C11DB7
+        assert await tqv.read_word_reg(REG_CRC_EXP + base) == 0xDEBB20E3
+        await tqv.write_word_reg(REG_CFG0 + base, 0)
+    # the other shard's FIFO must be untouched by the flush above
+    assert await tqv.read_word_reg(REG_FIFO_ST) & 0x1F01 == 0x0001
 
     # State information integrity: shift a pattern through all four lo CFGMEM
     # macros that make up the 128-bit STEW and read it back (every macro must
@@ -750,6 +884,9 @@ async def test_project(dut):
  
     dut._log.info("Testing spislave Chroma")
     await test_chroma_spislave()
+
+    dut._log.info("Testing uart_tx Chroma")
+    await test_chroma_uart_tx()
 
     dut._log.info("Testing fractured PRISM (encoder + ws2812)")
     await test_fractured(clocks_per_phase, encoder0)
