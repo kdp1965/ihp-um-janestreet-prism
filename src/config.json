@@ -51,31 +51,31 @@
       "instances": {
         "i_peripherals.CFGMEMS_LEFT[0].cfgmem_lo": {
           "location": [
-            751.44,
-            3.78
+            451.44,
+            619.92
           ],
-          "orientation": "FS"
+          "orientation": "N"
         },
         "i_peripherals.CFGMEMS_LEFT[0].cfgmem_hi": {
           "location": [
-            751.44,
-            257.04
+            1301.44,
+            619.92
           ],
           "orientation": "N"
         },
         "i_peripherals.CFGMEMS_LEFT[1].cfgmem_lo": {
           "location": [
-            751.44,
-            366.66
+            451.44,
+            510.3
           ],
           "orientation": "FS"
         },
         "i_peripherals.CFGMEMS_LEFT[1].cfgmem_hi": {
           "location": [
-            751.44,
-            619.92
+            1301.44,
+            510.3
           ],
-          "orientation": "N"
+          "orientation": "FS"
         }
       },
       "gds": [
@@ -108,31 +108,31 @@
       "instances": {
         "i_peripherals.CFGMEMS[2].cfgmem_lo": {
           "location": [
-            1351.44,
-            3.78
+            101.44,
+            619.92
           ],
-          "orientation": "FS"
+          "orientation": "N"
         },
         "i_peripherals.CFGMEMS[2].cfgmem_hi": {
           "location": [
-            1351.44,
-            257.04
+            951.44,
+            619.92
           ],
           "orientation": "N"
         },
         "i_peripherals.CFGMEMS[3].cfgmem_lo": {
           "location": [
-            1351.44,
-            366.66
+            101.44,
+            510.3
           ],
           "orientation": "FS"
         },
         "i_peripherals.CFGMEMS[3].cfgmem_hi": {
           "location": [
-            1351.44,
-            619.92
+            951.44,
+            510.3
           ],
-          "orientation": "N"
+          "orientation": "FS"
         }
       },
       "gds": [

@@ -9,11 +9,13 @@
  * PRISM_REG_CFG_LSW/MSW.
  *
  * CFGMEM peripheral (base PERI_BASE_ADDRESS(4) = 0x8000100)
- *   0x00 + i*4  write: shift a 32-bit word into "lo" macro i (i = 0..3).
- *               read : "hi" macro i output word at row CFGMEM_CTRL addr.
- *   0x20 + i*4  write: shift the lo[i] output word into "hi" macro i
- *               (hi.Di0 = lo.Do0; with BYP_LO set the written data goes
- *               straight through lo into hi).
+ *   0x00 + i*4  write: shift "lo" macro i (i = 0..3); read: lo macro i's
+ *               output word (row CFGMEM_CTRL addr when addr_sel is set).
+ *   0x20 + i*4  write: shift "hi" macro i; read: hi macro i's output word.
+ *   The macros of a bank form a chain, host -> 0 -> 1 -> 2 -> 3 (macro i's
+ *   Di0 is macro i-1's Do0).  With the bank's bypass bit set every macro
+ *   passes Di0 to Do0, so the host word reaches all of them and each is
+ *   shifted with its own write; clear the bypass to read rows back.
  *   0x1f        control BYTE (0x1f is not word aligned, so use 8-bit
  *               accesses): [3:0] row address, [4] address select (1 = use
  *               [3:0], 0 = PRISM drives the address), [5] (read only)
@@ -214,31 +216,32 @@ static inline void cfgmem_wait(void)
         ;
 }
 
-/* Shift one word into lo macro i (row 0; older rows move up). */
+/* Shift lo macro i (row 0 <= Di0, older rows move up; Di0 is lo[i-1].Do0,
+   or the host word with BYP_LO set). */
 static inline void cfgmem_shift_lo(uint32_t i, uint32_t value)
 {
     cfgmem_write(CFGMEM_REG_LO(i), value);
     cfgmem_wait();
 }
 
-/* Shift lo[i]'s current output word into hi macro i. */
+/* Shift hi macro i (Di0 is hi[i-1].Do0, or the host word with BYP_HI). */
 static inline void cfgmem_shift_hi(uint32_t i, uint32_t value)
 {
     cfgmem_write(CFGMEM_REG_HI(i), value);
     cfgmem_wait();
 }
 
-/* Read row r of hi macro i (no bypass). */
+/* Read row r of hi macro i (bypass off). */
 static inline uint32_t cfgmem_read_hi(uint32_t i, uint32_t row)
 {
     cfgmem_ctrl(CFGMEM_CTRL_ADDR_SEL | CFGMEM_CTRL_ADDR(row));
-    return cfgmem_read(CFGMEM_REG_LO(i));
+    return cfgmem_read(CFGMEM_REG_HI(i));
 }
 
-/* Read row r of lo macro i, looking through the bypassed hi macro. */
+/* Read row r of lo macro i (bypass off). */
 static inline uint32_t cfgmem_read_lo(uint32_t i, uint32_t row)
 {
-    cfgmem_ctrl(CFGMEM_CTRL_BYP_HI | CFGMEM_CTRL_ADDR_SEL | CFGMEM_CTRL_ADDR(row));
+    cfgmem_ctrl(CFGMEM_CTRL_ADDR_SEL | CFGMEM_CTRL_ADDR(row));
     return cfgmem_read(CFGMEM_REG_LO(i));
 }
 
@@ -252,9 +255,9 @@ static inline void cfgmem_release(void)
  * Load a chroma as emitted by yosys-prism: the highest state first, state 0
  * last, PRISM_STEW_WORDS words per state with the most significant word
  * first.  Word 0 goes to macro 3 ... word 3 to macro 0.  States 16-31 are
- * loaded first into the hi macros (bank B) through the bypassed lo macros,
- * then states 15-0 into the lo macros; the last word shifted in lands in
- * row 0.  Returns the number of words that read back wrong.
+ * loaded into the hi macros (bank B, bypass hi) and states 15-0 into the lo
+ * macros (bypass lo); the last word shifted in lands in row 0.  Returns the
+ * number of words that read back wrong.
  */
 static inline uint32_t prism_load_chroma(const uint32_t *chroma, uint32_t states)
 {
@@ -263,15 +266,16 @@ static inline uint32_t prism_load_chroma(const uint32_t *chroma, uint32_t states
     uint32_t lo_states = states > PRISM_BANK_STATES ? PRISM_BANK_STATES : states;
 
     if (states > PRISM_BANK_STATES) {
-        cfgmem_ctrl(CFGMEM_CTRL_BYP_LO);
+        cfgmem_ctrl(CFGMEM_CTRL_BYP_HI);
         for (uint32_t k = 0; k < states - PRISM_BANK_STATES; k++)
             for (uint32_t j = 0; j < PRISM_STEW_WORDS; j++)
                 cfgmem_shift_hi(PRISM_STEW_WORDS - 1 - j, *w++);
     }
-    cfgmem_ctrl(0);
+    cfgmem_ctrl(CFGMEM_CTRL_BYP_LO);
     for (uint32_t k = 0; k < lo_states; k++)
         for (uint32_t j = 0; j < PRISM_STEW_WORDS; j++)
             cfgmem_shift_lo(PRISM_STEW_WORDS - 1 - j, *w++);
+    cfgmem_ctrl(0);
 
     for (uint32_t s = 0; s < states; s++) {
         const uint32_t *ws = chroma + (states - 1 - s) * PRISM_STEW_WORDS;

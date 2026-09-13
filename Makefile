@@ -16,7 +16,7 @@ else
 RUN = sh -c
 endif
 
-.PHONY: tt-8x4 venv config harden harden-tt clean shell test
+.PHONY: tt-8x4 venv config harden harden-tt gui klayout clean shell test
 
 venv:
 	$(PYTHON) -m venv .venv-tt
@@ -39,6 +39,19 @@ harden: config
 # `python -m librelane ... src/config_merged.json` from the repo root, where
 # librelane_plugin_prism_pdn.py is discovered and meta.substituting_steps in
 # src/config.json inserts the stripe step.  Output in runs/wokwi as well.
+# Viewers.  Every step directory holds a self-contained .odb, so any of them
+# can be opened in the OpenROAD GUI:
+#   make gui FILE=runs/wokwi/22-project-extendpowerstripes/tt_um_pettit_js_prism.odb
+#   make gui                            # final database of runs/wokwi
+#   make klayout [FILE=some.gds]        # final GDS of runs/wokwi by default
+RUN_DIR ?= runs/wokwi
+FILE    ?=
+gui:
+	$(RUN) "openroad -gui -no_init -db $(or $(FILE),$(firstword $(wildcard $(RUN_DIR)/final/odb/*.odb)))"
+
+klayout:
+	$(RUN) "klayout $(or $(FILE),$(firstword $(wildcard $(RUN_DIR)/final/gds/*.gds)))"
+
 harden-tt: config
 	$(RUN) "PATH=\$$PATH:$(CURDIR)/.venv-tt/bin .venv-tt/bin/python tt/tt_tool.py --harden --ihp --no-docker"
 

@@ -243,6 +243,18 @@ module tinyQV_peripherals (
     assign cfgmem_addr_lo = cfgmem_addr_sel ? cfgmem_addr : prism_sit_addr_a;
     assign cfgmem_addr_hi = cfgmem_addr_sel ? cfgmem_addr : prism_sit_addr_b;
 
+    // Programming chains run within a bank: host -> lo0 -> lo1 -> lo2 -> lo3
+    // and host -> hi0 -> hi1 -> hi2 -> hi3 (macro i's Di is macro i-1's Do),
+    // so all chain wiring stays inside the bank's macro block.  With the
+    // bank's bypass bit set every macro's Do is its Di, so the host word
+    // reaches any macro in the chain and each is shifted with its own strobe.
+    wire [CFGMEM_COUNT*32-1:0] cfgmem_chain_lo;
+    wire [CFGMEM_COUNT*32-1:0] cfgmem_chain_hi;
+    assign cfgmem_chain_lo[31:0] = cfgmem_data_out;
+    assign cfgmem_chain_hi[31:0] = cfgmem_data_out;
+    assign cfgmem_chain_lo[CFGMEM_COUNT*32-1:32] = cfgmem_data_in_lo[(CFGMEM_COUNT-1)*32-1:0];
+    assign cfgmem_chain_hi[CFGMEM_COUNT*32-1:32] = cfgmem_data_in_hi[(CFGMEM_COUNT-1)*32-1:0];
+
     cfgmem_periph
     #(
         .WIDTH ( CFGMEM_COUNT )
@@ -272,7 +284,7 @@ module tinyQV_peripherals (
         .cfgmem_byp_lo     ( cfgmem_byp_lo     ),
         .cfgmem_byp_hi     ( cfgmem_byp_hi     ),
         .cfgmem_wrow       ( cfgmem_wrow       ),
-//        .cfgmem_data_in_lo ( cfgmem_data_in_lo ),
+        .cfgmem_data_in_lo ( cfgmem_data_in_lo ),
         .cfgmem_data_in_hi ( cfgmem_data_in_hi )
     );
 
@@ -286,7 +298,7 @@ module tinyQV_peripherals (
                 .BYP  ( cfgmem_byp_lo                       ),
                 .WROW ( cfgmem_wrow                         ),
                 .A0   ( cfgmem_addr_lo                      ),
-                .Di0  ( cfgmem_data_out                     ),
+                .Di0  ( cfgmem_chain_lo[(i+1)*32-1 -: 32]   ),
                 .Do0  ( cfgmem_data_in_lo[(i+1)*32-1 -: 32] )
             );
             
@@ -298,7 +310,7 @@ module tinyQV_peripherals (
                 .BYP  ( cfgmem_byp_hi                       ),
                 .WROW ( cfgmem_wrow                         ),
                 .A0   ( cfgmem_addr_hi                      ),
-                .Di0  ( cfgmem_data_in_lo[(i+1)*32-1 -: 32] ),
+                .Di0  ( cfgmem_chain_hi[(i+1)*32-1 -: 32]   ),
                 .Do0  ( cfgmem_data_in_hi[(i+1)*32-1 -: 32] )
             );
         end
@@ -312,7 +324,7 @@ module tinyQV_peripherals (
                 .BYP  ( cfgmem_byp_lo                       ),
                 .WROW ( cfgmem_wrow                         ),
                 .A0   ( cfgmem_addr_lo                      ),
-                .Di0  ( cfgmem_data_out                     ),
+                .Di0  ( cfgmem_chain_lo[(i+1)*32-1 -: 32]   ),
                 .Do0  ( cfgmem_data_in_lo[(i+1)*32-1 -: 32] )
             );
             
@@ -324,7 +336,7 @@ module tinyQV_peripherals (
                 .BYP  ( cfgmem_byp_hi                       ),
                 .WROW ( cfgmem_wrow                         ),
                 .A0   ( cfgmem_addr_hi                      ),
-                .Di0  ( cfgmem_data_in_lo[(i+1)*32-1 -: 32] ),
+                .Di0  ( cfgmem_chain_hi[(i+1)*32-1 -: 32]   ),
                 .Do0  ( cfgmem_data_in_hi[(i+1)*32-1 -: 32] )
             );
         end

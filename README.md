@@ -41,14 +41,21 @@ competition).  The upstream `cmos` branch of the TT tools has no 8x4 template;
 the `cmos-8x4` branch of the fork adds ours from `tt_8x4/` (see its README),
 and the GitHub workflows point the actions at that branch.  `make config`
 also installs the template into an upstream checkout.  The CFGMEM macros sit
-in two columns at x = 751.44 and 1351.44 um (the right column flush with the
-last PDN-aligned slot, twelve 50 um stripe pitches between the columns for
-the vertical routing channel), four per column: rows 0 and 96 are flipped
-(`FS`, data pins facing up), rows 67 and 163 upright (data pins facing down),
-so each pair faces one of two 44-row standard-cell areas and the two middle
-macros stand back to back across a 6-row channel.
+along the top of the tile as one 2x2 block per bank: bank A (lo macros,
+states 0-15) at x = 101.44 and 451.44 um, bank B (hi macros, states 16-31)
+at 951.44 and 1301.44 um, the top row upright (`N`, data pins facing down)
+at y = 619.92 um and the second row flipped (`FS`, data pins facing up) at
+y = 510.30 um, with each macro's control pins facing either a margin or the
+channel between the banks.  The lower ~60% of the tile stays free for
+future macros (an SRAM is planned).  Each bank's programming chain
+(host -> macro 0 -> 1 -> 2 -> 3) stays inside its block.
 
-Results land in `runs/wokwi/final/`.
+Results land in `runs/wokwi/final/`.  To look at any step's database in the
+OpenROAD GUI, or the GDS in KLayout (both come from the nix shell):
+
+    make gui FILE=runs/wokwi/22-project-extendpowerstripes/tt_um_pettit_js_prism.odb
+    make gui RUN_DIR=runs/wokwi_phase6      # final database of another run
+    make klayout                            # final GDS of runs/wokwi
 
 ---
 

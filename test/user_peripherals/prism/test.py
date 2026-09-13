@@ -73,6 +73,8 @@ DBG_STEP       = 0x00002
 DBG_BP0_EN     = 0x00004
 def DBG_BP0_SI(si):   return (si & 0x1f) << 4
 def DBG_BP0_COND(c):  return (c & 3) << 14   # 0 entry, 1 if, 2 else-if, 3 any
+def DBG_NEW_SI(si):   return (1 << 18) | ((si & 0x1f) << 19)
+REG_STEW0      = 0x010            # 4 words: STEW of shard 0's current state
 DBGS_HALT      = 0x400
 
 @cocotb.test()
@@ -335,25 +337,27 @@ async def test_project(dut):
         assert False, "CFGMEM loader stuck busy"
 
     async def cfgmem_read_lo(inst, row):
-        '''Read row `row` of lo macro `inst` through the bypassed hi macro'''
-        await cfg.write_byte_reg(CFGMEM_REG_CTRL, CFGMEM_CTRL_BYP_HI | CFGMEM_CTRL_ADDR_SEL | row)
+        '''Read row `row` of lo macro `inst` (bypass off)'''
+        await cfg.write_byte_reg(CFGMEM_REG_CTRL, CFGMEM_CTRL_ADDR_SEL | row)
         return await cfg.read_word_reg(inst * 4)
 
     STEW_WORDS  = 4      # 128-bit STEW (chromas/tinyqv32.cfg)
     BANK_STATES = 16     # rows per CFGMEM bank
 
     async def cfgmem_read_hi(inst, row):
-        '''Read row `row` of hi macro `inst`'''
+        '''Read row `row` of hi macro `inst` (bypass off)'''
         await cfg.write_byte_reg(CFGMEM_REG_CTRL, CFGMEM_CTRL_ADDR_SEL | row)
-        return await cfg.read_word_reg(inst * 4)
+        return await cfg.read_word_reg(0x20 + inst * 4)
 
     async def load_banks(lo_words, hi_words):
         '''
            Loads the PRISM State Information Table (the CFGMEM macros).
            lo_words / hi_words list the states of bank A / bank B highest
            state first, 4 words per state, MSW first; word 0 -> macro 3 ...
-           word 3 -> macro 0.  Bank B is written through the bypassed lo
-           macros first, then bank A, so state s ends up in row s of its bank.
+           word 3 -> macro 0.  Each bank's macros form a chain (host -> 0
+           -> 1 -> 2 -> 3); with the bank's bypass bit set every macro sees
+           the host word and is shifted with its own strobe.  State s ends
+           up in row s of its bank.
         '''
         # First reset the PRISM
         await tqv.write_word_reg(0x00, 0x00000000)
@@ -361,16 +365,17 @@ async def test_project(dut):
         assert (await tqv.read_word_reg(0x0) & 0xFFFF) == 0x00000000
 
         if hi_words:
-            await cfg.write_byte_reg(CFGMEM_REG_CTRL, CFGMEM_CTRL_BYP_LO)
+            await cfg.write_byte_reg(CFGMEM_REG_CTRL, CFGMEM_CTRL_BYP_HI)
             for i, wv in enumerate(hi_words):
                 j = i % STEW_WORDS
                 await cfg.write_word_reg(0x20 + (STEW_WORDS - 1 - j) * 4, wv)
                 await cfgmem_wait()
-        await cfg.write_byte_reg(CFGMEM_REG_CTRL, 0)
+        await cfg.write_byte_reg(CFGMEM_REG_CTRL, CFGMEM_CTRL_BYP_LO)
         for i, wv in enumerate(lo_words):
             j = i % STEW_WORDS
             await cfg.write_word_reg(CFGMEM_REG_LO(STEW_WORDS - 1 - j), wv)
             await cfgmem_wait()
+        await cfg.write_byte_reg(CFGMEM_REG_CTRL, 0)
 
         # Validate a few rows of each bank (row 0 = last words written)
         for words, rd in ((lo_words, cfgmem_read_lo), (hi_words, cfgmem_read_hi)):
@@ -833,7 +838,7 @@ async def test_project(dut):
     # macros that make up the 128-bit STEW and read it back (every macro must
     # hold defined data before the PRISM is enabled, or its outputs go X)
     dut._log.info("Testing PRISM state information integrity")
-    await cfg.write_byte_reg(CFGMEM_REG_CTRL, 0)
+    await cfg.write_byte_reg(CFGMEM_REG_CTRL, CFGMEM_CTRL_BYP_LO)
     def pattern(inst, k):
         return ((0x10101010 * k) ^ (0x01000100 * inst)) & 0xFFFFFFFF
     for i in range(2):
@@ -843,8 +848,8 @@ async def test_project(dut):
                 await cfgmem_wait()
 
     # ... and the hi macros (bank B, states 16-31): a garbage STEW can jump
-    # there, so they must be defined too.  Written through the bypassed lo macros.
-    await cfg.write_byte_reg(CFGMEM_REG_CTRL, CFGMEM_CTRL_BYP_LO)
+    # there, so they must be defined too (their own chain: bypass hi).
+    await cfg.write_byte_reg(CFGMEM_REG_CTRL, CFGMEM_CTRL_BYP_HI)
     for i in range(2):
         for k in range(1, 9):
             for inst in range(STEW_WORDS):
@@ -864,6 +869,27 @@ async def test_project(dut):
     await tqv.write_word_reg(0x00, 0x40000000)
     await ClockCycles(dut.clk, 8)
     assert (await tqv.read_word_reg(0x0) & 0x40000000) == 0x40000000
+    await tqv.write_word_reg(0x00, 0x00000000)
+
+    # Unfractured STEW fetch from both banks: halt the debugger, force the
+    # state index and read the STEW the core sees.  States 16..31 come from
+    # the hi macros (shard 1's SI tracks shard 0's low bits), 0..15 from lo.
+    # Row r of the second pattern pass holds pattern(., 8 - r), rows 8..15
+    # the first pass shifted up: row 8 + r holds pattern(., 8 - r).
+    dut._log.info("Testing unfractured STEW fetch from both banks")
+    await tqv.write_word_reg(REG_DBG_CTRL[0], DBG_HALT_REQ)
+    await tqv.write_word_reg(0x00, 0x40000000)
+    await ClockCycles(dut.clk, 8)
+    for si, exp in ((20, lambda inst: pattern(inst + 4, 4)), (31, lambda inst: pattern(inst + 4, 1)),
+                    (4,  lambda inst: pattern(inst, 4)),     (15, lambda inst: pattern(inst, 1))):
+        await tqv.write_word_reg(REG_DBG_CTRL[0], DBG_HALT_REQ | DBG_NEW_SI(si))
+        await ClockCycles(dut.clk, 8)
+        st = await tqv.read_word_reg(REG_DBG_STATUS)
+        assert (st & 0x1f) == si and (st & DBGS_HALT), f"si {si}: status {st:#x}"
+        for inst in range(STEW_WORDS):
+            got = await tqv.read_word_reg(REG_STEW0 + 4 * inst)
+            assert got == exp(inst), f"state {si} STEW word {inst}: {got:#010x} != {exp(inst):#010x}"
+    await tqv.write_word_reg(REG_DBG_CTRL[0], 0)
     await tqv.write_word_reg(0x00, 0x00000000)
 
     # ===========================================================

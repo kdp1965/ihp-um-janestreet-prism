@@ -42,3 +42,22 @@ set_false_path -setup -from [get_ports {ui_in[*]}]
 # cycles rather than let it dominate the state -> SIT -> state loop.
 set_multicycle_path -setup 2 -through [get_nets {i_peripherals.i_prism.i_prism.cfg_fractured}]
 set_multicycle_path -hold 1 -through [get_nets {i_peripherals.i_prism.i_prism.cfg_fractured}]
+
+# The CFGMEM macros' Di0 inputs are the programming shift chain (loader data
+# into row 0, and lo -> hi through the bypass mux used for readback).  They
+# only move while the PRISM is disabled, so the lo -> hi -> PRISM arc that
+# STA otherwise times through two macros is not a functional path.
+set_false_path -through [get_pins -hierarchical *cfgmem_*/Di0*]
+
+# CFGMEM loader configuration bits: the host / PRISM row-address select, the
+# host row address and the two bypass bits only change while the PRISM is
+# disabled (programming and readback), so their fan-out into the macro
+# address and bypass muxes is not a single-cycle path at run time.
+set loader_nets {i_peripherals.cfgmem_addr_sel i_peripherals.cfgmem_byp_lo i_peripherals.cfgmem_byp_hi}
+for {set i 0} {$i < 4} {incr i} {
+    lappend loader_nets "i_peripherals.cfgmem_addr\[$i\]"
+}
+foreach net $loader_nets {
+    set_multicycle_path -setup 2 -through [get_nets $net]
+    set_multicycle_path -hold 1 -through [get_nets $net]
+}

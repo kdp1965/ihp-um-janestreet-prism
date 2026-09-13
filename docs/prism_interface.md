@@ -239,14 +239,22 @@ sdk_check` runs that driver on the RTL (`make sdk_check` in `test/`).
 
 ## 4d. Floorplan and timing (item 1, Phase 6)
 
-Macros: two columns at x = 751.44 / 1351.44 um (the left column moved one
-50 um stripe pitch further left to widen the vertical channel), four per
-column.  The 70 data pins of each macro are on its south edge, so rows 0
-and 96 are flipped (`FS`, pins up) and rows 67 and 163 upright (pins down):
-each pair faces one of two 44-row open areas (rows 23-66 and 119-162) where
-its standard cells go, and the two middle macros stand back to back across
-a 6-row channel (rows 90-95).  y = 3.78, 257.04, 366.66, 619.92 um.  The
-stripe step accepts R0 and MX since a vertical flip keeps the pin columns.  The stripe-extension step is now a LibreLane plugin
+Plan of record (2026-09-13): the eight macros sit along the top of the
+tile as one 2x2 block per bank.  Bank A (lo macros): lo2/lo3 (`CFGMEM_IHP16`,
+control pins west, facing the left margin) at x = 101.44 um and lo0/lo1
+(`CFGMEM_IHP_LEFT16`, control pins east, facing the inter-bank channel) at
+451.44 um.  Bank B (hi macros): hi2/hi3 (pins west, facing the channel) at
+951.44 um and hi0/hi1 (pins east, facing the right margin) at 1301.44 um.
+The top row is upright (`N`, data pins down) at y = 619.92 um (row 163) and
+the second row flipped (`FS`, data pins up) at y = 510.30 um (row 134), so
+both rows' 70 data pins face the 6-row channel between them and the whole
+lower ~60% of the tile (rows 0-133) stays free for future macros (an SRAM
+is planned).  The programming chain of each bank stays inside its block
+(section 4f).  x positions are 1.44 + 50k um so the macro stripes land on
+tile PDN stripes; the stripe step accepts R0 and MX since a vertical flip
+keeps the pin columns.  The earlier two-column layout (x = 751.44 /
+1351.44 um, four macros per column facing two 44-row cell areas) is kept
+for comparison in the table below.  The stripe-extension step is now a LibreLane plugin
 (`librelane_plugin_prism_pdn.py`) inserted through `meta.substituting_steps`
 in `src/config.json`, so the stock Tiny Tapeout harden connects the macro
 power too (`make harden-tt` runs exactly that).
@@ -267,6 +275,57 @@ which is the one the flow treats as fatal:
 - `MAX_TRANSITION_CONSTRAINT` 0.75 ns, `MAX_FANOUT_CONSTRAINT` 8 and
   `PNR_CORNERS` = typ + slow so the resizer repairs the slow corner too
   (the fatal check stays on the PDK's `TIMING_VIOLATION_CORNERS`).
+- The CFGMEM programming chain inputs (`Di0`) are false paths, and the
+  loader's host/PRISM address select, host row address and bank bypass
+  bits get 2-cycle multicycle paths: all of them only change while the
+  PRISM is disabled, and each headed a worst path (through a macro read
+  and the decision trees) in some floorplan.
+
+Floorplan experiments (all with the exceptions above, physical signoff
+clean in every case; "PRISM path" = state register -> macro read ->
+decision -> datapath register at typ / slow):
+
+| floorplan                       | typ WNS | PRISM path      | GRT overflow | DRT iters |
+|---------------------------------|---------|-----------------|--------------|-----------|
+| two columns (previous)          | +1.18   | +1.60 / -5.63   | 2296         | 12        |
+| 1x4 rows stacked at the top     | +0.97   | +1.21 / -6.32   | 2061         | 10        |
+| 2x2 block per bank (POR)        | +0.91   | +1.07 / -6.41   | 2149         | 13        |
+
+The stacked and 2x2 layouts leave the lower ~60% of the tile free for
+future macros; the two-column layout keeps each bank's four words closest
+to the logic between the columns, which is where its PRISM-path margin
+comes from.  Typ WNS is the CPU's QSPI clock output path in the stacked
+and 2x2 runs.  The 2x2 layout was chosen for the open area.
+
+## 4e. Bank addressing when unfractured (timing)
+
+Unfractured, shard 1's state index register tracks the low bits of
+shard 0's (`next_si[1] = next_si[0][3:0]`), so bank B is always addressed
+by shard 1's register and bank A by shard 0's: no mux on either row
+address, and `cfg_fractured` is off the address path.  Shard 0's SI MSB
+then selects which bank's STEW feeds the decision trees, a mux whose
+select is a registered bit.  Consequences: STATUS shows shard 1's SI
+following shard 0 while unfractured, and shard 1's debugger has no
+effect until the PRISM is fractured.  The unit test forces states 4, 15,
+20 and 31 through the debugger and checks the STEW read back from the
+right bank.
+
+## 4f. CFGMEM programming chains (per bank)
+
+Each bank's four macros form a shift chain that stays inside the bank's
+macro block: host word -> lo0 -> lo1 -> lo2 -> lo3 and host word -> hi0 ->
+hi1 -> hi2 -> hi3 (macro i's `Di0` is macro i-1's `Do0`).  A macro's `Do0`
+is its addressed row, or its `Di0` while the bank's bypass bit (control
+byte bit 6 for lo, bit 7 for hi) is set, so with the bypass set every macro
+of the chain sees the host word and is shifted with its own write strobe
+(0x00 + 4i for lo i, 0x20 + 4i for hi i).  Loading is therefore one write
+per word with the bank's bypass set, in any macro order.  Reads return each
+macro's own `Do0` (0x00 + 4i = lo i, 0x20 + 4i = hi i) at the row selected
+by the control byte when address-select is set, with the bypass clear.
+With the bypass clear a shift of macro i copies macro i-1's addressed row
+into row 0 of macro i, which `cfgmem_verify` uses to walk both chains.
+Only the chain input word of each bank leaves the block, so the 2x2 macro
+blocks need no lo-to-hi data wiring.
 
 ## 5. FIFO storage, item 9: SRAM spike result
 

@@ -318,12 +318,15 @@ module prism
    /* 
    =================================================================================
    State Information Table: the STEWs come from the CFGMEM macros.  Bank A (lo
-   macros) is addressed by shard 0, bank B (hi macros) by shard 1 when
-   fractured, or by shard 0's low SI bits when running as one FSM.
+   macros) is addressed by shard 0 and bank B (hi macros) by shard 1.  When
+   running as one FSM, shard 1's SI register simply tracks the low bits of
+   shard 0's (see GEN_NEXT_SI), so both row addresses come straight from
+   registers with no mux, and shard 0's SI MSB picks which bank's STEW to
+   use - a mux whose select is a registered bit.
    =================================================================================
    */
    assign sit_addr_a   = curr_si[0][DH_BITS-1:0];
-   assign sit_addr_b   = fractured ? curr_si[1][DR_BITS-1:0] : curr_si[0][DR_BITS-1:0];
+   assign sit_addr_b   = curr_si[1][DR_BITS-1:0];
    assign ram_dout_c[0] = stew_a[RAM_WIDTH-1:0];
    assign ram_dout_c[1] = stew_b[RAM_WIDTH-1:0];
 
@@ -332,8 +335,7 @@ module prism
       if (f == 0)
       begin : SHARD0
          // Unfractured: SI MSB selects the bank (only if there is a bank B)
-         assign ram_dout[0] = fractured ? ram_dout_c[0] :
-                              (DEPTH_REM > 0 && curr_si[0][SI_BITS-1]) ? ram_dout_c[1] : ram_dout_c[0];
+         assign ram_dout[0] = (!fractured && DEPTH_REM > 0 && curr_si[0][SI_BITS-1]) ? ram_dout_c[1] : ram_dout_c[0];
       end
       else
       begin : SHARD1
@@ -434,13 +436,25 @@ module prism
    for (genvar s = 0; s <= 1; s++)
    begin: GEN_NEXT_SI
       localparam F = FRACTURABLE ? s : 0;
-      assign next_si[s] = debug_halt[s] ? debug_si[s] : 
+      wire [SI_BITS-1:0] own_next_si =
+                          debug_halt[s] ? debug_si[s] : 
                           debug_break_now[s] ? curr_si[s] :
                           compare_match[F][0] ? jump_to[F][0] :
                           DUAL_COMPARE && compare_match[F][DUAL_COMPARE] ? jump_to[F][DUAL_COMPARE] :
                           inc_si[F] ? curr_si[s] + 1'b1 :
                           loop_valid[F] ? loop_si[F] :
                           curr_si[s];
+      if (s == 1 && FRACTURABLE)
+      begin : TRACK
+         // Unfractured, shard 1's SI follows shard 0's low bits so that bank B
+         // is always addressed for shard 0's states 16..31 without a mux
+         assign next_si[s] = fractured ? own_next_si :
+                             {{(SI_BITS-DR_BITS){1'b0}}, next_si[0][DR_BITS-1:0]};
+      end
+      else
+      begin : OWN
+         assign next_si[s] = own_next_si;
+      end
    end
    assign debug_halt_either = debug_halt[0] | debug_halt[1] | debug_break_now[0] | debug_break_now[1];
    assign debug_halt_shard  = {debug_halt[1] | debug_break_now[1], debug_halt[0] | debug_break_now[0]};

@@ -51,6 +51,7 @@ module cfgmem_periph
     output reg                 cfgmem_byp_hi,
     output reg  [3:0]          cfgmem_addr,
     output reg                 cfgmem_addr_sel,
+    input  wire [WIDTH*32-1:0] cfgmem_data_in_lo,
     input  wire [WIDTH*32-1:0] cfgmem_data_in_hi
 );
     localparam    IDX_BITS = DEPTH > 16 ? 5 : DEPTH > 8 ? 4 : 3;
@@ -70,7 +71,7 @@ module cfgmem_periph
     wire                 we_lo;
     wire                 we_hi;
     wire [WIDTH-1:0]     inst_vec;
-//    wire [31:0]          rdata_lo[WIDTH-1:0];
+    wire [31:0]          rdata_lo[WIDTH-1:0];
     wire [31:0]          rdata_hi[WIDTH-1:0];
 
     // We always write to the cfgmem_data flops when we write to
@@ -136,21 +137,25 @@ module cfgmem_periph
     assign data_ready = data_read_n != 2'b11;
     generate
         for (i = 0; i < WIDTH; i = i + 1) begin : GEN_RDATA
-//            assign rdata_lo[i] = cfgmem_data_in_lo[(i+1)*32-1 -: 32];
+            assign rdata_lo[i] = cfgmem_data_in_lo[(i+1)*32-1 -: 32];
             assign rdata_hi[i] = cfgmem_data_in_hi[(i+1)*32-1 -: 32];
         end
     endgenerate
 
- //   wire [31:0] r_lo;
+    wire [31:0] r_lo;
     wire [31:0] r_hi;
 
-//    assign r_lo = rdata_lo[address[4:2]];
+    // Reads: 0x00 + 4i = lo macro i's output word, 0x20 + 4i = hi macro i's
+    // (the row selected by the control byte's address when addr_sel is set,
+    // otherwise the row the PRISM is addressing).  With a bank's bypass bit
+    // set its macros return their Di instead, i.e. the chain input.
+    assign r_lo = rdata_lo[address[4:2]];
     assign r_hi = rdata_hi[address[4:2]];
     // Bit 5 of the control byte reads back the loader FSM busy flag so
     // firmware can pace back-to-back shift writes (each write takes DEPTH*3
     // clocks to walk the WROW pulses; a write issued while busy is dropped).
     assign data_out = address[5:0] == 6'h1F ? {24'h0, cfgmem_byp_hi, cfgmem_byp_lo, state != IDLE, cfgmem_addr_sel, cfgmem_addr} :
-                                              r_hi;
+                      address[5]           ? r_hi : r_lo;
 
     generate
       for (i = 0; i < DEPTH; i = i + 1)
