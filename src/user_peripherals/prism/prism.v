@@ -172,7 +172,7 @@ module prism
 
    localparam W_PAR_IN    = INPUT_BITS;
    localparam CMP_SEL_SIZE= 2**LUT_SIZE;
-   localparam W_DBG_CTRL  = SI_BITS*2 + 4;
+   localparam W_DBG_CTRL  = SI_BITS*2 + 8;   // halt_req, step, 2 x bp_en, 2 x bp_si, 2 x 2-bit bp_cond
    localparam LUT_INOUT_SIZE = 1 + LUT_SIZE;
    localparam FRACTURE_DECISION_SIZE = (DUAL_COMPARE + 1)*LUT_INOUT_SIZE;
 
@@ -181,7 +181,19 @@ module prism
    Debug Bus Register Map (byte offsets within the PRISM peripheral region; the
    peripheral itself owns 0x00-0x03, 0x20-0x2b):
 
-   0x04: debug_ctrl0 (shard 0)  {bp_si1, bp_si0, bp_en1, bp_en0, step, halt_req}
+   0x04: debug_ctrl0 (shard 0)  {bp_cond1, bp_cond0, bp_si1, bp_si0, bp_en1, bp_en0, step, halt_req}
+         bp_cond: 0 = break on entry to bp_si (before its outputs act)
+                  1 = break in bp_si when decision tree 0 ("if") matches
+                  2 = break in bp_si when decision tree 1 ("else if" / "else")
+                      is taken, i.e. it matches and tree 0 does not
+                  3 = break in bp_si when either tree is taken (the state exits)
+         A conditional break freezes the FSM in the cycle the condition is
+         seen: the transition and that cycle's outputs are held off (the
+         peripheral gates its datapath with debug_halt_shard), so the value
+         that triggered the break is still there to inspect.  A single step
+         then performs the transition with its outputs.
+         Write-only extras on the same word: bit 2*SI_BITS+8 = load new SI
+         from the following SI_BITS bits.  Read back = {debug_si, debug_ctrl}.
          write bit SI_BITS*2+4 = load new SI from bits [SI_BITS*3+4 : SI_BITS*2+5]
          read:  {debug_si[0], debug_ctrl0}
    0x08: debug_ctrl1 (shard 1)  same layout, read {debug_si[1], debug_ctrl1}
@@ -288,6 +300,9 @@ module prism
    wire                       debug_new_si;
    wire  [SI_BITS-1:0]        debug_new_siv;
    wire                       debug_entry[1:0];
+   wire  [1:0]                debug_bp_cond0[1:0];  // breakpoint 0 condition select
+   wire  [1:0]                debug_bp_cond1[1:0];  // breakpoint 1 condition select
+   wire                       debug_break_now[1:0]; // conditional breakpoint hit this cycle
 
    // Debug control regs
    reg  [1:0]                 debug_halt;
@@ -420,14 +435,15 @@ module prism
    begin: GEN_NEXT_SI
       localparam F = FRACTURABLE ? s : 0;
       assign next_si[s] = debug_halt[s] ? debug_si[s] : 
+                          debug_break_now[s] ? curr_si[s] :
                           compare_match[F][0] ? jump_to[F][0] :
                           DUAL_COMPARE && compare_match[F][DUAL_COMPARE] ? jump_to[F][DUAL_COMPARE] :
                           inc_si[F] ? curr_si[s] + 1'b1 :
                           loop_valid[F] ? loop_si[F] :
                           curr_si[s];
    end
-   assign debug_halt_either = debug_halt[0] | debug_halt[1];
-   assign debug_halt_shard  = debug_halt;
+   assign debug_halt_either = debug_halt[0] | debug_halt[1] | debug_break_now[0] | debug_break_now[1];
+   assign debug_halt_shard  = {debug_halt[1] | debug_break_now[1], debug_halt[0] | debug_break_now[0]};
 
    /* 
    =================================================================================
@@ -450,7 +466,10 @@ module prism
       begin
          for (f = 0; f <= FRACTURABLE; f++)
          begin
-            if (compare_match[f][0] || compare_match[f][DUAL_COMPARE])
+            if (debug_halt[f] || debug_break_now[f])
+               ;  // halted or breaking: no transition, keep the loop state
+
+            else if (compare_match[f][0] || compare_match[f][DUAL_COMPARE])
                loop_valid[f] <= 1'b0;
 
             else if (inc_si[f] && ~loop_valid[f])
@@ -735,6 +754,8 @@ module prism
    assign debug_bp_en1[0]   = debug_ctrl0[3];
    assign debug_bp_si0[0]   = debug_ctrl0[SI_BITS  +4-1 -: SI_BITS];
    assign debug_bp_si1[0]   = debug_ctrl0[SI_BITS*2+4-1 -: SI_BITS];
+   assign debug_bp_cond0[0] = debug_ctrl0[SI_BITS*2+4 +: 2];
+   assign debug_bp_cond1[0] = debug_ctrl0[SI_BITS*2+6 +: 2];
 
    // Control for fracture unit 1
    assign debug_halt_req[1] = debug_ctrl1[0];
@@ -743,10 +764,12 @@ module prism
    assign debug_bp_en1[1]   = debug_ctrl1[3];
    assign debug_bp_si0[1]   = debug_ctrl1[SI_BITS  +4-1 -: SI_BITS];
    assign debug_bp_si1[1]   = debug_ctrl1[SI_BITS*2+4-1 -: SI_BITS];
+   assign debug_bp_cond0[1] = debug_ctrl1[SI_BITS*2+4 +: 2];
+   assign debug_bp_cond1[1] = debug_ctrl1[SI_BITS*2+6 +: 2];
 
    // New SI load rides on the debug_ctrl write data (not stored in the register)
-   assign debug_new_si      = debug_wdata[SI_BITS*2+4];
-   assign debug_new_siv     = debug_wdata[SI_BITS*3+5-1 -: SI_BITS];
+   assign debug_new_si      = debug_wdata[SI_BITS*2+8];
+   assign debug_new_siv     = debug_wdata[SI_BITS*2+9 +: SI_BITS];
 
    /* 
    =================================================================================
@@ -755,9 +778,26 @@ module prism
    */
    for (genvar s = 0; s <= 1; s++)
    begin : GEN_DEBUG_ENTRY
-      assign debug_entry[s] = debug_step_pending[s] || 
-                       (debug_bp_en0[s] && !debug_break_active[s][0] && !debug_resume_pending[s] && (debug_bp_si0[s] == next_si[s])) ||
-                       (debug_bp_en1[s] && !debug_break_active[s][1] && !debug_resume_pending[s] && (debug_bp_si1[s] == next_si[s])) ||
+      localparam F = FRACTURABLE ? s : 0;
+      // Tree 0 has priority, so "tree 1 matches" means the else-if branch is
+      // actually taken (a plain else compiles to an always-true tree 1).
+      wire match0 = compare_match[F][0];
+      wire match1 = (DUAL_COMPARE != 0) && compare_match[F][DUAL_COMPARE] && !compare_match[F][0];
+
+      // Conditional breakpoint: in bp_si, when the selected decision tree
+      // matches.  Suppressed while halted, during the single-step cycle and
+      // the resume cycle so the transition can actually be performed.
+      assign debug_break_now[s] = INCLUDE_DEBUG && !debug_halt[s] && !debug_step_pending[s] && !debug_resume_pending[s] &&
+         ((debug_bp_en0[s] && !debug_break_active[s][0] && (debug_bp_si0[s] == curr_si[s]) &&
+             ((debug_bp_cond0[s] == 2'd1 && match0) || (debug_bp_cond0[s] == 2'd2 && match1) ||
+              (debug_bp_cond0[s] == 2'd3 && (match0 | match1)))) ||
+          (debug_bp_en1[s] && !debug_break_active[s][1] && (debug_bp_si1[s] == curr_si[s]) &&
+             ((debug_bp_cond1[s] == 2'd1 && match0) || (debug_bp_cond1[s] == 2'd2 && match1) ||
+              (debug_bp_cond1[s] == 2'd3 && (match0 | match1)))));
+
+      assign debug_entry[s] = debug_step_pending[s] || debug_break_now[s] ||
+                       (debug_bp_en0[s] && debug_bp_cond0[s] == 2'd0 && !debug_break_active[s][0] && !debug_resume_pending[s] && (debug_bp_si0[s] == next_si[s])) ||
+                       (debug_bp_en1[s] && debug_bp_cond1[s] == 2'd0 && !debug_break_active[s][1] && !debug_resume_pending[s] && (debug_bp_si1[s] == next_si[s])) ||
                        (debug_halt_req[s] & !debug_halt_req_p1[s]);
    end
 

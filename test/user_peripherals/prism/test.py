@@ -43,6 +43,14 @@ REG_OUT_MASK0  = 0x044
 REG_COND_MASK0 = 0x048
 REG_OUT_MASK1  = 0x04C
 REG_COND_MASK1 = 0x050
+REG_DBG_CTRL   = (0x004, 0x008)   # per shard
+REG_DBG_STATUS = 0x00C            # shard 0 in [12:0], shard 1 in [25:13]
+DBG_HALT_REQ   = 0x00001
+DBG_STEP       = 0x00002
+DBG_BP0_EN     = 0x00004
+def DBG_BP0_SI(si):   return (si & 0x1f) << 4
+def DBG_BP0_COND(c):  return (c & 3) << 14   # 0 entry, 1 if, 2 else-if, 3 any
+DBGS_HALT      = 0x400
 
 @cocotb.test()
 async def test_project(dut):
@@ -485,6 +493,48 @@ async def test_project(dut):
 
         dut._log.info(f"    Testing if host_in[0] toggled")
         assert await tqv.read_byte_reg(REG_HOST + base) == 0
+
+        # ---- LUT-conditional breakpoint (changes.md item 7) -------------
+        # The auto-toggle above started a second transfer (0x36FE0C, first bit
+        # 0).  Break in SEND_T0_LOW (compiler row 4) when its "if" fires,
+        # i.e. count2 >= compare (51): the FSM must stop with count2 == 51,
+        # the transition's count2_clear / shift held off.
+        shard = 0 if base == 0 else 1
+        dbg   = REG_DBG_CTRL[shard]
+        def st():
+            return (dbg_status >> (13 * shard)) & 0x1fff
+        bp = DBG_BP0_EN | DBG_BP0_SI(4) | DBG_BP0_COND(1)
+        await tqv.write_word_reg(dbg, bp)
+        for i in range(400):
+            await RisingEdge(dut.clk)
+
+        dut._log.info(f"    Testing LUT-conditional breakpoint (shard {shard})")
+        dbg_status = await tqv.read_word_reg(REG_DBG_STATUS)
+        assert (st() & 0x1f) == 4, f"status {dbg_status:#x}"
+        assert st() & DBGS_HALT
+        assert await tqv.read_byte_reg(REG_COUNT2 + base) == 51
+        shc_before = (await tqv.read_word_reg(REG_COUNT2 + base) >> 24) & 0x1f
+
+        # Single step (halt_req held so the FSM stays halted afterwards):
+        # the transition and its outputs happen now
+        dut._log.info(f"    Stepping out of the conditional breakpoint")
+        await tqv.write_word_reg(dbg, bp | DBG_HALT_REQ)
+        await tqv.write_word_reg(dbg, bp | DBG_HALT_REQ | DBG_STEP)
+        dbg_status = await tqv.read_word_reg(REG_DBG_STATUS)
+        assert (st() & 0x1f) == 6, f"status {dbg_status:#x}"      # CHECK_SHIFT_COUNT
+        assert st() & DBGS_HALT
+        assert await tqv.read_byte_reg(REG_COUNT2 + base) == 0     # count2_clear acted
+        shc_after = (await tqv.read_word_reg(REG_COUNT2 + base) >> 24) & 0x1f
+        assert shc_after == ((shc_before + 1) & 0x1f), f"{shc_before} -> {shc_after}"  # shift acted
+
+        # Release: breakpoint off, halt_req dropped
+        await tqv.write_word_reg(dbg, DBG_HALT_REQ)
+        await tqv.write_word_reg(dbg, 0)
+        for i in range(6000):
+            await RisingEdge(dut.clk)
+        dbg_status = await tqv.read_word_reg(REG_DBG_STATUS)
+        assert not (st() & DBGS_HALT)
+        assert await tqv.read_word_reg(0) & irq_mask != 0
 
     # ===================================================================================
     # Test the Encoder Chroma

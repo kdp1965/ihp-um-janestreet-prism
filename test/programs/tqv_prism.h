@@ -132,7 +132,20 @@
 #define PRISM_DBG_BP1_EN        (1u << 3)
 #define PRISM_DBG_BP0_SI(si)    (((si) & 0x1f) << 4)
 #define PRISM_DBG_BP1_SI(si)    (((si) & 0x1f) << 9)
-#define PRISM_DBG_NEW_SI(si)    ((1u << 14) | (((si) & 0x1f) << 15))  /* load SI on write */
+#define PRISM_DBG_BP0_COND(c)   (((c) & 3u) << 14)   /* see PRISM_BPC_* */
+#define PRISM_DBG_BP1_COND(c)   (((c) & 3u) << 16)
+#define PRISM_DBG_NEW_SI(si)    ((1u << 18) | (((si) & 0x1f) << 19))  /* load SI on write */
+#define PRISM_DBG_CTRL1         0x08    /* same layout for shard 1 */
+
+/* Breakpoint conditions.  ENTRY halts before the state's outputs act; the
+   others halt inside the state in the cycle the selected decision tree
+   matches, with that cycle's transition and outputs held off.  Keep
+   PRISM_DBG_HALT_REQ set while single stepping, or the FSM resumes after
+   a step that lands on a non-breakpoint state. */
+#define PRISM_BPC_ENTRY         0u
+#define PRISM_BPC_IF            1u      /* tree 0 ("if") matches */
+#define PRISM_BPC_ELSE_IF       2u      /* tree 1 ("else if" / "else") taken: matches while tree 0 does not */
+#define PRISM_BPC_ANY           3u      /* either tree taken (the state exits) */
 
 /* Debug status register fields */
 /* shard 0 in [12:0], shard 1 in [25:13]: {break[1:0], halt, next_si, curr_si} */

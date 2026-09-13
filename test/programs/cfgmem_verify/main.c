@@ -296,8 +296,24 @@ static void test_prism_gpio24(void)
     delay_cycles(64);
     prism_write(PRISM_REG_CTRL, PRISM_CTRL_ENABLE);
     prism_write(PRISM_REG_PRELOAD, 0x00F05077);   /* same word: the cocotb 74595 model checks the last capture */
+
+    /* LUT-conditional breakpoint: stop in DELAY2 (row 4) when its "else if"
+       fires, i.e. after the 24th shift, before that transition's outputs. */
+    prism_write(PRISM_REG_DBG_CTRL, PRISM_DBG_BP0_EN | PRISM_DBG_BP0_SI(4) | PRISM_DBG_BP0_COND(PRISM_BPC_ELSE_IF));
     prism_write(PRISM_REG_HOST, 3);
     prism_write(PRISM_REG_HOST, 2);
+    delay_cycles(1500);
+    v = prism_read(PRISM_REG_DBG_STATUS);
+    check("PRISM LUT breakpoint", PRISM_DBGS_CURR_SI(v) == 4 && (v & PRISM_DBGS_HALT), v);
+    v = prism_read(PRISM_REG_COUNT1);
+    check("PRISM LUT breakpoint data", v == 0x0000BEEF, v);
+    prism_write(PRISM_REG_DBG_CTRL, PRISM_DBG_HALT_REQ | PRISM_DBG_BP0_EN | PRISM_DBG_BP0_SI(4) | PRISM_DBG_BP0_COND(PRISM_BPC_ELSE_IF));
+    prism_write(PRISM_REG_DBG_CTRL, PRISM_DBG_STEP | PRISM_DBG_HALT_REQ | PRISM_DBG_BP0_EN | PRISM_DBG_BP0_SI(4) | PRISM_DBG_BP0_COND(PRISM_BPC_ELSE_IF));
+    v = prism_read(PRISM_REG_DBG_STATUS);
+    check("PRISM LUT breakpoint step", PRISM_DBGS_CURR_SI(v) == 5 && (v & PRISM_DBGS_HALT), v);
+    prism_write_byte(PRISM_REG_INT_CLR, 0xC0);
+    prism_write(PRISM_REG_DBG_CTRL, PRISM_DBG_HALT_REQ);
+    prism_write(PRISM_REG_DBG_CTRL, 0);
     delay_cycles(2000);
     v = prism_read(PRISM_REG_COUNT1);
     check("PRISM gpio24 plain input", v == 0x0000BEEF, v);

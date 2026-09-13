@@ -145,7 +145,7 @@ module tqvp_prism (
     wire [PRISM_INPUTS-1:0]   in_data_0, in_data_1;
     wire [OUTPUTS-1:0]        out_data_0, out_data_1;
     wire [PRISM_COND_OUT-1:0] cond_out_0, cond_out_1;
-    wire [1:0]                halt;
+    wire [1:0]                halt;           // per-shard halt, incl. the conditional-break cycle
     wire                      halt_either;    // unused: per-shard halts are used instead
 
     // Per-shard state exported for the register reads and cross-shard wiring
@@ -159,7 +159,7 @@ module tqvp_prism (
     wire [SHARDS-1:0]    irq_v;
     wire [SHARDS-1:0]    sema_v;            // semaphore as seen by shard s
     wire [SHARDS-1:0]    sema_set_req;      // shard s asserts OUT_SEMA_SET (to the other shard)
-    wire [SHARDS-1:0]    halt_r_v;
+    wire [SHARDS-1:0]    halt_r_v;          // registered per-shard halt (breaks the cross-shard comb. path)
     wire [7*SHARDS-1:0]  pin_src_v;         // per-shard candidate value for uo_out[k+1]
     wire [7*SHARDS-1:0]  pin_claim_v;       // per-shard "drives uo_out[k+1]"
 
@@ -267,7 +267,9 @@ module tqvp_prism (
             wire  [3:0]               pin_out = out_s[3:0];
             wire                      sema_clr = exec & out_s[OUT_SEMA_CLEAR];
 
-            assign exec = prism_enable && !(halt_s | halt_r);
+            // halt_s covers the debugger halt and the cycle a conditional
+            // breakpoint fires, so that cycle's outputs never reach the datapath
+            assign exec = prism_enable && !halt_s;
 
             // Input pins: 2-flop (default), 1-flop or raw, per shard (item 13)
             assign pin_in = sync_sel == 2'd0 ? ui_in[6:0]     :
@@ -323,7 +325,9 @@ module tqvp_prism (
             assign in_s[22:16] = 7'h0;              // in_prev / FIFO / CRC (later phases)
             assign in_s[23]    = count1_wrap;
             assign in_s[24]    = sema;
-            assign in_s[25]    = halt[1-s];         // other shard halted
+            assign in_s[25]    = halt_r_v[1-s];     // other shard halted (registered: the live
+                                                    // halt includes the conditional break, which
+                                                    // depends on this shard's inputs)
             assign in_s[31:26] = 6'h0;
 
             // Output pins: uo_out[k+1] source select PINMUX[3k+2:3k]
@@ -503,7 +507,7 @@ module tqvp_prism (
                     latched_out[p] <= 1'b0;
                 else if (!prism_enable)
                     latched_out[p] <= 1'b0;
-                else if (!(owner1 ? halt_r_v[1] : halt_r_v[0]))
+                else if (!(owner1 ? halt[1] : halt[0]))
                     latched_out[p] <= uo_out_c[p];
             end
         end

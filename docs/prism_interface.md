@@ -164,6 +164,39 @@ The SDK (`prism.h`, item 11) then needs only a base per shard and the
 common block; the per-config remap is the base addresses plus a feature
 mask.
 
+## 4a. Debugger: LUT-conditional breakpoints (item 7, Phase 3)
+
+Each shard's debug control word (0x04 shard 0, 0x08 shard 1) gained a
+2-bit condition per breakpoint:
+
+| bits | field | meaning |
+|---|---|---|
+| 0 | halt_req | level: halt (rising edge) and hold |
+| 1 | step | rising edge: execute one transition |
+| 2, 3 | bp_en0, bp_en1 | breakpoint enables |
+| 8:4, 13:9 | bp_si0, bp_si1 | breakpoint state index |
+| 15:14, 17:16 | bp_cond0, bp_cond1 | 0 = on entry (as before), 1 = in the state when tree 0 ("if") matches, 2 = when tree 1 ("else if" / "else") is taken (matches while tree 0 does not; a plain `else` compiles to an always-true tree 1), 3 = when either is taken, i.e. the state exits |
+| 18 | new_si | write-only: load the SI from bits 23:19 |
+
+Read back = {debug_si[22:18], control[17:0]}.  Status (0x0C) is unchanged.
+
+Semantics of a conditional break: in the cycle the selected decision tree
+first matches while the FSM sits in `bp_si`, the core forces `next_si =
+curr_si`, holds the loop bookkeeping, and raises the shard's halt line
+combinationally.  The peripheral gates every datapath action, pin latch,
+semaphore and interrupt edge with that line, so the transition's outputs
+(counter clears, shifts, loads) do not happen: the value that satisfied
+the condition is still there to read.  A single step then performs the
+transition with its outputs and halts in the target state.  Keep
+`halt_req` set while stepping: without it (or an active breakpoint) the
+FSM resumes after a step that lands on a non-breakpoint state.  Release
+from any breakpoint halt: clear the enable, pulse `halt_req`.
+
+The halt line is now combinational for that one cycle, which also removed
+the extra registered `halt_r` term from the datapath enable: a single step
+now applies the stepped state's datapath outputs (previously the step
+cycle was gated off, so stepping through a counting state never counted).
+
 ## 5. FIFO storage, item 9: SRAM spike result
 
 `RM_IHPSG13_2P_64x32_c2` is reachable from the cmos5l PDK
