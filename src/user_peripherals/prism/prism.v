@@ -142,6 +142,7 @@ module prism
    output  wire [COND_OUT-1:0]   cond_out,         // Shard 0 conditional outputs
    output  wire [OUTPUTS-1:0]    out_data_1,       // Shard 1 outputs (fractured)
    output  wire [COND_OUT-1:0]   cond_out_1,       // Shard 1 conditional outputs
+   output  wire                  fractured_out,    // cfg_fractured (static at run time)
 
    // ============================
    // Latch programming bus
@@ -160,6 +161,16 @@ module prism
    output wire [31:0]            debug_rdata,        // Debug read data
    output wire                   debug_halt_either,
    output wire [1:0]             debug_halt_shard,   // Per-shard halt state
+
+   // ============================
+   // in_prev edge capture (the flops live in the peripheral): per shard the
+   // input number each of the four flops follows, and a capture strobe when
+   // a decision tree that reads that input fires and the jump is executed
+   // ============================
+   input  wire [4*INPUT_BITS-1:0] in_prev_src,      // shard 0 (or whole FSM)
+   input  wire [4*INPUT_BITS-1:0] in_prev_src_1,    // shard 1 (fractured)
+   output wire [3:0]              in_prev_cap,
+   output wire [3:0]              in_prev_cap_1,
 
    // ============================
    // State Information Table (CFGMEM macros, TTSKY approach)
@@ -314,6 +325,7 @@ module prism
 
    assign prism_rst_n = rst_n & fsm_enable;
    assign fractured   = (FRACTURABLE != 0) && cfg_fractured;
+   assign fractured_out = fractured;
 
    /* 
    =================================================================================
@@ -458,6 +470,37 @@ module prism
    end
    assign debug_halt_either = debug_halt[0] | debug_halt[1] | debug_break_now[0] | debug_break_now[1];
    assign debug_halt_shard  = {debug_halt[1] | debug_break_now[1], debug_halt[0] | debug_break_now[0]};
+
+   /* 
+   =================================================================================
+   in_prev capture strobes: flop i of shard s captures its source input when a
+   decision tree whose muxes read that input fires and the transition is
+   executed (not halted, not the cycle a breakpoint fires; a single step
+   executes exactly one).  Tree 1 counts only when tree 0 did not fire.
+   =================================================================================
+   */
+   wire [3:0] in_prev_cap_s [1:0];
+   for (genvar s = 0; s <= 1; s++)
+   begin : GEN_IN_PREV
+      localparam F = FRACTURABLE ? s : 0;
+      wire [4*W_PAR_IN-1:0] src = (s == 0) ? in_prev_src : in_prev_src_1;
+      wire go = fsm_enable && !debug_halt[s] && !debug_break_now[s] && (s == 0 || fractured);
+      wire m0 = compare_match[F][0];
+      wire m1 = (DUAL_COMPARE != 0) && compare_match[F][DUAL_COMPARE] && !compare_match[F][0];
+      for (genvar i = 0; i < 4; i++)
+      begin : CAP
+         wire [W_PAR_IN-1:0]     n = src[W_PAR_IN*i +: W_PAR_IN];
+         wire [STATE_INPUTS-1:0] rd;
+         for (genvar inp = 0; inp < STATE_INPUTS; inp++)
+         begin : RD
+            assign rd[inp] = input_mux_sel[F][inp] == n;
+         end
+         assign in_prev_cap_s[s][i] = go & ((m0 & (|rd[LUT_SIZE-1:0])) |
+                                            (m1 & (|rd[STATE_INPUTS-1:STATE_INPUTS-LUT_SIZE])));
+      end
+   end
+   assign in_prev_cap   = in_prev_cap_s[0];
+   assign in_prev_cap_1 = in_prev_cap_s[1];
 
    /* 
    =================================================================================

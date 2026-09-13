@@ -89,7 +89,9 @@
 #define PRISM_SH_HOST           0x14    /* host_in[1:0] */
 #define PRISM_SH_TOGGLE         0x15    /* byte write: toggle host_in[0], clear IRQ */
 #define PRISM_SH_FLAGS          0x18    /* RO datapath flags: [10] crc_ok [9] fifo_full [8] fifo_empty ... */
-#define PRISM_SH_CFG1           0x1c    /* [19:16] FIFO almost-empty level, [23:20] almost-full level */
+#define PRISM_SH_CFG1           0x1c    /* [15:0] in_prev sources (4 x input number), [19:16] FIFO
+                                           almost-empty level, [23:20] almost-full level, [31:24] FIFO
+                                           flag selects for inputs 20 / 21 / 26 / 27 (2 bits each) */
 #define PRISM_SH_FIFO           0x20    /* byte: write pushes (TX mode), read pops (RX mode) */
 #define PRISM_SH_FIFO_STATUS    0x24    /* see PRISM_FIFO_*; any write flushes */
 #define PRISM_SH_CRC_POLY       0x28

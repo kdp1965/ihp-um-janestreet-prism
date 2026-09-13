@@ -50,15 +50,38 @@
 //     6    OUT_COUNT1_INC_DEC  7  OUT_COUNT1_CLEAR_LOAD 8  OUT_SHIFT
 //     9    OUT_COUNT2_INC     10  OUT_COUNT2_DEC       11  OUT_COUNT2_CLEAR
 //     12   OUT_CRC_CLEAR      13  OUT_CRC_UPDATE       14  OUT_HOST_INTERRUPT
-//     15   OUT_SEMA_CLEAR     16  OUT_COMM_LOAD        17  OUT_LOAD_CRC (selected shifter <= CRC)
+//     15   OUT_SEMA_CLEAR (fractured) / OUT_FIFO_PUSH_POP (unfractured, shard 0: which FIFO bit 5 strobes)
+//     16   OUT_COMM_LOAD      17  OUT_LOAD_CRC (selected shifter <= CRC)
 //     19   OUT_SEMA_SET
+//
+// Unfractured, shard 0 owns both FIFOs: A = its own, B = shard 1's (still
+// configured and served by the host through the shard 1 window).  Bit 5
+// strobes A when bit 15 is 0 and B when it is 1, each per its own
+// direction (push comm into an RX FIFO, pop a TX FIFO into comm); with the
+// usual A = RX / B = TX arrangement bit 15 is therefore "push (0) / pop
+// (1)", and single-FIFO chromas (bit 15 = 0) behave as before.  Shard 0
+// inputs 28-31 show FIFO B's empty / full / almost-empty / almost-full.
 //
 // Input bits (per shard):
 //     6:0  ui_in[6:0] (sync select)  7 shift_data   9:8 host_in   10 count1_term
 //     11   count2_cmp   13:12 latched_in (or latched outputs)   14 shift_term
-//     15   count2_eq_comm   20 fifo_empty   21 fifo_full   22 crc_ok
-//     23   count1_wrap   24 sema_in   25 other_shard_halt
-//     26   fifo_almost_full   27 fifo_almost_empty
+//     15   count2_eq_comm   19:16 in_prev[3:0] (edge-capture flops, sources in CFG1)
+//     20   FIFO flag slot E (default empty)   21 FIFO flag slot F (default full)
+//     22   crc_ok   23 count1_wrap   24 sema_in   25 other_shard_halt
+//     26   FIFO B flag slot E   27 FIFO B flag slot F (shard 0, unfractured; else 0)
+//     31:28 spare
+//
+// CFG1 (per shard):
+//     3:0 / 7:4 / 11:8 / 15:12  in_prev[0..3] source: PRISM input number of the
+//          edge-capable input the flop follows (0-6 = ui_in pin, 8-9 = host_in);
+//          the flop captures its source when a decision tree reading that
+//          input fires and the jump is executed (core in_prev_cap strobe)
+//     19:16 FIFO almost-empty level   23:20 FIFO almost-full level
+//     25:24 / 27:26  flag select for inputs 20 / 21 (own FIFO)
+//     29:28 / 31:30  flag select for inputs 26 / 27 (FIFO B, shard 0 unfractured)
+//          each slot has a default side (E = empty, F = full): select bit 0
+//          picks the almost- flag of that side, bit 1 swaps to the other side,
+//          so any two of the four flags reach the two inputs (reset = empty, full)
 
 `default_nettype none
 
@@ -118,6 +141,7 @@ module tqvp_prism (
     localparam  OUT_CRC_UPDATE        = 13;
     localparam  OUT_HOST_INTERRUPT    = 14;
     localparam  OUT_SEMA_CLEAR        = 15;
+    localparam  OUT_FIFO_PUSH_POP     = 15;     // same bit, unfractured meaning
     localparam  OUT_COMM_LOAD         = 16;
     localparam  OUT_LOAD_CRC          = 17;
     localparam  OUT_SEMA_SET          = 19;
@@ -174,6 +198,7 @@ module tqvp_prism (
     wire [PRISM_INPUTS-1:0]   in_data_0, in_data_1;
     wire [OUTPUTS-1:0]        out_data_0, out_data_1;
     wire [PRISM_COND_OUT-1:0] cond_out_0, cond_out_1;
+    wire                      fractured;         // cfg_fractured, static at run time
     wire [1:0]                halt;           // per-shard halt, incl. the conditional-break cycle
     wire                      halt_either;    // unused: per-shard halts are used instead
 
@@ -187,6 +212,22 @@ module tqvp_prism (
     wire [32*SHARDS-1:0] cfg1_v;
     wire [32*SHARDS-1:0] fifo_st_v;
     wire [8*SHARDS-1:0]  fifo_head_v;
+    wire [8*SHARDS-1:0]  comm_v;            // comm register per shard (FIFO push data)
+    wire                 fifo_op_to_b;      // unfractured: shard 0's strobe aimed at FIFO B
+    localparam           IN_NUM_BITS = 5;   // PRISM input number width
+    wire [4*IN_NUM_BITS*SHARDS-1:0] in_prev_num_v; // per shard: 4 source input numbers
+    wire [4*SHARDS-1:0]  in_prev_cap_v;     // per shard: capture strobes from the core
+
+    // FIFO flag input slot: a default side (0 = empty side, 1 = full side);
+    // select bit 0 picks the almost- flag, bit 1 swaps to the other side
+    function fifo_flag;
+        input       full_side;
+        input [1:0] sel;
+        input       empty, full, ae, af;
+        begin
+            fifo_flag = (full_side ^ sel[1]) ? (sel[0] ? af : full) : (sel[0] ? ae : empty);
+        end
+    endfunction
     wire [32*SHARDS-1:0] crc_poly_v;
     wire [32*SHARDS-1:0] crc_v;
     wire [32*SHARDS-1:0] crc_exp_v;
@@ -241,6 +282,7 @@ module tqvp_prism (
         .cond_out           ( cond_out_0        ),
         .out_data_1         ( out_data_1        ),
         .cond_out_1         ( cond_out_1        ),
+        .fractured_out      ( fractured         ),
 `ifndef SYNTH_FPGA
         .latch_data         ( latch_data        ),
         .latch_wr           ( latch_wr          ),
@@ -251,6 +293,10 @@ module tqvp_prism (
         .debug_rdata        ( prism_read_data   ),
         .debug_halt_either  ( halt_either       ),
         .debug_halt_shard   ( halt              ),
+        .in_prev_src        ( in_prev_num_v[0 +: 4*IN_NUM_BITS]           ),
+        .in_prev_src_1      ( in_prev_num_v[4*IN_NUM_BITS +: 4*IN_NUM_BITS] ),
+        .in_prev_cap        ( in_prev_cap_v[3:0]                          ),
+        .in_prev_cap_1      ( in_prev_cap_v[7:4]                          ),
         .sit_addr_a         ( sit_addr_a        ),
         .sit_addr_b         ( sit_addr_b        ),
         .stew_a             ( stew_a            ),
@@ -300,7 +346,7 @@ module tqvp_prism (
             wire  [1:0]               sync_sel = cfg0[CFG_IN_SYNC_SEL +: 2];
             wire [PRISM_INPUTS-1:0]   in_s;
             wire  [3:0]               pin_out = out_s[3:0];
-            wire                      sema_clr = exec & out_s[OUT_SEMA_CLEAR];
+            wire                      sema_clr = exec & out_s[OUT_SEMA_CLEAR] & fractured;
             wire                      shift_in_bit = pin_in[{1'b0, cfg0[1:0]}];
             // FIFO / CRC
             wire [31:0]               cfg1;
@@ -308,7 +354,13 @@ module tqvp_prism (
             wire [31:0]               crc_exp;
             wire                      cfg1_en, crc_poly_en, crc_exp_en;
             wire                      fifo_dir = cfg0[CFG_FIFO_DIR];
-            wire                      fifo_op  = exec & out_s[OUT_FIFO_WR_RD];
+            // Unfractured, shard 0's OUT_FIFO_WR_RD strobes FIFO A (own,
+            // OUT_FIFO_PUSH_POP = 0) or FIFO B (shard 1's, = 1), each per
+            // its own direction.
+            wire                      fifo_dir_b = cfg0_v[32*(SHARDS-1) + CFG_FIFO_DIR];
+            wire                      sel_b    = (s == 0) && !fractured && out_s[OUT_FIFO_PUSH_POP];
+            wire                      fifo_op  = (exec & out_s[OUT_FIFO_WR_RD] & !sel_b) |
+                                                 ((s == SHARDS-1) ? fifo_op_to_b : 1'b0);
             wire                      fifo_rd  = (data_read_n != 2'b11) && win && (shard_off[6:2] == SH_FIFO[6:2]);
             wire                      fifo_wr  = prism_wr && win && shard_off == SH_FIFO;
             wire                      fifo_flush = prism_wr && win && shard_off == SH_FIFO_ST;
@@ -317,6 +369,22 @@ module tqvp_prism (
             wire                      fifo_empty, fifo_full, fifo_ae, fifo_af;
             wire [31:0]               crc_value, crc_out;
             wire                      crc_ok;
+            // in_prev edge-capture flops: CFG1[4i+3:4i] = source input number
+            reg   [3:0]               in_prev;
+            wire  [3:0]               in_prev_src_val;
+            wire  [3:0]               in_prev_cap = in_prev_cap_v[4*s +: 4];
+            genvar ip;
+            for (ip = 0; ip < 4; ip = ip + 1)
+            begin : IN_PREV_SRC
+                wire [3:0] sel = cfg1[4*ip +: 4];
+                assign in_prev_src_val[ip] = sel < 4'd7  ? pin_in[sel[2:0]] :
+                                             sel == 4'd8 ? host_in[0]       :
+                                             sel == 4'd9 ? host_in[1]       : 1'b0;
+                assign in_prev_num_v[IN_NUM_BITS*(4*s+ip) +: IN_NUM_BITS] = {1'b0, sel};
+            end
+            wire                      pop_dir  = sel_b ? fifo_dir_b : fifo_dir;          // direction of the FIFO bit 5 strobes
+            wire  [7:0]               pop_head = sel_b ? fifo_head_v[8*(SHARDS-1) +: 8] : fifo_head;
+            wire  [7:0]               push_src = (s == SHARDS-1 && !fractured) ? comm_v[7:0] : comm;
 
             // halt_s covers the debugger halt and the cycle a conditional
             // breakpoint fires, so that cycle's outputs never reach the datapath
@@ -340,8 +408,8 @@ module tqvp_prism (
                 .o_count2_dec     ( out_s[OUT_COUNT2_DEC]              ),
                 .o_count2_clear   ( out_s[OUT_COUNT2_CLEAR]            ),
                 .o_comm_load      ( out_s[OUT_COMM_LOAD]               ),
-                .o_fifo_pop       ( out_s[OUT_FIFO_WR_RD] & fifo_dir   ),
-                .fifo_data        ( fifo_head                          ),
+                .o_fifo_pop       ( out_s[OUT_FIFO_WR_RD] & pop_dir    ),
+                .fifo_data        ( pop_head                           ),
                 .o_load_crc       ( out_s[OUT_LOAD_CRC]                ),
                 .crc_data         ( crc_out                            ),
                 .shift_in         ( shift_in_bit                       ),
@@ -376,7 +444,7 @@ module tqvp_prism (
                 .rst_n        ( rst_n                            ),
                 .flush        ( fifo_flush                       ),
                 .push         ( fifo_dir ? fifo_wr : fifo_op     ),
-                .push_data    ( fifo_dir ? data_in[7:0] : comm   ),
+                .push_data    ( fifo_dir ? data_in[7:0] : push_src ),
                 .pop          ( fifo_dir ? fifo_op : fifo_rd     ),
                 .ae_level     ( cfg1[16 +: FIFO_AW]              ),
                 .af_level     ( cfg1[20 +: FIFO_AW]              ),
@@ -420,17 +488,20 @@ module tqvp_prism (
             assign in_s[13:12] = cfg0[CFG_LATCH_IN_OUT] ? {latched_out[6], latched_out[1]} : latched_in;
             assign in_s[14]    = shift_term;
             assign in_s[15]    = count2_eq_comm;
-            assign in_s[19:16] = 4'h0;              // in_prev[3:2], spare
-            assign in_s[20]    = fifo_empty;
-            assign in_s[21]    = fifo_full;
+            assign in_s[19:16] = in_prev;
+            assign in_s[20]    = fifo_flag(1'b0, cfg1[25:24], fifo_empty, fifo_full, fifo_ae, fifo_af);
+            assign in_s[21]    = fifo_flag(1'b1, cfg1[27:26], fifo_empty, fifo_full, fifo_ae, fifo_af);
             assign in_s[22]    = crc_ok;
             assign in_s[23]    = count1_wrap;
             assign in_s[24]    = sema;
             assign in_s[25]    = halt_r_v[1-s];     // other shard halted (registered: the live
                                                     // halt includes the conditional break, which
                                                     // depends on this shard's inputs)
-            assign in_s[26]    = fifo_af;
-            assign in_s[27]    = fifo_ae;
+            // FIFO B's flags for shard 0 while it owns both FIFOs, same two-slot select
+            wire [3:0]                fifo_b_fl = fifo_st_v[32*(SHARDS-1) +: 4];   // {af, ae, full, empty}
+            wire                      own_b     = (s == 0) && !fractured;
+            assign in_s[26]    = own_b & fifo_flag(1'b0, cfg1[29:28], fifo_b_fl[0], fifo_b_fl[1], fifo_b_fl[2], fifo_b_fl[3]);
+            assign in_s[27]    = own_b & fifo_flag(1'b1, cfg1[31:30], fifo_b_fl[0], fifo_b_fl[1], fifo_b_fl[2], fifo_b_fl[3]);
             assign in_s[31:28] = 4'h0;
 
             // Output pins: uo_out[k+1] source select PINMUX[3k+2:3k]
@@ -465,6 +536,7 @@ module tqvp_prism (
                     compare     <= 8'h0;
                     sema        <= 1'b0;
                     latched_in  <= 2'h0;
+                    in_prev     <= 4'h0;
                 end
                 else
                 begin
@@ -510,6 +582,12 @@ module tqvp_prism (
                         latched_in <= 2'h0;
                     else if (exec && cfg0[CFG_LATCH_EN] && out_s[OUT_LATCH])
                         latched_in <= {shift_data, cond_s[0]};
+
+                    // in_prev: capture the selected source on the core's strobe
+                    if (!prism_enable)
+                        in_prev <= 4'h0;
+                    else
+                        in_prev <= (in_prev & ~in_prev_cap) | (in_prev_src_val & in_prev_cap);
                 end
             end
 
@@ -616,6 +694,11 @@ module tqvp_prism (
             assign cfg1_v    [32*s +: 32] = cfg1;
             assign fifo_st_v [32*s +: 32] = {19'h0, fifo_count, 4'h0, fifo_af, fifo_ae, fifo_full, fifo_empty};
             assign fifo_head_v[8*s +: 8]  = fifo_head;
+            assign comm_v     [8*s +: 8]  = comm;
+            if (s == 0)
+            begin : XOP
+                assign fifo_op_to_b = exec & out_s[OUT_FIFO_WR_RD] & sel_b;
+            end
             assign crc_poly_v[32*s +: 32] = crc_poly;
             assign crc_v     [32*s +: 32] = crc_value;
             assign crc_exp_v [32*s +: 32] = crc_exp;

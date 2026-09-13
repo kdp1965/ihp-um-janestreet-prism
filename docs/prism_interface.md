@@ -30,10 +30,10 @@ From `changes.md` item 12, with the spares filled in as suggestions.
 | 12 | OUT_CRC_CLEAR | reset CRC to init value |
 | 13 | OUT_CRC_UPDATE | feed the shifter's current bit (or byte) into the CRC |
 | 14 | OUT_HOST_INTERRUPT | set the shard's sticky interrupt flag once per assertion (edge-detected in the peripheral, not re-armed every clock the state persists); two interrupt lines to the host, one per shard |
-| 15 | OUT_SEMA_CLEAR | clear the semaphore the other shard set for us; setting the semaphore towards the other shard rides on this shard's OUT_SEMA_SET (see below) |
+| 15 | OUT_SEMA_CLEAR / OUT_FIFO_PUSH_POP | fractured: clear the semaphore the other shard set for us (setting it towards the other shard rides on OUT_SEMA_SET).  Unfractured (shard 0): bit 5 strobes FIFO A (0) or FIFO B (1), i.e. push / pop with A = RX, B = TX; see 4b |
 | 16 | OUT_MANCHESTER_EN | suggestion: enable the Manchester / NRZI encoder-decoder block if added |
 | 17 | OUT_LOAD_CRC | load the selected shifter (comm or count1) from the CRC value to transmit the checksum (Phase 4; the third-counter idea moved to a later spare) |
-| 18 | OUT_FIFO_SEL | suggestion: select RX/TX FIFO for bit 5 when both exist |
+| 18 | spare | (the FIFO select went to bit 15, which is free when unfractured) |
 | 19 | OUT_SEMA_SET | set the sticky semaphore seen by the other shard (set/clear same-cycle priority per shard config bit) |
 | 20 | spare | |
 
@@ -53,19 +53,18 @@ features take 16 and up.
 | 8-9 | host_in[1:0] | host handshake bits |
 | 10 | count1_term | count1 == 0 counting down; count1 == preload (or natural roll-over) counting up (item 3) |
 | 11 | count2_cmp | count2 >= count2_compare |
-| 12-13 | in_prev[1:0] | edge-capture flops (replace latched_in): latched copy of whichever latchable input (ui_in, host_in) the decision tree is decoding; a LUT3 can only compare one edge, so one in_prev per tree is the natural count.  Still `latched_in` = {shift_data, cond_out[0]} captured by OUT_LATCH (the SPI slave and encoder chromas rely on it); the source selects come with CFG1 |
+| 12-13 | latched_in[1:0] | {shift_data, cond_out[0]} captured by OUT_LATCH (the SPI slave and encoder chromas rely on it), or the latched outputs with CFG0[7] |
 | 14 | shift_term | shift count reached the configured length (with the "load sets count to 1" mode, items 4/5) |
 | 15 | count2_eq_comm | count2 == comm_data |
-| 16-17 | in_prev[3:2] | two more capture flops if a shard needs them (config picks the pins) |
-| 18-19 | spare | |
-| 20 | fifo_empty | shard FIFO |
-| 21 | fifo_full | shard FIFO |
+| 16-19 | in_prev[3:0] | edge-capture flops, one source each (ui_in pin or host_in bit, CFG1[15:0]); captured when a decision tree reading the source fires and the jump executes, see 4g |
+| 20 | fifo flag slot E | own FIFO: empty by default; CFG1[25:24] selects almost-empty / full / almost-full |
+| 21 | fifo flag slot F | own FIFO: full by default; CFG1[27:26] selects almost-full / empty / almost-empty |
 | 22 | crc_ok | CRC residue equals the expected / magic value |
 | 23 | count1_wrap | count1 rolled over (count-up natural mode) |
 | 24 | sema_in | sticky semaphore set by the other shard's OUT_SEMA_SET, cleared by this shard's OUT_SEMA_CLEAR (same-cycle winner = CFG0[24]); implemented Phase 2 |
 | 25 | other_shard_halt | the other shard is halted (debugger); implemented Phase 2 |
-| 26-27 | fifo_almost_full / fifo_almost_empty | suggestion, programmable threshold |
-| 28-31 | spare | Manchester decoder bit / clock, extra compare |
+| 26-27 | FIFO B flag slots E / F | shard 0 unfractured: two of shard 1's FIFO flags, selects CFG1[29:28] / [31:30]; 0 otherwise |
+| 28-31 | spare | |
 
 Note on the trees: tree 0 reads muxes 0-2, tree 1 reads 3-5, cond 0 reads
 muxes 1 and 4, cond 1 reads 3 and 5 (RTL wiring, matched by the cfg).
@@ -101,8 +100,24 @@ CFG0 (existing layout, extended):
 | 23 | fifo_dir | OUT_FIFO_WR_RD pushes (TX) or pops (RX) |
 | 31:25 | spare | |
 
-CFG1: four 3-bit `in_prev` pin selects (bits 11:0), FIFO almost-full /
-almost-empty thresholds (bits 23:16), rest spare.
+CFG1 (as built):
+
+| bits | name | notes |
+|---|---|---|
+| 3:0 | in_prev0_src | PRISM input number the flop follows: 0-6 = ui_in pin (after the sync select), 8 = host_in[0], 9 = host_in[1]; anything else reads 0 |
+| 7:4 | in_prev1_src | |
+| 11:8 | in_prev2_src | |
+| 15:12 | in_prev3_src | |
+| 19:16 | fifo_ae_level | almost-empty when count <= level |
+| 23:20 | fifo_af_level | almost-full when count >= 16 - level |
+| 25:24 | fifo_flag20 | input 20 (empty side): bit 0 = almost-, bit 1 = other side |
+| 27:26 | fifo_flag21 | input 21 (full side): bit 0 = almost-, bit 1 = other side |
+| 29:28 | fifo_b_flag26 | input 26, FIFO B (shard 0 unfractured), empty side |
+| 31:30 | fifo_b_flag27 | input 27, FIFO B, full side |
+
+The flag slots let any two of a FIFO's four flags reach the two inputs
+(a pusher wants full / almost-full, a popper empty / almost-empty) while
+the reset value keeps the original meaning, empty on 20 and full on 21.
 
 Common (not per shard): enable, fractured, interrupt enables/status, output
 masks for fractured mode, debug controls (already in the core).
@@ -223,9 +238,25 @@ when loaded into a shifter).  +0x2C reads the value, a write presets it;
 width.  New output 17 OUT_LOAD_CRC loads the selected shifter (comm or
 count1, per `shift_wide`) from the CRC so the checksum can be sent.
 
+Two FIFOs for shard 0 (unfractured, 2026-09-13): shard 1's FIFO and its
+OUT_SEMA_CLEAR output are idle while unfractured, so shard 0 owns both
+FIFOs: A = its own, B = shard 1's, which the host still configures
+(direction CFG0[23], levels CFG1) and serves (+0x20 / +0x24) through the
+shard 1 window at 0x180.  OUT_FIFO_WR_RD strobes A when output 15, now
+OUT_FIFO_PUSH_POP, is 0 and B when it is 1, each per its own direction
+(push comm into an RX FIFO, pop a TX FIFO into comm).  With the usual
+arrangement, A = RX and B = TX, bit 15 reads as push (0) / pop (1), and a
+single-FIFO chroma (bit 15 never set) behaves exactly as before whatever
+the host does with B.  A pop loads comm from the selected FIFO's head.
+Shard 0 inputs 26 and 27 are two of FIFO B's flags, chosen by CFG1[31:28]
+the same way inputs 20 and 21 choose the own FIFO's (section 3).
+Fractured, everything is per shard as before and bit 15 is the semaphore
+clear again.  `chroma_fifo_loop` (unit test) moves bytes from B (TX) to A
+(RX) and counts them in count2.
+
 Chromas: `chroma_spislave` pushes received bytes into the RX FIFO and runs
-a CRC8 over the received bits; `chroma_uart_tx` (new) is an 8N1
-transmitter fed from the TX FIFO that appends the CRC8 on request.
+a CRC8 over the received bits; `chroma_uart_tx` is an 8N1 transmitter fed
+from the TX FIFO that appends the CRC8 on request.
 
 ## 4c. Host software (item 11, Phase 5)
 
@@ -326,6 +357,33 @@ With the bypass clear a shift of macro i copies macro i-1's addressed row
 into row 0 of macro i, which `cfgmem_verify` uses to walk both chains.
 Only the chain input word of each bank leaves the block, so the 2x2 macro
 blocks need no lo-to-hi data wiring.
+
+## 4g. in_prev edge capture (decision 2, 2026-09-13)
+
+Each shard has four edge-capture flops on inputs 16-19.  CFG1[4i+3:4i]
+names the edge-capable input flop i follows: a ui_in pin (0-6, after the
+shard's sync select) or a host_in bit (8, 9).  A flop captures its source
+in exactly the cycle a decision tree whose muxes read that source fires
+and the transition is executed: tree 0 when it matches, tree 1 when it
+matches and tree 0 does not (the else-if is actually taken).  Nothing is
+captured while the shard is halted or in the cycle a conditional
+breakpoint fires, and a single step captures on that one executed cycle,
+so the debugger sees the same sequence as free running.  Transitions
+taken by the auto-loop (`inc` / `loop_si`) do not capture, since no tree
+read the input.
+
+The idiom: `if (pin ^ in_prev0) -> next` fires once per transition of the
+pin, because the jump re-captures in_prev0 to the pin's new value.  Two
+edge-capable inputs can be watched from one state through tree 0 and tree
+1 (`chroma_edge` in the unit test counts ui_in[2] transitions in count2 and
+host_in[0] toggles in count1 this way).  A flop whose source is not read by
+the firing tree keeps its value, so several states can share one edge
+condition without re-arming each other.  Program the CFG1 sources before
+enabling the PRISM: a flop only changes on a capture, so a source changed
+while running leaves the old value behind until the next firing tree that
+reads the new source (and with the reset source 0, the first jump of any
+tree whose spare mux selects input 0 loads every flop with ui_in[0]).
+OUT_LATCH and `latched_in` (inputs 12-13) are unchanged.
 
 ## 5. FIFO storage, item 9: SRAM spike result
 

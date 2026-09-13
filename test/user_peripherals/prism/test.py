@@ -7,6 +7,8 @@ from user_peripherals.prism.chroma_spislave import *
 from user_peripherals.prism.chroma_encoder import *
 from user_peripherals.prism.chroma_gpio24 import *
 from user_peripherals.prism.chroma_uart_tx import *
+from user_peripherals.prism.chroma_fifo_loop import *
+from user_peripherals.prism.chroma_edge import *
 from user_peripherals.prism.encoder import *
 
 from tqv import TinyQV
@@ -34,7 +36,8 @@ REG_COMM    = 0x112
 REG_HOST    = 0x114       # host_in[1:0]
 REG_TOGGLE  = 0x115       # byte write: toggle host_in[0], clear interrupt
 REG_FLAGS   = 0x118
-REG_CFG1    = 0x11C
+REG_CFG1    = 0x11C       # [15:0] in_prev sources, [23:16] FIFO levels, [31:24] FIFO flag selects
+REG_IN_DATA = 0x03C       # shard 0 input vector (live)
 REG_FIFO    = 0x120       # byte: write pushes (TX mode), read pops (RX mode)
 REG_FIFO_ST = 0x124       # {count[12:8], af[3], ae[2], full[1], empty[0]}; write flushes
 REG_CRC_POLY= 0x128
@@ -259,6 +262,128 @@ async def test_project(dut):
         assert await tqv.read_word_reg(0) & IRQ0_MASK != 0
         dbg_status = await tqv.read_word_reg(REG_DBG_STATUS)
         assert (dbg_status & 0x1f) == 9                                        # WAIT_ACK
+
+    async def test_chroma_fifo_loop():
+        ''' Unfractured: shard 0 owns both FIFOs.  A (its own) is RX, B (shard 1's)
+            is TX; the chroma moves every byte the host pushes into B over to A,
+            OUT_FIFO_PUSH_POP picking the FIFO that OUT_FIFO_WR_RD strobes. '''
+        nonlocal chroma
+
+        chroma = ''                     # stop the UART monitor before TXD drops
+        await tqv.write_word_reg(0x00, 0x00000000)
+        await load_chroma(chroma_fifo_loop, chroma_fifo_loop_ctrlReg, chroma_fifo_loop_pinmuxReg)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)          # FIFO B: host writes
+        assert await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 0x1 == 1
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 0x1 == 1
+
+        data = [0x5A, 0x01, 0xFE, 0x80, 0x7F, 0x33]
+        for b in data:
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        for i in range(100):
+            await RisingEdge(dut.clk)
+        assert await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 0x1 == 1      # B drained ...
+        st = await tqv.read_word_reg(REG_FIFO_ST)
+        assert (st >> 8) & 0x1F == len(data), f"{st:#x}"                      # ... into A
+        for b in data:
+            assert await tqv.read_byte_reg(REG_FIFO) == b
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 0x1 == 1
+        assert await tqv.read_byte_reg(REG_COUNT2) == len(data)
+
+        # More than A can hold: the FSM stops on fifo_a_full and resumes as the
+        # host drains A; the bytes arrive in order
+        dut._log.info(f"    FIFO A full back-pressure")
+        for b in range(20):
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, 0xC0 + b)
+        for i in range(200):
+            await RisingEdge(dut.clk)
+        assert (await tqv.read_word_reg(REG_FIFO_ST) >> 8) & 0x1F == 16
+        assert (await tqv.read_word_reg(REG_FIFO_ST + SHARD1) >> 8) & 0x1F == 4
+        for b in range(20):
+            for i in range(20):
+                await RisingEdge(dut.clk)
+            assert await tqv.read_byte_reg(REG_FIFO) == 0xC0 + b
+        assert await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 0x1 == 1
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 0x1 == 1
+        assert await tqv.read_byte_reg(REG_COUNT2) == len(data) + 20
+
+        await tqv.write_word_reg(0x00, 0x00000000)
+
+    async def test_chroma_edge():
+        ''' in_prev edge capture: in_prev[0] follows ui_in[2] (input 2) and
+            in_prev[1] follows host_in[0] (input 8), sources set in CFG1.  The
+            chroma counts pin transitions in count2 and host toggles in count1.
+            A flop captures its source only when a decision tree reading that
+            source fires and the jump executes, so the debugger halt / step must
+            be honoured. '''
+        nonlocal chroma
+
+        chroma = ''
+        await tqv.write_word_reg(0x00, 0x00000000)
+        dut.ui_in[2].value = 0
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        # Sources go in before the chroma runs: a flop only changes on a capture,
+        # so a source changed afterwards leaves the old value behind (with the
+        # reset source 0 and CSB high, tree 1's first jump would have set every
+        # flop to 1 and the pin condition would fire until the next capture)
+        await tqv.write_word_reg(REG_CFG1, (2 << 0) | (8 << 4))
+        await load_chroma(chroma_edge, chroma_edge_ctrlReg, chroma_edge_pinmuxReg)
+        for i in range(20):
+            await RisingEdge(dut.clk)
+        assert await tqv.read_byte_reg(REG_COUNT2) == 0
+        assert await tqv.read_word_reg(REG_COUNT1) == 0
+
+        n = 0
+        for gap in (8, 5, 30, 4, 12, 9, 6, 40, 4, 7):
+            dut.ui_in[2].value = 1 - int(dut.ui_in[2].value)
+            n += 1
+            for i in range(gap):
+                await RisingEdge(dut.clk)
+        for i in range(30):
+            await RisingEdge(dut.clk)
+        assert await tqv.read_byte_reg(REG_COUNT2) == n
+        assert await tqv.read_word_reg(REG_COUNT1) == 0
+
+        dut._log.info(f"    host_in[0] toggles through tree 1")
+        for m in range(5):
+            await tqv.write_byte_reg(REG_TOGGLE, 0x00)
+        for i in range(30):
+            await RisingEdge(dut.clk)
+        assert await tqv.read_word_reg(REG_COUNT1) == 5
+        assert await tqv.read_byte_reg(REG_COUNT2) == n
+
+        dut._log.info(f"    debugger halt / step")
+        await tqv.write_word_reg(REG_DBG_CTRL[0], DBG_HALT_REQ)
+        for i in range(10):
+            await RisingEdge(dut.clk)
+        assert (await tqv.read_word_reg(REG_DBG_STATUS) & 0x1f) == 0            # WAIT
+        dut.ui_in[2].value = 1 - int(dut.ui_in[2].value)                       # edge while halted
+        for i in range(30):
+            await RisingEdge(dut.clk)
+        assert await tqv.read_byte_reg(REG_COUNT2) == n                        # not consumed
+        await tqv.write_word_reg(REG_DBG_CTRL[0], DBG_HALT_REQ | DBG_STEP)     # WAIT -> CNT_PIN, captures
+        await tqv.write_word_reg(REG_DBG_CTRL[0], DBG_HALT_REQ)
+        assert (await tqv.read_word_reg(REG_DBG_STATUS) & 0x1f) == 1
+        assert await tqv.read_byte_reg(REG_COUNT2) == n
+        await tqv.write_word_reg(REG_DBG_CTRL[0], DBG_HALT_REQ | DBG_STEP)     # CNT_PIN -> WAIT, counts
+        await tqv.write_word_reg(REG_DBG_CTRL[0], DBG_HALT_REQ)
+        assert (await tqv.read_word_reg(REG_DBG_STATUS) & 0x1f) == 0
+        assert await tqv.read_byte_reg(REG_COUNT2) == n + 1
+        await tqv.write_word_reg(REG_DBG_CTRL[0], DBG_HALT_REQ | DBG_STEP)     # nothing pending: stays
+        await tqv.write_word_reg(REG_DBG_CTRL[0], DBG_HALT_REQ)
+        assert (await tqv.read_word_reg(REG_DBG_STATUS) & 0x1f) == 0
+        assert await tqv.read_byte_reg(REG_COUNT2) == n + 1
+        await tqv.write_word_reg(REG_DBG_CTRL[0], 0)                           # resume
+        for i in range(20):
+            await RisingEdge(dut.clk)
+        assert await tqv.read_byte_reg(REG_COUNT2) == n + 1
+        dut.ui_in[2].value = 1 - int(dut.ui_in[2].value)
+        for i in range(30):
+            await RisingEdge(dut.clk)
+        assert await tqv.read_byte_reg(REG_COUNT2) == n + 2
+        assert await tqv.read_word_reg(REG_COUNT1) == 5
+        dut.ui_in[2].value = 0
+        await tqv.write_word_reg(REG_CFG1, 0)
+        await tqv.write_word_reg(0x00, 0x00000000)
 
         # Acknowledge: the FSM clears the CRC and idles
         await tqv.write_word_reg(REG_HOST, 0)
@@ -834,6 +959,35 @@ async def test_project(dut):
     # the other shard's FIFO must be untouched by the flush above
     assert await tqv.read_word_reg(REG_FIFO_ST) & 0x1F01 == 0x0001
 
+    # FIFO flag input slots: inputs 20 / 21 show two of the own FIFO's four flags
+    # and, for shard 0 unfractured, 26 / 27 two of FIFO B's.  Slot select: bit 0
+    # = almost- flag, bit 1 = the other side (20 / 26 default empty, 21 / 27 full)
+    dut._log.info("Testing FIFO flag input selects")
+    await tqv.write_word_reg(REG_FRAC_CFG, 0)
+    await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)
+    await tqv.write_word_reg(REG_CFG1 + SHARD1, (4 << 16) | (13 << 20))       # B: ae = count <= 4, af = count >= 3
+    for b in range(3):
+        await tqv.write_byte_reg(REG_FIFO + SHARD1, b)                        # B holds 3: ae = af = 1
+    async def flag_slots():
+        v = await tqv.read_word_reg(REG_IN_DATA)
+        return ((v >> 20) & 1, (v >> 21) & 1, (v >> 26) & 1, (v >> 27) & 1)
+    def sel4(x): return (x << 24) | (x << 26) | (x << 28) | (x << 30)
+    await tqv.write_word_reg(REG_CFG1, sel4(0))
+    assert await flag_slots() == (1, 0, 0, 0)          # A empty / A full / B empty / B full
+    await tqv.write_word_reg(REG_CFG1, sel4(2))
+    assert await flag_slots() == (0, 1, 0, 0)          # A full / A empty / B full / B empty
+    await tqv.write_word_reg(REG_CFG1, sel4(1))
+    assert await flag_slots() == (1, 0, 1, 1)          # A ae / A af / B ae / B af
+    await tqv.write_word_reg(REG_CFG1, sel4(3))
+    assert await flag_slots() == (0, 1, 1, 1)          # A af / A ae / B af / B ae
+    await tqv.write_word_reg(REG_FRAC_CFG, 1)
+    assert await flag_slots() == (0, 1, 0, 0)          # fractured: B's slots read 0
+    await tqv.write_word_reg(REG_FRAC_CFG, 0)
+    await tqv.write_word_reg(REG_CFG1, 0)
+    await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+    await tqv.write_word_reg(REG_CFG1 + SHARD1, 0)
+    await tqv.write_word_reg(REG_CFG0 + SHARD1, 0)
+
     # State information integrity: shift a pattern through all four lo CFGMEM
     # macros that make up the 128-bit STEW and read it back (every macro must
     # hold defined data before the PRISM is enabled, or its outputs go X)
@@ -913,6 +1067,12 @@ async def test_project(dut):
 
     dut._log.info("Testing uart_tx Chroma")
     await test_chroma_uart_tx()
+
+    dut._log.info("Testing fifo_loop Chroma (shard 0 owns both FIFOs)")
+    await test_chroma_fifo_loop()
+
+    dut._log.info("Testing edge Chroma (in_prev capture)")
+    await test_chroma_edge()
 
     dut._log.info("Testing fractured PRISM (encoder + ws2812)")
     await test_fractured(clocks_per_phase, encoder0)
