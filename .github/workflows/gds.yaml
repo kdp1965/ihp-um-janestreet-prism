@@ -14,7 +14,9 @@ jobs:
           submodules: recursive
 
       - name: Build GDS
-        uses: TinyTapeout/tt-gds-action@ihp-cmos5l
+        # Fork of TinyTapeout/tt-gds-action@ihp-cmos5l with the PDK install
+        # fixed for the IHP-Open-PDK dev branch that now vendors ihp-sg13cmos5l
+        uses: kdp1965/tt-gds-action@ihp-cmos5l-fix
         with:
           pdk: ihp-sg13cmos5l
           # htfab/tt-support-tools@cmos has no 8x4 template for CMOS5L; this
@@ -42,7 +44,7 @@ jobs:
           submodules: recursive
 
       - name: GL test
-        uses: TinyTapeout/tt-gds-action/gl_test@ihp-cmos5l
+        uses: kdp1965/tt-gds-action/gl_test@ihp-cmos5l-fix
 
   viewer:
     needs: gds
