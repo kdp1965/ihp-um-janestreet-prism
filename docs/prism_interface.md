@@ -31,11 +31,11 @@ From `changes.md` item 12, with the spares filled in as suggestions.
 | 13 | OUT_CRC_UPDATE | feed the shifter's current bit (or byte) into the CRC |
 | 14 | OUT_HOST_INTERRUPT | set the shard's sticky interrupt flag once per assertion (edge-detected in the peripheral, not re-armed every clock the state persists); two interrupt lines to the host, one per shard |
 | 15 | OUT_SEMA_CLEAR / OUT_FIFO_PUSH_POP | fractured: clear the semaphore the other shard set for us (setting it towards the other shard rides on OUT_SEMA_SET).  Unfractured (shard 0): bit 5 strobes FIFO A (0) or FIFO B (1), i.e. push / pop with A = RX, B = TX; see 4b |
-| 16 | OUT_MANCHESTER_EN | suggestion: enable the Manchester / NRZI encoder-decoder block if added |
-| 17 | OUT_LOAD_CRC | load the selected shifter (comm or count1) from the CRC value to transmit the checksum (Phase 4; the third-counter idea moved to a later spare) |
-| 18 | spare | (the FIFO select went to bit 15, which is free when unfractured) |
-| 19 | OUT_SEMA_SET | set the sticky semaphore seen by the other shard (set/clear same-cycle priority per shard config bit) |
-| 20 | spare | |
+| 16 | OUT_COMM_LOAD | load comm from preload[7:0], or from constant K[{out20, out18}] with CFG0[30] (4h) |
+| 17 | OUT_LOAD_CRC | load the selected shifter from the CRC: the wide shifter takes all 32 bits, comm takes one byte per load in wire order and the CRC advances to the next byte (4h) |
+| 18 | OUT_K_SEL0 | constant select bit 0 for OUT_COMM_LOAD when CFG0[30] is set (4h) |
+| 19 | OUT_SEMA_SET / OUT_FLAG2 | fractured: set the sticky semaphore seen by the other shard.  Also the value OUT_LATCH stores in flag2 with CFG0[29] (4h) |
+| 20 | OUT_K_SEL1 | constant select bit 1 (4h) |
 
 Chroma-visible change vs today: OUT_SHIFT moves from 6 to 8 and the count
 controls are renumbered; the four test chromas and `chromas/*.v` need their
@@ -56,7 +56,7 @@ features take 16 and up.
 | 12-13 | latched_in[1:0] | {shift_data, cond_out[0]} captured by OUT_LATCH (the SPI slave and encoder chromas rely on it), or the latched outputs with CFG0[7] |
 | 14 | shift_term | shift count reached the configured length (with the "load sets count to 1" mode, items 4/5) |
 | 15 | count2_eq_comm | count2 == comm_data |
-| 16-19 | in_prev[3:0] | edge-capture flops, one source each (ui_in pin or host_in bit, CFG1[15:0]); captured when a decision tree reading the source fires and the jump executes, see 4g |
+| 16-19 | slots, default in_prev[3:0] | input slots (4h): CFG2 picks in_prev[k], a comm bit, comm == K3 or flag2; default = the edge-capture flops (sources CFG1[15:0], see 4g) |
 | 20 | fifo flag slot E | own FIFO: empty by default; CFG1[25:24] selects almost-empty / full / almost-full |
 | 21 | fifo flag slot F | own FIFO: full by default; CFG1[27:26] selects almost-full / empty / almost-empty |
 | 22 | crc_ok | CRC residue equals the expected / magic value |
@@ -64,7 +64,7 @@ features take 16 and up.
 | 24 | sema_in | sticky semaphore set by the other shard's OUT_SEMA_SET, cleared by this shard's OUT_SEMA_CLEAR (same-cycle winner = CFG0[24]); implemented Phase 2 |
 | 25 | other_shard_halt | the other shard is halted (debugger); implemented Phase 2 |
 | 26-27 | FIFO B flag slots E / F | shard 0 unfractured: two of shard 1's FIFO flags, selects CFG1[29:28] / [31:30]; 0 otherwise |
-| 28-31 | spare | |
+| 28-31 | slots, default 0 | input slots (4h): CFG2[31:16], same menu |
 
 Note on the trees: tree 0 reads muxes 0-2, tree 1 reads 3-5, cond 0 reads
 muxes 1 and 4, cond 1 reads 3 and 5 (RTL wiring, matched by the cfg).
@@ -98,7 +98,13 @@ CFG0 (existing layout, extended):
 | 21:20 | crc_mode | 0 = off, 1 = CRC8, 2 = CRC16, 3 = CRC32 (item 8) |
 | 22 | crc_reflect | bit order into the CRC |
 | 23 | fifo_dir | OUT_FIFO_WR_RD pushes (TX) or pops (RX) |
-| 31:25 | spare | |
+| 25 | crc_init_ones | |
+| 26 | crc_xor_out | |
+| 27 | crc_src | 0 = shifter input bit, 1 = shifter output bit |
+| 28 | shift_in_cond | the shifter shifts in cond_out[0] instead of a pin: an FSM-decoded bit (NRZI, Manchester) or a constant (4h) |
+| 29 | flag_latch | OUT_LATCH stores {cond_out[1], cond_out[0]} in latched_in and output 19 in flag2: three FSM-settable flags (4h) |
+| 30 | comm_load_k | OUT_COMM_LOAD takes constant K[{out20, out18}] from CONST instead of preload[7:0] (4h) |
+| 31 | spare | |
 
 CFG1 (as built):
 
@@ -118,6 +124,17 @@ CFG1 (as built):
 The flag slots let any two of a FIFO's four flags reach the two inputs
 (a pusher wants full / almost-full, a popper empty / almost-empty) while
 the reset value keeps the original meaning, empty on 20 and full on 21.
+
+CFG2 (+0x34, per shard, 4h): eight 4-bit input slot selects, [3:0] ..
+[15:12] for inputs 16-19 and [19:16] .. [31:28] for inputs 28-31.  Codes:
+0 = the slot's default (in_prev[k] for 16-19, 0 for 28-31), 1-4 =
+in_prev[0..3], 5-12 = comm[0..7], 13 = comm == K3, 14 = flag2.  The comm
+bits let the decision trees decode a received byte (a USB PID, a
+command) without a match register per value.
+
+CONST (+0x38, per shard, 4h): four constants K0 [7:0] .. K3 [31:24].
+With CFG0[30] OUT_COMM_LOAD loads comm from K[{out20, out18}] (sync
+words, handshake codes, addresses); K3 is also the comm match value.
 
 Common (not per shard): enable, fractured, interrupt enables/status, output
 masks for fractured mode, debug controls (already in the core).
@@ -236,7 +253,10 @@ it in the same cycle as OUT_SHIFT), CFG0[26] `crc_xor_out` (complement
 when loaded into a shifter).  +0x2C reads the value, a write presets it;
 +0x30 is the expected value; input 22 `crc_ok` = value == expected over the
 width.  New output 17 OUT_LOAD_CRC loads the selected shifter (comm or
-count1, per `shift_wide`) from the CRC so the checksum can be sent.
+count1, per `shift_wide`) from the CRC so the checksum can be sent; through
+comm each load takes the next byte in wire order (low byte first for
+reflected CRCs, high byte first otherwise) and advances the CRC register,
+so CRC16 / CRC32 go out in 2 / 4 loads (4h).
 
 Two FIFOs for shard 0 (unfractured, 2026-09-13): shard 1's FIFO and its
 OUT_SEMA_CLEAR output are idle while unfractured, so shard 0 owns both
@@ -384,6 +404,68 @@ while running leaves the old value behind until the next firing tree that
 reads the new source (and with the reset source 0, the first jump of any
 tree whose spare mux selects input 0 loads every flop with ui_in[0]).
 OUT_LATCH and `latched_in` (inputs 12-13) are unchanged.
+
+## 4h. USB low-speed device chroma: the stretch-goal evaluation (2026-09-14)
+
+`chromas/chroma_usb_ls.v` with the host model `test/user_peripherals/prism/
+usb_model.py` is the first stretch-goal chroma, written to find what the
+core lacks.  It is a 1.5 Mbit/s device on ui_in[4:5] and uo_out[2:4]
+(D+, D-, output enable for external tri-state buffers), 40 clocks per bit
+at the test clock.  It receives SETUP / OUT tokens and DATA packets (NRZI
+decode, bit un-stuffing, CRC16 residual check, payload and CRC pushed to
+FIFO A), answers with ACK, answers IN from the response the CPU queued in
+FIFO B (PID, payload, CRC16) or with NAK, and handles the host's ACK.  The
+test runs a GET_DESCRIPTOR setup, a NAKed IN, a 4-byte IN response and a
+bit-stuffed OUT.  `PRISM_ONLY=usb` runs just this test.
+
+Features added to make it fit (all in the register maps above):
+
+- shifter input from cond_out[0] (CFG0[28]): the FSM computes the NRZI
+  bit (`D- == in_prev1`) in the sampling state and shifts it in;
+- FSM flags: OUT_LATCH stores the two conditional outputs and output 19
+  (CFG0[29]) - the receive / transmit phase lives in them;
+- constant table CONST with OUT_COMM_LOAD select (CFG0[30]): sync 0x80,
+  ACK 0xD2, NAK 0x5A without a state sequence per byte;
+- input slots CFG2: the trees read comm[3:0] to decode the PID and flag2;
+- CRC byte transmit through comm (not used by this chroma, the CPU
+  supplies the response CRC; needed for Ethernet FCS and a full USB TX).
+
+What the chroma does with the datapath: count1 is the half-bit timer
+(two terminal counts per bit so samples land on bit centres), count2 the
+consecutive-ones counter for stuffing (compare = 6), the shifter's own
+count gives byte boundaries, the CRC unit checks CRC16 with the residual
+0xB001, FIFO A receives, FIFO B transmits (the two-FIFO mode of 4b), the
+line level of the transmitter is a J / K pair of states with the level
+also on the conditional outputs so the last bit can be held from flag F0.
+
+Findings, in order of weight:
+
+1. **States: 32 of 32.**  Receive engine 6, dispatch 6, EOP 3, transmit
+   engine 12, hold and EOP 5.  Two things cost the most: every condition
+   beyond two per state costs a state (three-way decisions are split), and
+   the transmit engine is duplicated per line level because outputs are
+   per state.  A third decision tree, or an output word that could depend
+   on a flag, would each save about six states here.
+2. **Not implemented for lack of room:** address match on tokens (the
+   comm == K3 input exists), CRC5 on tokens (the CRC unit has one
+   configuration; a second polynomial / width set selectable by an output
+   is the fix), DATA0 / DATA1 toggle tracking, resynchronisation on edges
+   during a packet (a wait state would need three conditions: timer,
+   edge, SE0; real hardware needs it for the +/-1.5% clock tolerance),
+   the TX CRC16 (the CPU computes it; the CRC byte transmit is there).
+3. **The auto-loop rule shapes wait states:** a state entered by `inc`
+   returns to the inc state when no tree fires, so a wait state must
+   never be an inc target.  Chroma authors need this in the manual.
+4. **A per-shard register table** (VID / PID, descriptors, MAC / IP
+   addresses) with an FSM-stepped index would let the device answer
+   GET_DESCRIPTOR without the CPU; CONST is the 4-byte version of it, and
+   the SRAM is the natural backing for a longer one.
+5. **Counters were enough** for USB: bit timer, stuff counter, shift
+   count.  A third counter was not needed here; Ethernet may still want
+   one for frame bytes unless the SRAM pointer serves.
+6. The input synchroniser delay matters when the FSM reads its own drive
+   back (the hold state first tried that and locked on the old level);
+   flags or state are the right source for a level the FSM set itself.
 
 ## 5. FIFO storage, item 9: SRAM spike result
 

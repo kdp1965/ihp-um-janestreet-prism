@@ -1,4 +1,5 @@
 
+import os
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge, Edge
@@ -9,6 +10,8 @@ from user_peripherals.prism.chroma_gpio24 import *
 from user_peripherals.prism.chroma_uart_tx import *
 from user_peripherals.prism.chroma_fifo_loop import *
 from user_peripherals.prism.chroma_edge import *
+from user_peripherals.prism.chroma_usb_ls import *
+from user_peripherals.prism import usb_model as usb
 from user_peripherals.prism.encoder import *
 
 from tqv import TinyQV
@@ -43,6 +46,9 @@ REG_FIFO_ST = 0x124       # {count[12:8], af[3], ae[2], full[1], empty[0]}; writ
 REG_CRC_POLY= 0x128
 REG_CRC     = 0x12C       # read value, write preset
 REG_CRC_EXP = 0x130
+REG_CFG2    = 0x134       # input slot selects (4 bits each: inputs 16-19, 28-31)
+REG_CONST   = 0x138       # constants K3..K0 (K3 = comm match value)
+PRISM_ONLY  = os.environ.get("PRISM_ONLY", "")   # run a single chroma test (development shortcut)
 CFG_FIFO_DIR_TX = 1 << 23
 
 def crc_bits(bits, poly=0x07, width=8, init=0):
@@ -383,6 +389,70 @@ async def test_project(dut):
         assert await tqv.read_word_reg(REG_COUNT1) == 5
         dut.ui_in[2].value = 0
         await tqv.write_word_reg(REG_CFG1, 0)
+        await tqv.write_word_reg(0x00, 0x00000000)
+
+    async def test_chroma_usb():
+        ''' USB low-speed device: the host model drives D+ / D- on ui_in[4:5]
+            at BIT clocks per bit and reads the device's D+ / D- / OE on
+            uo_out[2:4].  SETUP / OUT data lands in FIFO A (with its CRC16)
+            and is ACKed; IN is answered from FIFO B (PID, payload, CRC16
+            queued by the host) or NAKed when it is empty. '''
+        nonlocal chroma
+        BIT = 40
+        chroma = ''
+        await tqv.write_word_reg(0x00, 0x00000000)
+        host = usb.UsbHost(dut, BIT)                                          # idle J
+        await tqv.write_word_reg(REG_CFG1, (5 << 4) | 4)                      # in_prev1 <- D- (input 5)
+        await tqv.write_word_reg(REG_CFG2, 0xD876500E)                        # in16 flag2, in19 comm0, in28-30 comm1-3, in31 match
+        await tqv.write_word_reg(REG_CONST, (0x00 << 24) | (0x5A << 16) | (0xD2 << 8) | 0x80)
+        await tqv.write_byte_reg(REG_COMPARE, 6)                              # bit stuffing: six ones
+        await tqv.write_word_reg(REG_PRELOAD, BIT // 2 - 1)                   # half-bit timer
+        await tqv.write_word_reg(REG_CRC_POLY, 0xA001)                        # CRC-16/USB, reflected
+        await tqv.write_word_reg(REG_CRC_EXP, 0xB001)                         # its residual
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)          # FIFO B = TX (host writes)
+        await load_chroma(chroma_usb_ls, chroma_usb_ls_ctrlReg, chroma_usb_ls_pinmuxReg)
+        for i in range(4 * BIT):
+            await RisingEdge(dut.clk)
+        assert host.device_lines()[2] == 0                                    # not driving
+
+        dut._log.info(f"    SETUP + DATA0 -> ACK")
+        payload = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x40, 0x00]            # GET_DESCRIPTOR
+        await host.send(usb.token_bits(usb.PID_SETUP, 0, 0))
+        await host.send(usb.data_bits(usb.PID_DATA0, payload))
+        reply = await host.receive()
+        assert reply == [usb.PID_ACK], reply
+        st = await tqv.read_word_reg(REG_FIFO_ST)
+        assert (st >> 8) & 0x1F == len(payload) + 2, f"{st:#x}"
+        got = [await tqv.read_byte_reg(REG_FIFO) for _ in range(len(payload) + 2)]
+        assert got == payload + usb.crc16(payload), [hex(x) for x in got]
+
+        dut._log.info(f"    IN with nothing queued -> NAK")
+        await host.send(usb.token_bits(usb.PID_IN, 0, 0))
+        reply = await host.receive()
+        assert reply == [usb.PID_NAK], reply
+
+        dut._log.info(f"    IN -> DATA1 from FIFO B, then ACK it")
+        resp = [0x12, 0x01, 0x10, 0x01]
+        for b in [usb.PID_DATA1] + resp + usb.crc16(resp):
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        await host.send(usb.token_bits(usb.PID_IN, 0, 0))
+        reply = await host.receive()
+        assert reply == [usb.PID_DATA1] + resp + usb.crc16(resp), [hex(x) for x in (reply or [])]
+        await host.send(usb.handshake_bits(usb.PID_ACK))
+        for i in range(4 * BIT):
+            await RisingEdge(dut.clk)
+        assert await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 1 == 1         # B drained
+
+        dut._log.info(f"    OUT + DATA1 with bit stuffing -> ACK")
+        payload2 = [0xFF, 0xFF, 0x7F, 0x00, 0xFE]
+        await host.send(usb.token_bits(usb.PID_OUT, 0, 0))
+        await host.send(usb.data_bits(usb.PID_DATA1, payload2))
+        reply = await host.receive()
+        assert reply == [usb.PID_ACK], reply
+        got = [await tqv.read_byte_reg(REG_FIFO) for _ in range(len(payload2) + 2)]
+        assert got == payload2 + usb.crc16(payload2), [hex(x) for x in got]
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 1 == 1
+        host.idle()
         await tqv.write_word_reg(0x00, 0x00000000)
 
         # Acknowledge: the FSM clears the CRC and idles
@@ -900,6 +970,13 @@ async def test_project(dut):
     # Reset
     await tqv.reset()
 
+    # PRISM_ONLY=<chroma> runs just that chroma's test (development shortcut)
+    only = PRISM_ONLY
+    if only == "usb":
+        dut._log.info("Testing USB low-speed device Chroma only")
+        await test_chroma_usb()
+        return
+
     dut._log.info("Testing PRISM")
 
     # Write values to the count2_compare / count1_preload (PRISM disabled:
@@ -1073,6 +1150,9 @@ async def test_project(dut):
 
     dut._log.info("Testing edge Chroma (in_prev capture)")
     await test_chroma_edge()
+
+    dut._log.info("Testing USB low-speed device Chroma")
+    await test_chroma_usb()
 
     dut._log.info("Testing fractured PRISM (encoder + ws2812)")
     await test_fractured(clocks_per_phase, encoder0)

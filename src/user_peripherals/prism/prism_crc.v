@@ -27,6 +27,7 @@ module prism_crc
     input  wire        enable,            // shard enabled (clears the register when low)
     input  wire        clear,             // OUT_CRC_CLEAR: preset to the init value
     input  wire        update,            // OUT_CRC_UPDATE: shift bit_in through the LFSR
+    input  wire        consume,           // OUT_LOAD_CRC into the 8-bit shifter: drop the byte just taken
     input  wire        bit_in,
     input  wire  [1:0] mode,              // 0 off, 1 = 8 bits, 2 = 16 bits, 3 = 32 bits
     input  wire        reflect,           // 1 = LSB first (shift right), 0 = MSB first
@@ -39,6 +40,7 @@ module prism_crc
 
     output reg  [31:0] value,
     output wire [31:0] out_value,
+    output wire  [7:0] out_byte,          // next byte to transmit through the 8-bit shifter
     output wire        ok
 );
 
@@ -52,6 +54,14 @@ module prism_crc
     wire [31:0] next     = (shifted ^ (fb ? poly : 32'h0)) & mask;
 
     assign out_value = (xor_out ? ~value : value) & mask;
+    // Byte order on the wire: reflected CRCs go low byte first, others high
+    // byte first; each OUT_LOAD_CRC through comm takes one byte and `consume`
+    // moves the next one into place (16- and 32-bit CRCs need 2 / 4 loads).
+    wire [7:0]  first    = reflect      ? value[7:0]   :
+                           mode == 2'd2 ? value[15:8]  :
+                           mode == 2'd3 ? value[31:24] : value[7:0];
+    wire [31:0] consumed = reflect ? {8'h0, value[31:8]} : {value[23:0], 8'h0};
+    assign out_byte  = xor_out ? ~first : first;
     assign ok        = (mode != 2'd0) && ((value & mask) == (expected & mask));
 
     always @(posedge clk or negedge rst_n)
@@ -64,6 +74,8 @@ module prism_crc
             value <= wr_data & mask;
         else if (clear)
             value <= init;
+        else if (consume)
+            value <= consumed & mask;
         else if (update && mode != 2'd0)
             value <= next;
     end
