@@ -1,0 +1,28 @@
+[*]
+[*] GTKWave Analyzer v3.3.116 (w)1999-2023 BSI
+[*] Sun Apr 19 12:04:40 2026
+[*]
+[dumpfile] "/home/ken/projects/tiny-tapeout/ttsky26a/ttsky26a-qv-prism/test/prism.test-rtl.fst"
+[dumpfile_mtime] "Sun Apr 19 05:54:26 2026"
+[dumpfile_size] 22778
+[savefile] "/home/ken/projects/tiny-tapeout/ttsky26a/ttsky26a-qv-prism/test/prism.gtkw"
+[timestart] 0
+[size] 1666 880
+[pos] 1782 11
+*-18.900000 11010000 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+[treeopen] tb.
+[treeopen] tb.user_project.
+[treeopen] tb.user_project.i_peripherals.
+[sst_width] 269
+[signals_width] 166
+[sst_expanded] 1
+[sst_vpaned_height] 254
+@28
+tb.user_project.i_peripherals.i_prism.data_read_n[1:0]
+@22
+tb.user_project.i_peripherals.i_prism.data_in[31:0]
+tb.user_project.i_peripherals.i_prism.data_out[31:0]
+@29
+tb.user_project.i_peripherals.i_prism.data_write_n[1:0]
+[pattern_trace] 1
+[pattern_trace] 0

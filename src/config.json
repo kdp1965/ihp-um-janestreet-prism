@@ -1,0 +1,172 @@
+{
+  "//1": "pdngen's connectivity check runs before flow.py's stripe step bridges the macro pins; LVS is the verdict",
+  "PL_TARGET_DENSITY_PCT": 55,
+  "CLOCK_PERIOD": 14,
+  "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
+  "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,
+  "RUN_LINTER": 1,
+  "LINTER_INCLUDE_PDK_MODELS": 1,
+  "SYNTH_STRATEGY": "AREA 0",
+  "USE_LIGHTER": 0,
+  "FALLBACK_SDC_FILE": "src/base.sdc",
+  "DESIGN_REPAIR_MAX_SLEW_PCT": 25,
+  "DESIGN_REPAIR_REMOVE_BUFFERS": 1,
+  "RUN_HEURISTIC_DIODE_INSERTION": 1,
+  "RUN_ANTENNA_REPAIR": 1,
+  "HEURISTIC_ANTENNA_THRESHOLD": 200,
+  "CLOCK_PORT": "clk",
+  "RUN_KLAYOUT_XOR": 0,
+  "RUN_KLAYOUT_DRC": 0,
+  "DESIGN_REPAIR_BUFFER_OUTPUT_PORTS": 0,
+  "TOP_MARGIN_MULT": 1,
+  "BOTTOM_MARGIN_MULT": 1,
+  "LEFT_MARGIN_MULT": 6,
+  "RIGHT_MARGIN_MULT": 6,
+  "FP_SIZING": "absolute",
+  "GRT_ALLOW_CONGESTION": 1,
+  "FP_IO_HLENGTH": 2,
+  "FP_IO_VLENGTH": 2,
+  "FP_PDN_VPITCH": 50.0,
+  "FP_PDN_VWIDTH": 2.1,
+  "RUN_CTS": 1,
+  "FP_PDN_MULTILAYER": 0,
+  "MAGIC_DEF_LABELS": 0,
+  "MAGIC_WRITE_LEF_PINONLY": 1,
+  "FP_MACRO_HORIZONTAL_HALO": 0.48,
+  "FP_MACRO_VERTICAL_HALO": 0.48,
+  "DIODE_CELL": "sg13cmos5l_antennanp/A",
+  "ERROR_ON_PDN_VIOLATIONS": 0,
+  "EXTRA_VERILOG_MODELS": [
+    "src/user_peripherals/cfgmem/cfgmem.v",
+    "src/user_peripherals/cfgmem/cfgmem_left.v"
+  ],
+  "MACROS": {
+    "CFGMEM_IHP_LEFT16": {
+      "instances": {
+        "i_peripherals.CFGMEMS_LEFT[0].cfgmem_lo": {
+          "location": [
+            801.44,
+            3.78
+          ],
+          "orientation": "N"
+        },
+        "i_peripherals.CFGMEMS_LEFT[0].cfgmem_hi": {
+          "location": [
+            801.44,
+            181.44
+          ],
+          "orientation": "N"
+        },
+        "i_peripherals.CFGMEMS_LEFT[1].cfgmem_lo": {
+          "location": [
+            801.44,
+            359.1
+          ],
+          "orientation": "N"
+        },
+        "i_peripherals.CFGMEMS_LEFT[1].cfgmem_hi": {
+          "location": [
+            801.44,
+            536.76
+          ],
+          "orientation": "N"
+        }
+      },
+      "gds": [
+        "macros/CFGMEM_IHP_LEFT16/CFGMEM_IHP_LEFT16.gds"
+      ],
+      "lef": [
+        "macros/CFGMEM_IHP_LEFT16/CFGMEM_IHP_LEFT16.lef"
+      ],
+      "nl": [
+        "macros/CFGMEM_IHP_LEFT16/CFGMEM_IHP_LEFT16.nl.v"
+      ],
+      "spef": {
+        "nom_*": [
+          "macros/CFGMEM_IHP_LEFT16/spef/CFGMEM_IHP_LEFT16.nom.spef"
+        ]
+      },
+      "lib": {
+        "nom_typ_1p20V_25C": [
+          "macros/CFGMEM_IHP_LEFT16/lib/CFGMEM_IHP_LEFT16__nom_typ_1p20V_25C.lib"
+        ],
+        "nom_fast_1p32V_m40C": [
+          "macros/CFGMEM_IHP_LEFT16/lib/CFGMEM_IHP_LEFT16__nom_fast_1p32V_m40C.lib"
+        ],
+        "nom_slow_1p08V_125C": [
+          "macros/CFGMEM_IHP_LEFT16/lib/CFGMEM_IHP_LEFT16__nom_slow_1p08V_125C.lib"
+        ]
+      }
+    },
+    "CFGMEM_IHP16": {
+      "instances": {
+        "i_peripherals.CFGMEMS[2].cfgmem_lo": {
+          "location": [
+            1351.44,
+            3.78
+          ],
+          "orientation": "N"
+        },
+        "i_peripherals.CFGMEMS[2].cfgmem_hi": {
+          "location": [
+            1351.44,
+            181.44
+          ],
+          "orientation": "N"
+        },
+        "i_peripherals.CFGMEMS[3].cfgmem_lo": {
+          "location": [
+            1351.44,
+            359.1
+          ],
+          "orientation": "N"
+        },
+        "i_peripherals.CFGMEMS[3].cfgmem_hi": {
+          "location": [
+            1351.44,
+            536.76
+          ],
+          "orientation": "N"
+        }
+      },
+      "gds": [
+        "macros/CFGMEM_IHP16/CFGMEM_IHP16.gds"
+      ],
+      "lef": [
+        "macros/CFGMEM_IHP16/CFGMEM_IHP16.lef"
+      ],
+      "nl": [
+        "macros/CFGMEM_IHP16/CFGMEM_IHP16.nl.v"
+      ],
+      "spef": {
+        "nom_*": [
+          "macros/CFGMEM_IHP16/spef/CFGMEM_IHP16.nom.spef"
+        ]
+      },
+      "lib": {
+        "nom_typ_1p20V_25C": [
+          "macros/CFGMEM_IHP16/lib/CFGMEM_IHP16__nom_typ_1p20V_25C.lib"
+        ],
+        "nom_fast_1p32V_m40C": [
+          "macros/CFGMEM_IHP16/lib/CFGMEM_IHP16__nom_fast_1p32V_m40C.lib"
+        ],
+        "nom_slow_1p08V_125C": [
+          "macros/CFGMEM_IHP16/lib/CFGMEM_IHP16__nom_slow_1p08V_125C.lib"
+        ]
+      }
+    }
+  },
+  "PDN_MACRO_CONNECTIONS": [
+    "i_peripherals\\.CFGMEMS_LEFT\\\\?\\[0\\\\?\\]\\.cfgmem_lo VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS_LEFT\\\\?\\[0\\\\?\\]\\.cfgmem_hi VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS_LEFT\\\\?\\[1\\\\?\\]\\.cfgmem_lo VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS_LEFT\\\\?\\[1\\\\?\\]\\.cfgmem_hi VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS\\\\?\\[2\\\\?\\]\\.cfgmem_lo VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS\\\\?\\[2\\\\?\\]\\.cfgmem_hi VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS\\\\?\\[3\\\\?\\]\\.cfgmem_lo VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS\\\\?\\[3\\\\?\\]\\.cfgmem_hi VPWR VGND VPWR VGND"
+  ],
+  "meta": {
+    "flow": "Classic"
+  }
+}

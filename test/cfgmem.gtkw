@@ -1,0 +1,50 @@
+[*]
+[*] GTKWave Analyzer v3.3.117 (w)1999-2023 BSI
+[*] Sun Apr 26 02:56:12 2026
+[*]
+[dumpfile] "/Users/Ken2/projects/tiny_tapeout/ttsky26a/ttsky26a-qv-prism/test/cfgmem.test-rtl.fst"
+[dumpfile_mtime] "Sun Apr 26 02:52:36 2026"
+[dumpfile_size] 86505
+[savefile] "/Users/Ken2/projects/tiny_tapeout/ttsky26a/ttsky26a-qv-prism/test/cfgmem.gtkw"
+[timestart] 52315200
+[size] 1696 906
+[pos] -1 -1
+*-15.320188 52432000 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+[treeopen] tb.
+[treeopen] tb.user_project.
+[treeopen] tb.user_project.i_peripherals.
+[treeopen] tb.user_project.i_peripherals.CFGMEMS[0].
+[treeopen] tb.user_project.i_peripherals.CFGMEMS[0].cfgmem_lo.
+[sst_width] 261
+[signals_width] 226
+[sst_expanded] 1
+[sst_vpaned_height] 317
+@28
+tb.user_project.i_peripherals.i_cfgmem.data_write_n[1:0]
+@22
+tb.user_project.i_peripherals.i_cfgmem.address[5:0]
+tb.user_project.i_peripherals.i_cfgmem.inst_vec[3:0]
+tb.user_project.i_peripherals.i_cfgmem.cfgmem_we_lo[3:0]
+tb.user_project.i_peripherals.i_cfgmem.cfgmem_wrow[15:0]
+@28
+tb.user_project.i_peripherals.i_cfgmem.clk
+tb.user_project.i_peripherals.CFGMEMS[0].cfgmem_lo.EN0
+@22
+tb.user_project.i_peripherals.CFGMEMS[0].cfgmem_lo.WROW[15:0]
+tb.user_project.i_peripherals.CFGMEMS[0].cfgmem_lo.le[15:0]
+tb.user_project.i_peripherals.cfgmem_data_in_lo[127:0]
+tb.user_project.i_peripherals.i_cfgmem.cfgmem_data_in_lo[127:0]
+tb.user_project.i_peripherals.data_out[31:0]
+tb.user_project.i_peripherals.CFGMEMS[0].cfgmem_lo.A0[3:0]
+tb.user_project.i_peripherals.CFGMEMS[0].cfgmem_lo.Di0[31:0]
+@28
+tb.user_project.i_peripherals.i_cfgmem.data_read_n[1:0]
+@22
+tb.user_project.i_peripherals.CFGMEMS[0].cfgmem_lo.Do0[31:0]
+@23
+tb.user_project.i_peripherals.peri_user[7:0]
+@22
+tb.user_project.i_peripherals.data_from_peri[31:0]
+tb.user_project.i_peripherals.i_cfgmem.cfgmem_addr[3:0]
+[pattern_trace] 1
+[pattern_trace] 0
