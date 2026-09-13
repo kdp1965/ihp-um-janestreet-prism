@@ -31,7 +31,7 @@ clean:
 # RISC-V program tests: build test/programs/<name> into <name>.hex and run it
 # on the RTL through test_prog.mk (simulated QSPI flash + 2 PSRAMs).
 #   make cfgmem_verify
-PROGRAMS = cfgmem_verify
+PROGRAMS = cfgmem_verify sdk_check
 
 .PHONY: $(PROGRAMS) $(PROGRAMS:%=%-hex)
 
