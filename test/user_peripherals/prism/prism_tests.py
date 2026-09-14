@@ -473,7 +473,8 @@ class FifoLoopTest(PrismTest):
 # PRISM Edge Detect circuit unit test
 # =============================================================================
 class SramFifoTest(PrismTest):
-    ''' The 8 KB SRAM FIFO as a shard's storage (CFG0[31]).  Register-level
+    ''' The SRAM FIFOs as a shard's storage (CFG0[31]; one 512x32 macro per
+        shard, 2 KB each).  Register-level
         first: host pushes and pops through the shard window in TX / RX
         mode with the PRISM disabled; then the fifo_loop chroma moves bytes
         SRAM -> flop FIFO and flop FIFO -> SRAM, crossing many word
@@ -516,6 +517,28 @@ class SramFifoTest(PrismTest):
         assert (await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 0x4) == 0x4
         await tqv.write_word_reg(REG_CFG1 + SHARD1, 0)
         await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+
+        # Both SRAM FIFOs at once, one per shard: independent contents, counts
+        # and flushes (the host pushes into each in TX mode)
+        self.log("both SRAM FIFOs, one per shard")
+        await tqv.write_word_reg(REG_CFG0, CFG_FIFO_DIR_TX | CFG_FIFO_SRAM)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX | CFG_FIFO_SRAM)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+        for b in range(30):
+            await tqv.write_byte_reg(REG_FIFO, 0x40 + b)
+        for b in range(50):
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, 0x80 + b)
+        assert (await tqv.read_word_reg(REG_FIFO_ST) >> 8) & 0x3FFF == 30
+        assert (await tqv.read_word_reg(REG_FIFO_ST + SHARD1) >> 8) & 0x3FFF == 50
+        assert await tqv.read_byte_reg(REG_FIFO) == 0x40
+        assert await tqv.read_byte_reg(REG_FIFO + SHARD1) == 0x80
+        await tqv.write_word_reg(REG_FIFO_ST, 0)                              # flush shard 0's only
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 1 == 1
+        assert (await tqv.read_word_reg(REG_FIFO_ST + SHARD1) >> 8) & 0x3FFF == 50
+        assert await tqv.read_byte_reg(REG_FIFO + SHARD1) == 0x80
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+        await tqv.write_word_reg(REG_CFG0, 0)
 
         # SRAM (B, TX) -> flop FIFO (A, RX) through the fifo_loop chroma: the
         # host queues more than 16 bytes, the FSM drains B as the host reads A

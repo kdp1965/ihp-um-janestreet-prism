@@ -48,10 +48,13 @@ also installs the template into an upstream checkout.  The CFGMEM macros form
 two full-height columns of four: bank A (lo macros, `CFGMEM_IHP_LEFT16`,
 pins facing east) at x = 537.11 um and bank B (hi macros, `CFGMEM_IHP16`,
 pins facing west) at 1346.39 um, with the PRISM logic in the 478 um
-channel between them.  The 1024x32 SRAM FIFO macro sits flush left at the
-bottom (3.36, 3.78 um, `FS` so its pins face up into the 117 um corridor
-that also holds its wrapper), and TinyQV lives above it under the tile
-pins.  A CFGMEM column is a routing wall (Metal2 blocked, Metal3 chopped),
+channel between them.  The two 512x32 SRAM FIFO macros (one per shard,
+2 KB each) are stacked flush left at the bottom with their pin faces
+toward each other: (3.36, 3.78 um) `FS` and (3.36, 294.84 um) `N`, the
+100 um gap between them holding both FIFO wrappers; TinyQV lives above
+the stack under the tile pins.  All the 1P x32 macros share one width
+and the same power-column positions, so the stripes on the columns of
+the lower one serve the upper one too.  A CFGMEM column is a routing wall (Metal2 blocked, Metal3 chopped),
 so nothing but the SRAM and its wrapper may sit on the far side of one;
 docs/prism_interface.md section 4d.1 records the experiments behind this
 and the band-layout alternative kept in `src/config_band_v6.json`.

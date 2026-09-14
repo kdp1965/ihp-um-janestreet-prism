@@ -163,7 +163,13 @@ def extend(reader, layer):
                 # the macro edge (pdngen leaves a partial-height stub of those)
                 crossing = [b for b in stripes if b.xMax() > x0 and b.xMin() < x1]
                 targets = sorted(set((b.xMin() + b.xMax()) / 2 for b in crossing))
-                # remove the crossing tile stripes, their pin boxes and their rail vias
+                # remove the crossing tile stripes, their pin boxes and their rail
+                # vias - only what sits on those stripes, so a second SRAM on the
+                # same columns (which finds nothing to replace) keeps the vias
+                # the first pass added for the rows above it
+                removed_x = [(b.xMin(), b.xMax()) for b in crossing]
+                def on_removed(box):
+                    return any(box.xMax() > rx0 and box.xMin() < rx1 for (rx0, rx1) in removed_x)
                 removed = 0
                 for b in crossing:
                     odb.dbSBox_destroy(b)
@@ -171,10 +177,10 @@ def extend(reader, layer):
                 if bpin is not None:
                     for box in list(bpin.getBoxes()):
                         if box.getTechLayer() is not None and box.getTechLayer().getName() == layer \
-                           and box.xMax() > x0 and box.xMin() < x1:
+                           and on_removed(box):
                             odb.dbBox_destroy(box)
                 for b in list(swire.getWires()):
-                    if b.getTechLayer() is None and b.xMax() > x0 and b.xMin() < x1:
+                    if b.getTechLayer() is None and on_removed(b):
                         odb.dbSBox_destroy(b)      # a via on a removed stripe
                 stripes = [b for b in stripes if b not in crossing]
                 used = set()
@@ -191,7 +197,7 @@ def extend(reader, layer):
                     shift = ((c[0] + c[1]) / 2 - tx) / dbu
                     if abs(shift) > 0.05:
                         print(f"[INFO] {inst.getName()}: {net_name} stripe at x={tx/dbu:.2f} moved {shift:+.2f} um onto a column")
-                    odb.dbSBox_create(swire, m, c[0], ylo, c[1], yhi, "STRIPE")
+                    stripes.append(odb.dbSBox_create(swire, m, c[0], ylo, c[1], yhi, "STRIPE"))
                     if bpin is not None:
                         odb.dbBox_create(bpin, m, c[0], ylo, c[1], yhi)
                     added += 1

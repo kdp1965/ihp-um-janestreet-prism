@@ -425,12 +425,23 @@ else in the band layout was left unrouted, hence v6.
 
 **Plan of record (2026-09-14 evening): the two-column layout on the
 44.96 um grid.**  LEFT16 column at x 537.11 (117 um corridor to the
-SRAM), IHP16 column at 1346.39 (478 um channel), SRAM flush left at 3.36
-(`FS`), `FP_PDN_VOFFSET` 6.15, 2 um horizontal halo, KLayout DRC instead
-of Magic DRC (`src/config.json`; the tile-level keys come from tt_tool).
-Results: GRT overflow 1734, DRT 24445 12066 10839 1093 73 0 (five
-iterations), typ setup +0.59 ns, hold clean, KLayout DRC 0 items over
-333 rules, LVS "circuits match uniquely" with all counts zero.  Magic's
+SRAMs), IHP16 column at 1346.39 (478 um channel), `FP_PDN_VOFFSET` 6.15,
+2 um horizontal halo, KLayout DRC instead of Magic DRC (`src/config.json`;
+the tile-level keys come from tt_tool).  First with one 1024x32 SRAM flush
+left: GRT overflow 1734, DRT 24445 12066 10839 1093 73 0 (five
+iterations), typ setup +0.59 ns, KLayout DRC 0 items over 333 rules, LVS
+"circuits match uniquely" with all counts zero.  Then, for Ethernet
+receive and transmit at once, two 512x32 SRAMs (one FIFO per shard,
+section 4i) stacked flush left with their pin faces toward each other,
+(3.36, 3.78) `FS` and (3.36, 294.84) `N`, both wrappers in the 100 um gap:
+GRT 2560, DRT 26348 13229 11974 1492 289 12 3 3 0, typ setup +0.68 ns,
+hold +0.06 ns, slow-corner WNS -6.82 (all three better than with the
+single macro), KLayout DRC 0, LVS clean.  All the 1P x32 macros share the
+416.64 um width and the same power-column positions, so the stripes on
+the lower macro's columns serve the upper one; the stripe step must
+only ever delete vias that sit on stripes it actually removes, or the
+second macro's pass strips the rows above the stack of their power (the
+IR-drop connectivity check catches that).  Magic's
 extraction still reports 22 "illegal overlap between obsm4 and metal4":
 the VPWR stripes crossing the LEF keep-out bar at each VDD column's
 VDD!/VDDARRAY! break (LEF y 39-45), where the GDS has no metal at all, so
@@ -584,20 +595,23 @@ Findings, in order of weight:
    back (the hold state first tried that and locked on the old level);
    flags or state are the right source for a level the FSM set itself.
 
-## 4i. SRAM FIFO: 8 KB on the 2048x32 macro (2026-09-14)
+## 4i. SRAM FIFOs: one 512x32 macro per shard (2026-09-14)
 
-`prism_sram_fifo.v` puts a byte FIFO on the IHP single-port
-`RM_IHPSG13_1P_2048x32_c2_bm_bist` macro, instantiated inside the PRISM
-peripheral (parameter `SRAM_FIFO`, driven by the define `PRISM_SRAM_FIFO`
-in peripherals.v; `-DPRISM_SRAM_FIFO=0` builds without the macro).  A
-shard makes it its FIFO with CFG0[31]: the shard's push / pop strobes,
-head byte, count and flags then come from the SRAM FIFO and its flop FIFO
-idles, so a chroma sees no difference except the depth (8192 bytes,
-status count field widened to [21:8]) and the almost-empty / almost-full
-levels, which are in 64-byte units.  One SRAM per PRISM: shard 0 wins if
-both shards set the bit.  With the two-FIFO mode of 4b, shard 0 can own
-an 8 KB TX buffer (shard 1's bit) next to its flop RX FIFO, or the other
-way round (its own bit), which is the Ethernet arrangement.
+`prism_sram_fifo.v` puts a byte FIFO on an IHP single-port SRAM macro,
+instantiated inside the PRISM peripheral.  Parameter `SRAM_FIFO` (define
+`PRISM_SRAM_FIFO` in peripherals.v) is the number of them: 2 is the plan
+of record, one per shard on `RM_IHPSG13_1P_512x32_c2_bm_bist` (2 KB each,
+`SRAM_AW` 9), so an Ethernet receiver in one shard and a transmitter in
+the other each own a full-rate buffer; 1 keeps the earlier single shared
+FIFO (shard 0 wins if both ask; `SRAM_AW` 10 or 11 for the 1024x32 /
+2048x32 macro); 0 builds without any macro.  A shard makes its SRAM FIFO
+its FIFO with CFG0[31]: the shard's push / pop strobes, head byte, count
+and flags then come from the SRAM FIFO and its flop FIFO idles, so a
+chroma sees no difference except the depth (status count field widened
+to [21:8]) and the almost-empty / almost-full levels, which are in
+64-byte units.  With the two-FIFO mode of 4b, unfractured shard 0 reaches
+shard 1's SRAM as FIFO B, so one shard can hold a 2 KB RX buffer and a
+2 KB TX buffer at once.
 
 Inside: four bytes per word, whole-word accesses only.  Pushes assemble
 a word in a register and the fourth byte writes it (writes have the
@@ -612,8 +626,9 @@ when `full`.  (The first version kept a four-entry byte queue with
 per-byte writes and merges: 20k um2 of cells, more than both flop FIFOs;
 this one is about 10k.)
 The read data of the macro is registered (one clock).  The unit test
-(`SramFifoTest`) pushes and pops through the shard windows and runs the
-fifo_loop chroma in both directions across many word boundaries.
+(`SramFifoTest`) pushes and pops through the shard windows, fills both
+SRAM FIFOs at once and flushes one, and runs the fifo_loop chroma in
+both directions across many word boundaries.
 
 Simulation uses the PDK's behavioural model with `FUNCTIONAL` defined
 (A_DLY tied high, BIST tied off); synthesis sees the black box in

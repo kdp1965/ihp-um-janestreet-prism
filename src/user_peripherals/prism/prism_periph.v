@@ -51,8 +51,9 @@
 //     28   shift_in_cond (shifter input = cond_out[0], e.g. an FSM-decoded bit, instead of a pin)
 //     29   flag_latch (OUT_LATCH stores {cond_out[1], cond_out[0]} in latched_in and output 19 in flag2: FSM flags)
 //     30   comm_load_k (OUT_COMM_LOAD loads constant K[{out20, out18}] from CONST instead of preload[7:0])
-//     31   fifo_sram: this shard's FIFO is the 8 KB SRAM FIFO (prism_sram_fifo.v on the 2048x32 macro;
-//          one per PRISM, shard 0 wins if both ask; levels in 64-byte units; SRAM_FIFO parameter = 0 removes it)
+//     31   fifo_sram: this shard's FIFO is an SRAM FIFO (prism_sram_fifo.v on an IHP 1P macro; levels in
+//          64-byte units).  SRAM_FIFO parameter: 0 none, 1 one shared FIFO (shard 0 wins if both ask),
+//          2 one per shard (shard s owns SRAM s; unfractured shard 0 reaches SRAM 1 as FIFO B)
 //
 // Output bits (changes.md item 12):
 //     0-3  pin_out[3:0]        4  OUT_LATCH             5  OUT_FIFO_WR_RD (Phase 4)
@@ -96,7 +97,7 @@
 
 `default_nettype none
 
-module tqvp_prism #( parameter SRAM_FIFO = 1, parameter SRAM_AW = 11 ) (   // SRAM_AW 11: 2048x32 (8 KB), 10: 1024x32 (4 KB)
+module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SRAM_FIFO: number of SRAM FIFOs (0/1/2); SRAM_AW 11: 2048x32, 10: 1024x32, 9: 512x32 (2 KB)
     input             clk,          // Clock - the TinyQV project clock is normally set to 64MHz.
     input             rst_n,        // Reset_n - low to reset.
     input      [7:0]  ui_in,        // The input PMOD, 2-flop synchronized (project.v).  ui_in[7] is normally UART RX.
@@ -244,9 +245,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 1, parameter SRAM_AW = 11 ) (   // SR
     wire [SHARDS-1:0]    sram_sel_v, sram_push_v, sram_pop_v, sram_flush_v;
     wire [8*SHARDS-1:0]  sram_pdata_v;
     wire [8*SHARDS-1:0]  sram_lvl_v;        // {af_level, ae_level}
-    wire  [7:0]          sram_head;
-    wire [13:0]          sram_count;
-    wire                 sram_empty, sram_full, sram_ae, sram_af;
+    wire [8*SHARDS-1:0]  sram_head_v;       // per SRAM FIFO instance (index = shard, or 0 when shared)
+    wire [14*SHARDS-1:0] sram_count_v;
+    wire [SHARDS-1:0]    sram_empty_v, sram_full_v, sram_ae_v, sram_af_v;
 
     // Input slot (inputs 16-19 and 28-31, CFG2 4 bits each): 0 = the slot's
     // default (in_prev[i] for 16-19, 0 for 28-31), 1-4 = in_prev[0..3],
@@ -438,8 +439,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 1, parameter SRAM_AW = 11 ) (   // SR
             wire [13:0]               fifo_count;
             wire                      fifo_empty, fifo_full, fifo_ae, fifo_af;
             // This shard's FIFO storage: the flop FIFO, or the SRAM FIFO (CFG0[31])
+            localparam                SI = (SRAM_FIFO == 1) ? 0 : s;     // the SRAM FIFO serving this shard
             wire                      fifo_sram = (SRAM_FIFO != 0) && cfg0[CFG_FIFO_SRAM] &&
-                                                  (s == 0 || !cfg0_v[CFG_FIFO_SRAM]);
+                                                  (SRAM_FIFO != 1 || s == 0 || !cfg0_v[CFG_FIFO_SRAM]);
             wire  [7:0]               lf_head;
             wire  [FIFO_AW:0]         lf_count;
             wire                      lf_empty, lf_full, lf_ae, lf_af;
@@ -537,12 +539,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 1, parameter SRAM_AW = 11 ) (   // SR
                 .almost_empty ( lf_ae                            ),
                 .almost_full  ( lf_af                            )
             );
-            assign fifo_head  = fifo_sram ? sram_head  : lf_head;
-            assign fifo_count = fifo_sram ? sram_count : {{(13-FIFO_AW){1'b0}}, lf_count};
-            assign fifo_empty = fifo_sram ? sram_empty : lf_empty;
-            assign fifo_full  = fifo_sram ? sram_full  : lf_full;
-            assign fifo_ae    = fifo_sram ? sram_ae    : lf_ae;
-            assign fifo_af    = fifo_sram ? sram_af    : lf_af;
+            assign fifo_head  = fifo_sram ? sram_head_v[8*SI +: 8]    : lf_head;
+            assign fifo_count = fifo_sram ? sram_count_v[14*SI +: 14] : {{(13-FIFO_AW){1'b0}}, lf_count};
+            assign fifo_empty = fifo_sram ? sram_empty_v[SI] : lf_empty;
+            assign fifo_full  = fifo_sram ? sram_full_v[SI]  : lf_full;
+            assign fifo_ae    = fifo_sram ? sram_ae_v[SI]    : lf_ae;
+            assign fifo_af    = fifo_sram ? sram_af_v[SI]    : lf_af;
             assign sram_sel_v[s]          = fifo_sram;
             assign sram_push_v[s]         = f_push;
             assign sram_pdata_v[8*s +: 8] = f_pdata;
@@ -886,48 +888,56 @@ module tqvp_prism #( parameter SRAM_FIFO = 1, parameter SRAM_AW = 11 ) (   // SR
     // (TinyQV takes the low bits), so e.g. COUNTS + 1 reads compare.
     // =============================================================
     reg [31:0] reg_word;
-    // ---- SRAM FIFO: 8 KB on the 2048x32 macro, one per PRISM ------------------
-    // Owned by the shard with CFG0[31] set (shard 0 first); that shard's FIFO
-    // requests are routed here and its FIFO flags / head come from here.
-    wire       sram_own1  = sram_sel_v[SHARDS-1] & ~sram_sel_v[0];
-    wire       sram_any   = |sram_sel_v;
-    wire       sram_push  = sram_any & (sram_own1 ? sram_push_v[SHARDS-1]  : sram_push_v[0]);
-    wire       sram_pop   = sram_any & (sram_own1 ? sram_pop_v[SHARDS-1]   : sram_pop_v[0]);
-    wire       sram_flush = sram_any & (sram_own1 ? sram_flush_v[SHARDS-1] : sram_flush_v[0]);
-    wire [7:0] sram_pdata = sram_own1 ? sram_pdata_v[8*(SHARDS-1) +: 8] : sram_pdata_v[7:0];
-    wire [7:0] sram_lvl   = sram_own1 ? sram_lvl_v[8*(SHARDS-1) +: 8]   : sram_lvl_v[7:0];
+    // ---- SRAM FIFOs: prism_sram_fifo.v on IHP single-port macros ---------------
+    // SRAM_FIFO = 1: one FIFO owned by the shard with CFG0[31] set (shard 0
+    // first), its requests routed here and its flags / head fed back.
+    // SRAM_FIFO = 2: one FIFO per shard (shard s <-> SRAM s), no sharing.
+    localparam SRAM_SHARED = (SRAM_FIFO == 1);
+    localparam NSRAM       = (SRAM_FIFO > SHARDS) ? SHARDS : SRAM_FIFO;
+    wire       sram_own1   = sram_sel_v[SHARDS-1] & ~sram_sel_v[0];     // shared: shard 1 owns it
+    wire       sram_any    = |sram_sel_v;
+    genvar n;
     generate
-        if (SRAM_FIFO != 0)
+        for (n = 0; n < NSRAM; n = n + 1)
         begin : SRAM
+            // the requesting shard: the owner when shared, shard n otherwise
+            wire               si_1   = SRAM_SHARED ? sram_own1 : (n != 0);
+            wire               req_on = SRAM_SHARED ? sram_any  : sram_sel_v[n];
+            wire               push   = req_on & sram_push_v[si_1];
+            wire               pop    = req_on & sram_pop_v[si_1];
+            wire               flush  = req_on & sram_flush_v[si_1];
+            wire         [7:0] pdata  = sram_pdata_v[8*si_1 +: 8];
+            wire         [7:0] lvl    = sram_lvl_v[8*si_1 +: 8];
             wire [SRAM_AW-1:0] sram_addr;
             wire [SRAM_AW+2:0] sram_cnt;
-            wire [31:0] sram_din, sram_bm, sram_dout;
-            wire        sram_wen, sram_ren;
-            assign sram_count = sram_cnt;          // zero-extended to 14 bits
+            wire        [31:0] sram_din, sram_bm, sram_dout;
+            wire               sram_wen, sram_ren;
+            assign sram_count_v[14*n +: 14] = sram_cnt;          // zero-extended
             prism_sram_fifo #( .AW ( SRAM_AW ) ) i_sram_fifo
             (
-                .clk          ( clk           ),
-                .rst_n        ( rst_n         ),
-                .flush        ( sram_flush    ),
-                .push         ( sram_push     ),
-                .push_data    ( sram_pdata    ),
-                .pop          ( sram_pop      ),
-                .ae_level     ( sram_lvl[3:0] ),
-                .af_level     ( sram_lvl[7:4] ),
-                .head         ( sram_head     ),
-                .count        ( sram_cnt      ),
-                .empty        ( sram_empty    ),
-                .full         ( sram_full     ),
-                .almost_empty ( sram_ae       ),
-                .almost_full  ( sram_af       ),
-                .sram_addr    ( sram_addr     ),
-                .sram_din     ( sram_din      ),
-                .sram_bm      ( sram_bm       ),
-                .sram_wen     ( sram_wen      ),
-                .sram_ren     ( sram_ren      ),
-                .sram_dout    ( sram_dout     )
+                .clk          ( clk                    ),
+                .rst_n        ( rst_n                  ),
+                .flush        ( flush                  ),
+                .push         ( push                   ),
+                .push_data    ( pdata                  ),
+                .pop          ( pop                    ),
+                .ae_level     ( lvl[3:0]               ),
+                .af_level     ( lvl[7:4]               ),
+                .head         ( sram_head_v[8*n +: 8]  ),
+                .count        ( sram_cnt               ),
+                .empty        ( sram_empty_v[n]        ),
+                .full         ( sram_full_v[n]         ),
+                .almost_empty ( sram_ae_v[n]           ),
+                .almost_full  ( sram_af_v[n]           ),
+                .sram_addr    ( sram_addr              ),
+                .sram_din     ( sram_din               ),
+                .sram_bm      ( sram_bm                ),
+                .sram_wen     ( sram_wen               ),
+                .sram_ren     ( sram_ren               ),
+                .sram_dout    ( sram_dout              )
             );
-            // IHP single-port SRAM: A_DLY must be tied high, BIST off
+            // IHP single-port SRAM: A_DLY must be tied high, BIST off.  Separate
+            // `if`s (no else-if chain) so the instance path stays SRAM[n].M512.i_sram
             if (SRAM_AW == 11)
             begin : M2048
                 RM_IHPSG13_1P_2048x32_c2_bm_bist i_sram
@@ -951,7 +961,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 1, parameter SRAM_AW = 11 ) (   // SR
                     .A_BIST_BM   ( 32'h0                )
                 );
             end
-            else
+            if (SRAM_AW == 10)
             begin : M1024
                 RM_IHPSG13_1P_1024x32_c2_bm_bist i_sram
                 (
@@ -974,15 +984,38 @@ module tqvp_prism #( parameter SRAM_FIFO = 1, parameter SRAM_AW = 11 ) (   // SR
                     .A_BIST_BM   ( 32'h0                )
                 );
             end
+            if (SRAM_AW == 9)
+            begin : M512
+                RM_IHPSG13_1P_512x32_c2_bm_bist i_sram
+                (
+                    .A_CLK       ( clk                  ),
+                    .A_MEN       ( sram_ren | sram_wen  ),
+                    .A_WEN       ( sram_wen             ),
+                    .A_REN       ( sram_ren             ),
+                    .A_ADDR      ( sram_addr            ),
+                    .A_DIN       ( sram_din             ),
+                    .A_DLY       ( 1'b1                 ),
+                    .A_DOUT      ( sram_dout            ),
+                    .A_BM        ( sram_bm              ),
+                    .A_BIST_CLK  ( 1'b0                 ),
+                    .A_BIST_EN   ( 1'b0                 ),
+                    .A_BIST_MEN  ( 1'b0                 ),
+                    .A_BIST_WEN  ( 1'b0                 ),
+                    .A_BIST_REN  ( 1'b0                 ),
+                    .A_BIST_ADDR ( 9'h0                 ),
+                    .A_BIST_DIN  ( 32'h0                ),
+                    .A_BIST_BM   ( 32'h0                )
+                );
+            end
         end
-        else
+        for (n = NSRAM; n < SHARDS; n = n + 1)
         begin : NO_SRAM
-            assign sram_head  = 8'h0;
-            assign sram_count = 14'h0;
-            assign sram_empty = 1'b1;
-            assign sram_full  = 1'b1;
-            assign sram_ae    = 1'b1;
-            assign sram_af    = 1'b0;
+            assign sram_head_v[8*n +: 8]    = 8'h0;
+            assign sram_count_v[14*n +: 14] = 14'h0;
+            assign sram_empty_v[n]          = 1'b1;
+            assign sram_full_v[n]           = 1'b1;
+            assign sram_ae_v[n]             = 1'b1;
+            assign sram_af_v[n]             = 1'b0;
         end
     endgenerate
 
