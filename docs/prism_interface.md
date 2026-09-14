@@ -401,10 +401,38 @@ pairs cross the SRAM: four exact, five nudged 0.67-0.83 um (still
 overlapping the rail above by 1.3-1.4 um of its 2.1), two redrawn on the
 nearest centre-band column (~10 um; the rail above them is fed through
 the macro's Metal1 row rails instead).  The stripe step (`odb_stripes.py`)
-now collects SRAM columns and all rails first, keeps redrawn stripes 0.24
+collects SRAM columns and all rails first, keeps redrawn stripes 0.24
 um clear of opposite-polarity rails, treats any stripe overlapping the
 SRAM as crossing it, and skips a rail stripe that would cross the SRAM
-off-column.  Placement rules learned: no sliver channel next to a macro
+off-column.
+
+The SRAM has three regions with separate internal meshes: two bit-cell
+arrays (`VDDARRAY!`/`VSS!` columns, with the periphery's `VDD!` columns
+below them on the same x) and, between them, a ~40 um band of the
+macro's own standard cells (four full-height `VDD!` columns and the
+`VSS!` columns beside them).  Moving every tile stripe onto its nearest
+column left the band with two VPWR but one VGND, and the right array's
+edge with a VGND but no VPWR (the partner of each had landed in the
+other region).  The step therefore allocates both nets at once per
+macro: nearest free column first, then a stripe whose partner sits in
+another region gets a partner on the adjacent column of its own region,
+and the band always gets at least two VPWR/VGND pairs.  On the 512x32
+that is 4 + 2 + 5 pairs, 11 stripes per net for the 10 the grid gives
+(Uri: any number of full-height power pins is fine).
+
+The step ends with a tidy pass, because the abstract LEF turns every
+Metal4 VPWR/VGND box into a PORT rect and the Tiny Tapeout pin check
+(`tt/precheck/pin_check.py`) rejects a power port rect that stops more
+than 10 um from the bottom or the top edge.  pdngen leaves three
+partial-height segments between the four macros of each CFGMEM column at
+every rail x (the full-height rail stripe is drawn next to them, once per
+macro), and beside the IHP16 column it adds a channel-repair VGND stripe
+at x 1700.64 in four pieces: the 2 um halo starts the short rows there at
+x 1680, past the grid VGND stripe at 1678.17, so those 98 rows had no
+other VGND feed.  Before the tidy pass the final LEF had 94 of 141 power
+port rects failing that rule.  Now each stripe x keeps exactly one
+full-height box and one pin box; the repair stripe is extended to full
+height with rail vias on the rows it newly crosses (40 pin boxes per net).  Placement rules learned: no sliver channel next to a macro
 (SRAM at 7.21 left 3.84 um to the core edge: PDN-0179), keep the SRAM out
 of the tile pin zone x 29.76-191.04 (Metal4 pin stubs on a 3.84 um pitch
 that no 44.96 grid interleaves with), and 2 um horizontal macro halo
@@ -476,7 +504,10 @@ SRAM's `VDD!`/`VSS!`/`VDDARRAY!` names into its LVS JSON with a stray
 backslash, which made the LibreLane LVS step die in the JSON parser;
 `librelane_plugin_prism_pdn.py` gives that step a repairing loader.  The
 column-grid run above is the first clean DRC + LVS with the SRAM in the
-tile.
+tile.  The precheck's pin check also needs every VPWR/VGND port rect on
+Metal4, at least 2.1 um wide and within 10 um of both edges; the local
+flow does not run it, so check `runs/wokwi/final/lef` for short power
+rects after any PDN change (see the tidy pass above).
 
 ## 4e. Bank addressing when unfractured (timing)
 
