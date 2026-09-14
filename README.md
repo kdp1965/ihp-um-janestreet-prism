@@ -28,8 +28,12 @@ root on that path.  `meta.substituting_steps` in `src/config.json` then
 inserts the step after `OpenROAD.GeneratePDN`.  Nothing has to be installed
 and the CI build gets the same connected macro power as the local one.
 
-Macros are placed at x = 1.44 + 50k um so their stripes sit on the tile's
-50 um grid, and on row boundaries (n x 3.78 um).
+The tile's stripes run on a 44.96 um pitch with 5.62 um between VPWR and
+VGND: the IHP SRAM's power-column grid (4 x 11.24 um), which the CFGMEM
+macros were regenerated to match, so one set of full-height stripes powers
+the macros and the SRAM.  With `FP_PDN_VOFFSET` 6.15 the first VPWR stripe
+is at 9.03 um; CFGMEM macros go at x = -2.41 + 44.96k um, the SRAM at
+3.36 + 11.24i um, all on row boundaries (n x 3.78 um).
 
     git clone -b cmos-8x4 https://github.com/kdp1965/tt-support-tools tt   # once
     make venv          # once: Python environment for tt_tool.py (.venv-tt)
@@ -40,15 +44,17 @@ The tile is 8x4 (1724.16 x 710.64 um, the size allowed by the Jane Street
 competition).  The upstream `cmos` branch of the TT tools has no 8x4 template;
 the `cmos-8x4` branch of the fork adds ours from `tt_8x4/` (see its README),
 and the GitHub workflows point the actions at that branch.  `make config`
-also installs the template into an upstream checkout.  The CFGMEM macros sit
-along the top of the tile as one 2x2 block per bank: bank A (lo macros,
-states 0-15) at x = 101.44 and 451.44 um, bank B (hi macros, states 16-31)
-at 951.44 and 1301.44 um, the top row upright (`N`, data pins facing down)
-at y = 619.92 um and the second row flipped (`FS`, data pins facing up) at
-y = 510.30 um, with each macro's control pins facing either a margin or the
-channel between the banks.  The lower ~60% of the tile stays free for
-future macros (an SRAM is planned).  Each bank's programming chain
-(host -> macro 0 -> 1 -> 2 -> 3) stays inside its block.
+also installs the template into an upstream checkout.  The CFGMEM macros form
+two full-height columns of four: bank A (lo macros, `CFGMEM_IHP_LEFT16`,
+pins facing east) at x = 537.11 um and bank B (hi macros, `CFGMEM_IHP16`,
+pins facing west) at 1346.39 um, with the PRISM logic in the 478 um
+channel between them.  The 1024x32 SRAM FIFO macro sits flush left at the
+bottom (3.36, 3.78 um, `FS` so its pins face up into the 117 um corridor
+that also holds its wrapper), and TinyQV lives above it under the tile
+pins.  A CFGMEM column is a routing wall (Metal2 blocked, Metal3 chopped),
+so nothing but the SRAM and its wrapper may sit on the far side of one;
+docs/prism_interface.md section 4d.1 records the experiments behind this
+and the band-layout alternative kept in `src/config_band_v6.json`.
 
 Results land in `runs/wokwi/final/`.  To look at any step's database in the
 OpenROAD GUI, or the GDS in KLayout (both come from the nix shell):

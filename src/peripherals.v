@@ -16,6 +16,15 @@
 // 0x800_0200 - 3ff: PRISM Peripheral (user peripheral 8; the whole 512 byte
 //                   region is decoded, so registers can sit at any +4 offset)
 // 0x800_0400 - 7ff: unmapped (reads 0)
+// The PRISM's 8 KB SRAM FIFO (RM_IHPSG13_1P_2048x32 macro) can be left out
+// with -DPRISM_SRAM_FIFO=0 (no macro, flop FIFOs only)
+`ifndef PRISM_SRAM_FIFO
+`define PRISM_SRAM_FIFO 1
+`endif
+`ifndef PRISM_SRAM_AW
+`define PRISM_SRAM_AW 11            // 11: 2048x32 (8 KB), 10: 1024x32 (4 KB)
+`endif
+
 module tinyQV_peripherals (
     input         clk,
     input         rst_n,
@@ -345,7 +354,7 @@ module tinyQV_peripherals (
     // --------------------------------------------------------------------- //
     // PRISM Peripheral
 
-    tqvp_prism i_prism
+    tqvp_prism #( .SRAM_FIFO ( `PRISM_SRAM_FIFO ), .SRAM_AW ( `PRISM_SRAM_AW ) ) i_prism
     (
         .clk(clk),
         .rst_n(rst_n),

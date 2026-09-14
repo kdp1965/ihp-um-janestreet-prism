@@ -9,7 +9,7 @@ import cocotb
 from user_peripherals.prism.bench import PrismBench
 from user_peripherals.prism.prism_tests import (
     RegisterTest, StewIntegrityTest, EncoderTest, Ws2812Test, Gpio24Test,
-    SpiSlaveTest, UartTxTest, FifoLoopTest, EdgeTest, UsbDeviceTest, FracturedTest)
+    SpiSlaveTest, UartTxTest, FifoLoopTest, SramFifoTest, EdgeTest, UsbDeviceTest, EthernetTxTest, FracturedTest)
 
 
 async def run(dut, test_class):
@@ -51,12 +51,20 @@ async def test_fifo_loop(dut):
     await run(dut, FifoLoopTest)
 
 @cocotb.test()
+async def test_sram_fifo(dut):
+    await run(dut, SramFifoTest)
+
+@cocotb.test()
 async def test_edge(dut):
     await run(dut, EdgeTest)
 
 @cocotb.test()
 async def test_usb_device(dut):
     await run(dut, UsbDeviceTest)
+
+@cocotb.test()
+async def test_ethernet_tx(dut):
+    await run(dut, EthernetTxTest)
 
 @cocotb.test()
 async def test_fractured(dut):

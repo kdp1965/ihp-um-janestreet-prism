@@ -80,10 +80,18 @@ module prism_fifo
         end
     end
 
-    // Storage (no reset: contents are don't-care until written)
-    always @(posedge clk)
+    // Storage.  Reset flops on purpose: the contents are don't-care until
+    // written, but the reset flavour of the flop places and routes better
+    // than a block of plain ones (observed on the tile).
+    integer i;
+    always @(posedge clk or negedge rst_n)
     begin
-        if (do_push)
+        if (!rst_n)
+        begin
+            for (i = 0; i < DEPTH; i = i + 1)
+                mem[i] <= 8'h0;
+        end
+        else if (do_push)
             mem[wr_ptr] <= push_data;
     end
 

@@ -8,6 +8,7 @@ from user_peripherals.prism.bench import PrismTest
 from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, Ws2812Slave
 from user_peripherals.prism.encoder import Encoder
 from user_peripherals.prism import usb_model as usb
+from user_peripherals.prism import eth_model as eth
 from user_peripherals.prism.chroma_ws2812 import *
 from user_peripherals.prism.chroma_spislave import *
 from user_peripherals.prism.chroma_encoder import *
@@ -16,6 +17,7 @@ from user_peripherals.prism.chroma_uart_tx import *
 from user_peripherals.prism.chroma_fifo_loop import *
 from user_peripherals.prism.chroma_edge import *
 from user_peripherals.prism.chroma_usb_ls import *
+from user_peripherals.prism.chroma_eth_tx import *
 
 
 # =============================================================================
@@ -470,6 +472,91 @@ class FifoLoopTest(PrismTest):
 # =============================================================================
 # PRISM Edge Detect circuit unit test
 # =============================================================================
+class SramFifoTest(PrismTest):
+    ''' The 8 KB SRAM FIFO as a shard's storage (CFG0[31]).  Register-level
+        first: host pushes and pops through the shard window in TX / RX
+        mode with the PRISM disabled; then the fifo_loop chroma moves bytes
+        SRAM -> flop FIFO and flop FIFO -> SRAM, crossing many word
+        boundaries, with the host draining. '''
+    name = "SRAM FIFO"
+
+    async def run(self):
+        tqv, bench = self.tqv, self.bench
+        await bench.disable()
+
+        # Shard 1's FIFO as the SRAM, TX mode: host pushes, count grows past 16
+        self.log("host pushes into the SRAM FIFO (shard 1, TX mode)")
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX | CFG_FIFO_SRAM)
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)                     # flush
+        assert await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 0x3 == 0x1     # empty
+        for b in range(40):
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, (b * 7) & 0xFF)
+        st = await tqv.read_word_reg(REG_FIFO_ST + SHARD1)
+        assert (st >> 8) & 0x3FFF == 40, f"{st:#x}"
+        assert st & 0x3 == 0                                                   # neither empty nor full
+        assert await tqv.read_byte_reg(REG_FIFO + SHARD1) == 0                # TX: read shows the head, no pop
+        assert (await tqv.read_word_reg(REG_FIFO_ST + SHARD1) >> 8) & 0x3FFF == 40
+        # the flop FIFO of shard 1 stayed empty; shard 0's too
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)
+        assert await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 0x1F01 == 0x0001
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 0x1F01 == 0x0001
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX | CFG_FIFO_SRAM)
+        assert (await tqv.read_word_reg(REG_FIFO_ST + SHARD1) >> 8) & 0x3FFF == 40  # contents kept
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)                     # flush
+        assert await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 0x3FFF01 == 0x000001
+
+        # Almost-empty / almost-full levels are in 64-byte units
+        self.log("levels")
+        await tqv.write_word_reg(REG_CFG1 + SHARD1, (1 << 16) | (1 << 20))    # ae: <= 64, af: >= 8192 - 64
+        for b in range(70):
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        st = await tqv.read_word_reg(REG_FIFO_ST + SHARD1)
+        assert (st >> 8) & 0x3FFF == 70 and (st & 0xC) == 0, f"{st:#x}"       # neither almost flag
+        await tqv.write_word_reg(REG_CFG1 + SHARD1, (2 << 16) | (1 << 20))    # ae: <= 128
+        assert (await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 0x4) == 0x4
+        await tqv.write_word_reg(REG_CFG1 + SHARD1, 0)
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+
+        # SRAM (B, TX) -> flop FIFO (A, RX) through the fifo_loop chroma: the
+        # host queues more than 16 bytes, the FSM drains B as the host reads A
+        self.log("fifo_loop: SRAM FIFO B -> flop FIFO A")
+        await bench.load_chroma(chroma_fifo_loop, chroma_fifo_loop_ctrlReg, chroma_fifo_loop_pinmuxReg)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX | CFG_FIFO_SRAM)
+        data = [(i * 13 + 5) & 0xFF for i in range(75)]
+        for b in data:
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        got = []
+        for i in range(len(data)):
+            for _ in range(200):
+                if await tqv.read_word_reg(REG_FIFO_ST) & 1 == 0:
+                    break
+                await self.clocks(10)
+            got.append(await tqv.read_byte_reg(REG_FIFO))
+        assert got == data, [hex(x) for x in got]
+        assert await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 1 == 1
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 1 == 1
+        assert await tqv.read_byte_reg(REG_COUNT2) == len(data) & 0xFF
+
+        # flop FIFO (B, TX) -> SRAM (A, RX): shard 0 owns the SRAM as its RX
+        # FIFO, and the host reads the SRAM through the shard 0 window
+        self.log("fifo_loop: flop FIFO B -> SRAM FIFO A")
+        await bench.disable()
+        await bench.load_chroma(chroma_fifo_loop, chroma_fifo_loop_ctrlReg | CFG_FIFO_SRAM, chroma_fifo_loop_pinmuxReg)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        data = [(i * 29 + 1) & 0xFF for i in range(60)]
+        for i in range(0, len(data), 12):                                     # the flop FIFO holds 16
+            for b in data[i:i + 12]:
+                await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+            await self.clocks(150)
+        st = await tqv.read_word_reg(REG_FIFO_ST)
+        assert (st >> 8) & 0x3FFF == len(data), f"{st:#x}"
+        got = [await tqv.read_byte_reg(REG_FIFO) for _ in range(len(data))]
+        assert got == data, [hex(x) for x in got]
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 1 == 1
+        await bench.disable()
+
+
 class EdgeTest(PrismTest):
     ''' in_prev edge capture: in_prev[0] follows ui_in[2] (input 2) and
         in_prev[1] follows host_in[0] (input 8), sources set in CFG1.  The
@@ -611,6 +698,76 @@ class UsbDeviceTest(PrismTest):
 # =============================================================================
 # Unit test for a fractured PRISM (i.e. two separate 16-state FSMs)
 # =============================================================================
+class EthernetTxTest(PrismTest):
+    ''' 10BASE-T transmitter from the SRAM FIFO: Manchester at 6 clocks per
+        bit, preamble from the constant table and the FIFO, CRC32 FCS from
+        the CRC unit, TP_IDL, link pulses on request.  The decoder model
+        checks every frame byte for byte. '''
+    name = "Ethernet transmitter Chroma (SRAM FIFO)"
+    BIT = 6
+
+    async def run(self):
+        tqv, bench, BIT = self.tqv, self.bench, self.BIT
+        dec = self.start(eth.EthDecoder(self.dut, BIT))
+        await tqv.write_word_reg(REG_CFG1, 8 | (9 << 4))                      # in_prev0/1 <- host_in[0]/[1]
+        await tqv.write_word_reg(REG_CONST, 0x55)                             # K0 = preamble byte
+        await tqv.write_byte_reg(REG_COMPARE, 3)                              # count2 phases of four
+        await tqv.write_word_reg(REG_PRELOAD, BIT // 2 - 1)                   # half-bit timer
+        await tqv.write_word_reg(REG_CRC_POLY, 0xEDB88320)                    # CRC32, reflected
+        await tqv.write_byte_reg(REG_HOST, 0)
+        await bench.load_chroma(chroma_eth_tx, chroma_eth_tx_ctrlReg | CFG_FIFO_SRAM, chroma_eth_tx_pinmuxReg)
+        await self.clocks(20)
+        assert dec.lines()[1] == 0                                            # TX_EN low
+
+        def frame(payload):
+            return [0x55, 0x55, 0x55, 0xD5] + payload
+
+        self.log("64-byte frame")
+        payload = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E] + [0x02, 0x00, 0x00, 0x00, 0x00, 0x01] + \
+                  [0x88, 0xCC] + [(i * 7 + 3) & 0xFF for i in range(46)]
+        for b in frame(payload):
+            await tqv.write_byte_reg(REG_FIFO, b)
+        await tqv.write_byte_reg(REG_TOGGLE, 0)                               # host_in[0] toggles: send
+        for _ in range(200):
+            if dec.frames:
+                break
+            await self.clocks(BIT * 8)
+        assert len(dec.frames) == 1, dec.frames
+        expect = [0x55] * 7 + [0xD5] + payload + eth.crc32(payload)
+        got = dec.frames[0]
+        assert got == expect, f"{len(got)} bytes: {[hex(x) for x in got[:12]]} .. {[hex(x) for x in got[-6:]]}"
+        await self.clocks(BIT * 4)
+        assert await bench.irq()                                              # frame done
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 1 == 1
+
+        self.log("link pulse")
+        host = await tqv.read_byte_reg(REG_HOST)
+        await tqv.write_word_reg(REG_HOST, host ^ 2)                          # host_in[1] toggles, [0] kept
+        for _ in range(40):
+            if dec.pulses:
+                break
+            await self.clocks(BIT)
+        assert dec.pulses == 1
+
+        self.log("300-byte frame streamed from the SRAM")
+        payload = [(i * 31 + 11) & 0xFF for i in range(300)]
+        for b in frame(payload):
+            await tqv.write_byte_reg(REG_FIFO, b)
+        await tqv.write_byte_reg(REG_TOGGLE, 0)
+        for _ in range(600):
+            if len(dec.frames) == 2:
+                break
+            await self.clocks(BIT * 8)
+        assert len(dec.frames) == 2
+        expect = [0x55] * 7 + [0xD5] + payload + eth.crc32(payload)
+        got = dec.frames[1]
+        assert got == expect, f"{len(got)} bytes"
+        await self.clocks(BIT * 4)
+        assert await bench.irq()
+        await bench.disable()
+
+
 class FracturedTest(PrismTest):
     ''' Fractured: encoder in shard 0 (ui_in[1:0], no output pins) and ws2812
         in shard 1 (uo_out[1], host_in, interrupt), each on its own datapath '''

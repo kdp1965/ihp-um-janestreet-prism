@@ -21,6 +21,14 @@ ifneq ($(SYNTH),yes)
 SIM_BUILD				= sim_build/rtl
 VERILOG_SOURCES += $(addprefix $(SRC_DIR)/,$(PROJECT_SOURCES))
 COMPILE_ARGS 		+= -DSIM
+# The PRISM's SRAM FIFO macro: the PDK's behavioural model (FUNCTIONAL)
+SRAM_MODEL_DIR ?= $(PDK_ROOT)/ihp-sg13cmos5l/libs.ref/sg13cmos5l_sram/verilog
+VERILOG_SOURCES += $(SRAM_MODEL_DIR)/RM_IHPSG13_1P_core_behavioral_bm_bist.v
+VERILOG_SOURCES += $(SRAM_MODEL_DIR)/RM_IHPSG13_1P_2048x32_c2_bm_bist.v
+VERILOG_SOURCES += $(SRAM_MODEL_DIR)/RM_IHPSG13_1P_1024x32_c2_bm_bist.v
+COMPILE_ARGS 		+= -DFUNCTIONAL
+PRISM_SRAM_AW ?= 11
+COMPILE_ARGS 		+= -DPRISM_SRAM_AW=$(PRISM_SRAM_AW)
 COMPILE_ARGS 		+= -DPURE_RTL
 COMPILE_ARGS 		+= -I$(SRC_DIR)
 COMPILE_ARGS 		+= -I$(addprefix $(SRC_DIR)/,user_peripherals/pwl_synth)
@@ -41,6 +49,10 @@ NL ?= placement
 VERILOG_SOURCES += ../runs/wokwi/results/$(NL)/tt_um_pettit_js_prism.nl.v
 VERILOG_SOURCES += $(PWD)/../macros/CFGMEM_IHP16/CFGMEM_IHP16.nl.v
 VERILOG_SOURCES += $(PWD)/../macros/CFGMEM_IHP_LEFT16/CFGMEM_IHP_LEFT16.nl.v
+SRAM_MODEL_DIR ?= $(PDK_ROOT)/ihp-sg13cmos5l/libs.ref/sg13cmos5l_sram/verilog
+VERILOG_SOURCES += $(SRAM_MODEL_DIR)/RM_IHPSG13_1P_core_behavioral_bm_bist.v
+VERILOG_SOURCES += $(SRAM_MODEL_DIR)/RM_IHPSG13_1P_2048x32_c2_bm_bist.v
+VERILOG_SOURCES += $(SRAM_MODEL_DIR)/RM_IHPSG13_1P_1024x32_c2_bm_bist.v
 
 endif
 

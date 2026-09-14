@@ -28,3 +28,34 @@ class ExtendPowerStripes(OdbpyStep):
 
     def get_script_path(self):
         return os.path.join(HERE, "odb_stripes.py")
+
+
+# --- netgen writes the IHP SRAM's power pin names (VDD!, VSS!, VDDARRAY!) into
+# its LVS JSON with a stray backslash ("\VDD!"), which is not a valid JSON
+# escape, and librelane.steps.netgen.LVS then dies in json.loads before the
+# LVS checker runs.  Give that module a json namespace whose loads() doubles
+# such backslashes first (the metrics only count entries; names do not matter).
+import json as _json
+import re as _re
+import types as _types
+
+import librelane.steps.netgen as _netgen
+
+_BAD_ESCAPE = _re.compile(r'\\(\\|[^"\\/bfnrtu])')
+
+
+def _repair_escapes(s):
+    return _BAD_ESCAPE.sub(lambda m: '\\\\' if m.group(1) == '\\' else '\\\\' + m.group(1), s)
+
+
+def _loads_repairing_escapes(s, *args, **kwargs):
+    try:
+        return _json.loads(s, *args, **kwargs)
+    except _json.JSONDecodeError:
+        return _json.loads(_repair_escapes(s), *args, **kwargs)
+
+
+_netgen.json = _types.SimpleNamespace(
+    loads=_loads_repairing_escapes, load=_json.load, dumps=_json.dumps, dump=_json.dump,
+    JSONDecodeError=_json.JSONDecodeError,
+)

@@ -104,7 +104,7 @@ CFG0 (existing layout, extended):
 | 28 | shift_in_cond | the shifter shifts in cond_out[0] instead of a pin: an FSM-decoded bit (NRZI, Manchester) or a constant (4h) |
 | 29 | flag_latch | OUT_LATCH stores {cond_out[1], cond_out[0]} in latched_in and output 19 in flag2: three FSM-settable flags (4h) |
 | 30 | comm_load_k | OUT_COMM_LOAD takes constant K[{out20, out18}] from CONST instead of preload[7:0] (4h) |
-| 31 | spare | |
+| 31 | fifo_sram | this shard's FIFO is the 8 KB SRAM FIFO (4i); one per PRISM, shard 0 wins if both ask |
 
 CFG1 (as built):
 
@@ -238,7 +238,7 @@ RX (0) the FSM pushes `comm` with OUT_FIFO_WR_RD and the host pops by
 reading +0x20; TX (1) the host pushes by writing +0x20 and OUT_FIFO_WR_RD
 pops the head into `comm` (a load: comm_count follows `comm_load_one`).
 Push on full and pop on empty are ignored.  +0x24 reads
-{count[12:8], almost_full[3], almost_empty[2], full[1], empty[0]}; any
+{count[21:8], almost_full[3], almost_empty[2], full[1], empty[0]}; any
 write flushes.  CFG1[19:16] / [23:20] are the almost-empty (count <=)
 and almost-full (count >= 16 - level) levels.  Inputs 20 empty, 21 full,
 26 almost_full, 27 almost_empty.  Contents survive PRISM disable, so a TX
@@ -347,6 +347,123 @@ future macros; the two-column layout keeps each bank's four words closest
 to the logic between the columns, which is where its PRISM-path margin
 comes from.  Typ WNS is the CPU's QSPI clock output path in the stacked
 and 2x2 runs.  The 2x2 layout was chosen for the open area.
+
+### 4d.1 Floorplan with the SRAM (2026-09-14)
+
+Adding the 1024x32 SRAM (section 4i) broke every floorplan that had
+routed before, and the reasons turned out to be structural rather than a
+matter of density:
+
+- **A CFGMEM column is a routing wall.**  Global-routing overflow maps
+  (`global_route -congestion_report_file` on the pre-route ODB, binned
+  50 um) of the reference two-column run and of every SRAM layout put all
+  the overflow over the LEFT16 column and its cell strips, none in the
+  open half of the tile.  The macro blocks Metal2 completely and its Metal3
+  route-through is chopped into short pieces, so east-west crossings only
+  fit in the 166 um strips between the four macros.  Any logic on the far
+  side of a column from the channel (TinyQV, the SRAM wrapper) pays for
+  that; spreading the placement (target density 40) made it worse.
+- **The SRAM is a wall on every layer.**  Its LEF obstructs Metal1-3 fully
+  and Metal4 everywhere except its own 2.81 um power columns (0.26 um
+  margin), so nothing crosses it, and a stripe over it must sit inside a
+  column of the same polarity.  The columns alternate VDD/VSS every 5.62 um
+  (11.24 um per polarity) in two 16-column halves, the right one 0.67 um
+  off the left one's grid, around a ~57 um irregular centre band.  Its 190
+  signal pins are Metal2 on one long face (`FS` puts them on top).
+- **The first SRAM FIFO wrapper was the area problem**, not the SRAM:
+  1380 cells / 20k um2 (section 4i); the word-assembly rewrite is 9.7k.
+
+Column layouts with the SRAM flush left (wrapper above it, pins on top):
+
+| layout (LEFT16 column x, SRAM x)             | GRT overflow | DRT                          |
+|----------------------------------------------|--------------|------------------------------|
+| 751 / 3.36, byte-queue wrapper               | 4354         | 33k 22k 19k 8.8k 6.4k (stopped) |
+| 751 / 3.36, word wrapper                     | 8179         | not run                      |
+| 451 / 3.36 (31 um corridor to the SRAM)      | 2237         | plateau ~105: all shorts inside the SRAM, the corridor overflowed and the router forced wires through the macro |
+| 501 / 3.36 (81 um corridor)                  | 1803         | 24354 11729 10634 772 39 20 11 11 0 |
+
+The 501 layout routes; its typ setup slack is +0.79 ns.  It is kept as
+the fallback (`src/config_left501.json`).
+
+**Band layout on the SRAM's grid (user's plan).**  To put the 2x2 band
+back at the top with the SRAM underneath, the tile stripes have to run
+through the SRAM on its columns and through the CFGMEM macros on their
+rails at the same x.  Both macro types were regenerated in DFFRAM with
+`PDN_VPITCH` 44.96 (= 4 x 11.24) and `PDN_VSPACING` 3.52 (VGND 5.62 um
+from VPWR), rails at 11.44 / 17.06 + 44.96k from the macro origin, one
+minute per macro, DRC/LVS clean.  The tile uses the same pitch and
+spacing with `FP_PDN_VOFFSET` 6.15, so the first VPWR stripe is at 9.03 um
+= the SRAM at x 3.36 plus its first VDD column; CFGMEM macros then go at
+x = -2.41 + 44.96k and the SRAM at 3.36 + 11.24i.  With that, ten stripe
+pairs cross the SRAM: four exact, five nudged 0.67-0.83 um (still
+overlapping the rail above by 1.3-1.4 um of its 2.1), two redrawn on the
+nearest centre-band column (~10 um; the rail above them is fed through
+the macro's Metal1 row rails instead).  The stripe step (`odb_stripes.py`)
+now collects SRAM columns and all rails first, keeps redrawn stripes 0.24
+um clear of opposite-polarity rails, treats any stripe overlapping the
+SRAM as crossing it, and skips a rail stripe that would cross the SRAM
+off-column.  Placement rules learned: no sliver channel next to a macro
+(SRAM at 7.21 left 3.84 um to the core edge: PDN-0179), keep the SRAM out
+of the tile pin zone x 29.76-191.04 (Metal4 pin stubs on a 3.84 um pitch
+that no 44.96 grid interleaves with), and 2 um horizontal macro halo
+(KLayout NW.b: n-well spacing 1.24 um where cells abut the SRAM).
+
+| band variant                                                 | GRT overflow |
+|--------------------------------------------------------------|--------------|
+| SRAM at 187 (pocket to its west filled with TinyQV)          | 13764        |
+| SRAM flush left, both rows facing the 22.68 um gap           | 5341         |
+| SRAM bottom right (1284.72), lower row pins facing down      | 3643         |
+
+| 60 um gap, column D lower macro facing the gap               | 4483 (10% more wire: the band ate 65k um2 of cell area) |
+| as row 3 but only column D's lower macro facing the gap (v6)  | 2884, DRT to 0 in 12 iterations, KLayout DRC 0, LVS clean, typ +0.38 ns / hold +0.002 ns |
+
+Row 3 (v4) ran detailed routing to a plateau of 357 violations, every one
+of them inside the SRAM footprint: the hi programming chain from column
+D's downward-facing lower macro to column C dived through the SRAM because
+the corridor above it also held the wrapper and the SRAM pins.  Nothing
+else in the band layout was left unrouted, hence v6.
+
+**Plan of record (2026-09-14 evening): the two-column layout on the
+44.96 um grid.**  LEFT16 column at x 537.11 (117 um corridor to the
+SRAM), IHP16 column at 1346.39 (478 um channel), SRAM flush left at 3.36
+(`FS`), `FP_PDN_VOFFSET` 6.15, 2 um horizontal halo, KLayout DRC instead
+of Magic DRC (`src/config.json`; the tile-level keys come from tt_tool).
+Results: GRT overflow 1734, DRT 24445 12066 10839 1093 73 0 (five
+iterations), typ setup +0.59 ns, hold clean, KLayout DRC 0 items over
+333 rules, LVS "circuits match uniquely" with all counts zero.  Magic's
+extraction still reports 22 "illegal overlap between obsm4 and metal4":
+the VPWR stripes crossing the LEF keep-out bar at each VDD column's
+VDD!/VDDARRAY! break (LEF y 39-45), where the GDS has no metal at all, so
+`ERROR_ON_ILLEGAL_OVERLAPS` is 0 with that reason in the config.  The
+band layouts are kept in `src/config_band*.json` for the day a CONST SRAM
+needs the space; the regenerated macros and the grid serve both.
+
+**Band v6 recipe (kept for a rainy day).**  If a later addition (PRISM
+tracing into the SRAM, a CONST lookup SRAM) pushes the column POR off the
+routing cliff, the band layout is the fallback and `src/config_band_v6.json`
+holds it verbatim: CFGMEM 2x2 band at the top on the 44.96 um grid, rows
+619.92 (N) and 510.30, columns 87.51 / 447.19 / 941.75 / 1301.43 (the POR
+bank assignment of section 4d); the lower row upright (`N`, pins facing
+down into the logic) except column D, whose lower macro is flipped (`FS`,
+pins into the 22.68 um gap) because the SRAM sits below it; SRAM bottom
+right at (1284.72, 3.78) `FS`; `FP_PDN_VOFFSET` 6.15, `FP_PDN_VSPACING`
+3.52, 2 um halo, KLayout DRC.  Things that made it worse and need not be
+retried: the SRAM anywhere but a corner (pocket), both rows facing the gap
+(the POR arrangement), a 60 um gap, and a lower target density.  Run it
+directly with `python -m librelane ... src/config_band_v6.json` (the file
+carries the tile keys tt_tool merges for `make harden-tt`).
+
+**Signoff with the SRAM.**  Magic DRC reports 2.2 million violations
+inside the macro (it has no notion of the bit cells) and is not what the
+Tiny Tapeout precheck runs for ihp-sg13cmos5l; the precheck runs the
+PDK's KLayout deck, so the local flow does too (`RUN_MAGIC_DRC` 0,
+`RUN_KLAYOUT_DRC` 1 with the IHP-Open-PDK dev-branch runset).  That deck
+is clean on every FEOL table with the SRAM in the tile.  netgen writes the
+SRAM's `VDD!`/`VSS!`/`VDDARRAY!` names into its LVS JSON with a stray
+backslash, which made the LibreLane LVS step die in the JSON parser;
+`librelane_plugin_prism_pdn.py` gives that step a repairing loader.  The
+column-grid run above is the first clean DRC + LVS with the SRAM in the
+tile.
 
 ## 4e. Bank addressing when unfractured (timing)
 
@@ -466,6 +583,87 @@ Findings, in order of weight:
 6. The input synchroniser delay matters when the FSM reads its own drive
    back (the hold state first tried that and locked on the old level);
    flags or state are the right source for a level the FSM set itself.
+
+## 4i. SRAM FIFO: 8 KB on the 2048x32 macro (2026-09-14)
+
+`prism_sram_fifo.v` puts a byte FIFO on the IHP single-port
+`RM_IHPSG13_1P_2048x32_c2_bm_bist` macro, instantiated inside the PRISM
+peripheral (parameter `SRAM_FIFO`, driven by the define `PRISM_SRAM_FIFO`
+in peripherals.v; `-DPRISM_SRAM_FIFO=0` builds without the macro).  A
+shard makes it its FIFO with CFG0[31]: the shard's push / pop strobes,
+head byte, count and flags then come from the SRAM FIFO and its flop FIFO
+idles, so a chroma sees no difference except the depth (8192 bytes,
+status count field widened to [21:8]) and the almost-empty / almost-full
+levels, which are in 64-byte units.  One SRAM per PRISM: shard 0 wins if
+both shards set the bit.  With the two-FIFO mode of 4b, shard 0 can own
+an 8 KB TX buffer (shard 1's bit) next to its flop RX FIFO, or the other
+way round (its own bit), which is the Ethernet arrangement.
+
+Inside: four bytes per word, whole-word accesses only.  Pushes assemble
+a word in a register and the fourth byte writes it (writes have the
+port); a cached head word means pops within a word cost no access.  A
+pop that leaves the word reads the next one at once (one clock later if
+a word is being written that clock) and reports `empty` for the two or
+three clocks until the data is back; while the reader is inside the word
+still being assembled the head comes straight from that register, and a
+write to the reader's word refreshes the cache.  Words complete at most
+every four clocks, so no write is ever queued and a push is refused only
+when `full`.  (The first version kept a four-entry byte queue with
+per-byte writes and merges: 20k um2 of cells, more than both flop FIFOs;
+this one is about 10k.)
+The read data of the macro is registered (one clock).  The unit test
+(`SramFifoTest`) pushes and pops through the shard windows and runs the
+fifo_loop chroma in both directions across many word boundaries.
+
+Simulation uses the PDK's behavioural model with `FUNCTIONAL` defined
+(A_DLY tied high, BIST tied off); synthesis sees the black box in
+`sram_2048x32_bb.v`.  The macro's power hookup and placement are in 4d /
+section 7: two-column CFGMEM layout, SRAM on the left with the tile
+stripes drawn on its own tracks.
+
+## 4j. Ethernet transmitter chroma: the second stretch-goal evaluation (2026-09-14)
+
+`chromas/chroma_eth_tx.v` with the decoder model `test/user_peripherals/
+prism/eth_model.py` sends 10BASE-T frames from the SRAM FIFO (4i): TXD on
+uo_out[1] from cond_out[0], TX_EN on uo_out[2], six clocks per bit at the
+test clock (three per half bit, count1 as the half-bit timer with preload
+2).  Manchester coding costs no decision: the line is the LUT
+`shift_data ^ first_half`, so a bit is two states that advance on the
+timer, and the shift, pop and CRC update ride on those transitions.  The
+frame is four 0x55 from constant K0, four bytes from the FIFO (the host
+queues 55 55 55 D5 in front of the frame), the frame bytes with the CRC32
+running on every bit, the four FCS bytes from the CRC unit through comm
+(one OUT_LOAD_CRC per byte, low byte first), TP_IDL for two bit times,
+the host interrupt.  count2 counts bytes or half bits in each phase
+against compare = 3.  A toggle of host_in[0] starts a frame and a toggle
+of host_in[1] sends a link pulse, both through the in_prev edge capture.
+Sixteen states.  The test sends a 64-byte and a 300-byte frame (the
+latter streamed from the SRAM FIFO, which refills its head word in the
+gaps) and a link pulse; the decoder checks every byte and the FCS.
+
+Findings:
+
+1. **Transmit fits with room to spare**: 16 of 32 states, and the datapath
+   kept up at six clocks per bit with a byte pop every 48 clocks, so a
+   hardware Manchester encoder is not needed for transmit.
+2. **The CRC must be updated mid-bit**: updating at the end of the bit,
+   in the same transition that loads the first FCS byte, hands the load
+   the value before the last bit.  Mid-bit updates are the natural fix
+   and cost nothing.
+3. **One preload is one timer**: the 16 ms link-pulse interval cannot live
+   in count1 while count1 is the half-bit timer, so the CPU asks for
+   pulses.  A second preload, or a free-running timer input, would let
+   the chroma keep the link alive alone.  The same applies to the 9.6 us
+   inter-frame gap.
+4. **count2 as the phase counter** worked because every phase happens to
+   be four long (preamble halves, FCS bytes, TP_IDL half bits); a second
+   compare value or a third counter would remove that coincidence.
+5. **The 32-bit CRC mode is a CFG0 bit that is easy to miss**: the first
+   run produced a 16-bit FCS padded with 0xFF.  The chroma CFG0 constants
+   deserve named fields in the compiler's cfg.
+6. Receive is the open question: classifying 3- versus 6-clock edge
+   intervals with two-flop synchronised inputs and one decision per clock
+   is where a hardware decoder or a faster clock would be needed.
 
 ## 5. FIFO storage, item 9: SRAM spike result
 

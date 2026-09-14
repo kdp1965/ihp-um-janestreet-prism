@@ -51,31 +51,31 @@
       "instances": {
         "i_peripherals.CFGMEMS_LEFT[0].cfgmem_lo": {
           "location": [
-            537.11,
-            3.78
+            447.19,
+            619.92
           ],
-          "orientation": "FS"
+          "orientation": "N"
         },
         "i_peripherals.CFGMEMS_LEFT[0].cfgmem_hi": {
           "location": [
-            537.11,
-            257.04
+            1301.43,
+            619.92
           ],
           "orientation": "N"
         },
         "i_peripherals.CFGMEMS_LEFT[1].cfgmem_lo": {
           "location": [
-            537.11,
-            366.66
+            447.19,
+            510.3
           ],
-          "orientation": "FS"
+          "orientation": "N"
         },
         "i_peripherals.CFGMEMS_LEFT[1].cfgmem_hi": {
           "location": [
-            537.11,
-            619.92
+            1301.43,
+            510.3
           ],
-          "orientation": "N"
+          "orientation": "FS"
         }
       },
       "gds": [
@@ -108,29 +108,29 @@
       "instances": {
         "i_peripherals.CFGMEMS[2].cfgmem_lo": {
           "location": [
-            1346.39,
-            3.78
+            87.51,
+            619.92
           ],
-          "orientation": "FS"
+          "orientation": "N"
         },
         "i_peripherals.CFGMEMS[2].cfgmem_hi": {
           "location": [
-            1346.39,
-            257.04
+            941.75,
+            619.92
           ],
           "orientation": "N"
         },
         "i_peripherals.CFGMEMS[3].cfgmem_lo": {
           "location": [
-            1346.39,
-            366.66
+            87.51,
+            510.3
           ],
-          "orientation": "FS"
+          "orientation": "N"
         },
         "i_peripherals.CFGMEMS[3].cfgmem_hi": {
           "location": [
-            1346.39,
-            619.92
+            941.75,
+            510.3
           ],
           "orientation": "N"
         }
@@ -165,7 +165,7 @@
       "instances": {
         "i_peripherals.i_prism.SRAM.M1024.i_sram": {
           "location": [
-            3.36,
+            1284.72,
             3.78
           ],
           "orientation": "FS"
@@ -216,11 +216,54 @@
   "VERILOG_DEFINES": [
     "PRISM_SRAM_AW=10"
   ],
+  "DESIGN_NAME": "tt_um_pettit_js_prism",
+  "VERILOG_FILES": [
+    "dir::project.v",
+    "dir::peripherals.v",
+    "dir::user_peripherals/uart/peri_uart.v",
+    "dir::user_peripherals/uart/uart_rx.v",
+    "dir::user_peripherals/uart/uart_tx.v",
+    "dir::user_peripherals/prism/prism_periph.v",
+    "dir::user_peripherals/prism/prism_datapath.v",
+    "dir::user_peripherals/prism/prism_fifo.v",
+    "dir::user_peripherals/prism/prism_sram_fifo.v",
+    "dir::user_peripherals/prism/sram_2048x32_bb.v",
+    "dir::user_peripherals/prism/prism_crc.v",
+    "dir::user_peripherals/prism/latch_shift_reg.v",
+    "dir::user_peripherals/prism/latch_loader.v",
+    "dir::user_peripherals/prism/prism.v",
+    "dir::user_peripherals/prism/prism_sr_sit.v",
+    "dir::user_peripherals/prism/prism_latch_sit.v",
+    "dir::user_peripherals/prism/prism_latch_reg.v",
+    "dir::user_peripherals/cfgmem/cfgmem_periph.v",
+    "dir::tinyQV/cpu/tinyqv.v",
+    "dir::tinyQV/cpu/alu.v",
+    "dir::tinyQV/cpu/core.v",
+    "dir::tinyQV/cpu/counter.v",
+    "dir::tinyQV/cpu/cpu.v",
+    "dir::tinyQV/cpu/decode.v",
+    "dir::tinyQV/cpu/mem_ctrl.v",
+    "dir::tinyQV/cpu/qspi_ctrl.v",
+    "dir::tinyQV/cpu/register.v",
+    "dir::tinyQV/cpu/latch_reg.v",
+    "dir::tinyQV/cpu/time.v",
+    "dir::tinyQV/peri/uart/uart_tx.v"
+  ],
+  "DIE_AREA": "0 0 1724.16 710.64",
+  "FP_DEF_TEMPLATE": "dir::../tt/tech/ihp-sg13cmos5l/def/tt_block_8x4_pgvdd.def",
+  "VDD_PIN": "VPWR",
+  "GND_PIN": "VGND",
+  "RT_MAX_LAYER": "Metal4",
   "FP_PDN_VSPACING": 3.52,
+  "//pdn": "44.96 um pitch = 4 x 11.24 (IHP 1P SRAM same-polarity column pitch); VGND 5.62 um from VPWR (2.1 + 3.52) = the SRAM VDD/VSS alternation; CFGMEM macros regenerated on this grid (DFFRAM platform tech.yml), place them at x = 1.44 + 44.96k, the SRAM at x = 7.21 + 44.96j (+ 11.24i)",
+  "//sram": "SRAM bottom right at 1284.72 (= 3.36 + 114 x 11.24, columns on the stripe grid; 19 um channel to the core edge so pdngen needs no repair). Flush left it sat under the tile pins and TinyQV, the placer wrapped TinyQV around its corner and routed through it, while the 300 um under column D stayed empty.",
   "FP_PDN_VOFFSET": 6.15,
+  "//pdn_offset": "VOFFSET 6.15 puts the first VPWR stripe at 9.03 = SRAM at x 3.36 (flush to the core edge, no sliver channel) + its first VDD column 5.67; rails then need macros at x = -2.41 + 44.96k",
   "RUN_MAGIC_DRC": 0,
   "KLAYOUT_DRC_RUNSET": "/Users/Ken2/projects/fossi/ihp-open-pdk-dev/ihp-sg13cmos5l/libs.tech/klayout/tech/drc/ihp-sg13cmos5l.drc",
-  "//layout": "Two columns on the 44.96 um grid (regenerated CFGMEM rails at 11.44/17.06 + 44.96k, tile VOFFSET 6.15 so the SRAM flush left at 3.36 has its columns on the stripes): LEFT16 at -2.41 + 44.96*12 = 537.11 (117 um corridor to the SRAM; 31 um failed, 81 um routed), IHP16 at -2.41 + 44.96*30 = 1346.39 (channel 478 um). Magic DRC off (no notion of the SRAM bit cells), KLayout deck on, 2 um halo for NW.b at the SRAM edge.",
-  "ERROR_ON_ILLEGAL_OVERLAPS": 0,
-  "//illegal_overlap": "Magic extracts the SRAM from its LEF abstract, whose Metal4 OBS includes a keep-out bar at the VDD!/VDDARRAY! column break (LEF y 39-45); the GDS has no metal there, so a VPWR stripe across it only bridges the two supply pins the PDN ties together anyway. 22 such spots, all on VDD columns; KLayout DRC (precheck deck) and LVS are clean, so this check is waived."
+  "//drc": "Magic has no notion of the IHP SRAM bit cells (2.2M false violations inside the macro); the TT precheck for ihp-sg13cmos5l runs only the KLayout PDK deck, so that is the local signoff too (dev-branch deck: the pinned PDK copy has broken includes)",
+  "//rows": "Upper row 619.92 N (pins face the gap); lower row 510.30 N (pins face down) for columns A-C, FS (pins into the gap) for column D whose lower macro sits above the SRAM: with it facing down (v4) the hi chain to column C dived through the SRAM (357 shorts, all inside the SRAM footprint, nothing else left); a 60 um gap (v5) cost 10% more wire",
+  "//halo": "KLayout NW.b (n-well spacing 1.24 um): cells abutting the SRAM at the 0.48 um halo violate it along its long edges; 2 um keeps them off",
+  "//recipe": "Band v6 recipe (2026-09-14), kept as the alternative floorplan if PRISM tracing into the SRAM or a CONST SRAM pushes the column POR off the routing cliff: CFGMEM 2x2 band at the top on the 44.96 um grid (rows 619.92 N / 510.30, columns 87.51 / 447.19 / 941.75 / 1301.43), lower row N (pins down) except column D lower FS (pins into the gap) because the SRAM sits under column D; SRAM bottom right at 1284.72 FS; VOFFSET 6.15, VSPACING 3.52, halo 2.0, KLayout DRC on, Magic DRC off. Result: GRT 2884, DRT 0 in 12 iterations, KLayout DRC 0, LVS clean, typ setup +0.38 ns, hold +0.002 ns. Add ERROR_ON_ILLEGAL_OVERLAPS 0 (26 Magic abstract-overlap spots of the same kind as the POR). Run it directly: python -m librelane ... --run-tag band --force-run-dir runs/band src/config_band_v6.json (this file carries the tile keys tt_tool would otherwise merge).",
+  "ERROR_ON_ILLEGAL_OVERLAPS": 0
 }
