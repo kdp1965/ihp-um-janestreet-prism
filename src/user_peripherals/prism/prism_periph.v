@@ -40,6 +40,8 @@
 //                     K3 also the comm match value
 //     +0x3C  CFG3     Manchester bit recoverer (prism_mrx.v): [2:0] receive pin (PRISM input 0-6), [3] enable,
 //                     [7:4] clocks per half bit, [8] shifter input = the recovered bit (slot code 15 = bit valid)
+//     +0x40  PRELOAD2 free-running timer: a 24-bit down counter reloads from it and raises input 28 (default
+//                     slot value) for one clock every PRELOAD2 + 1 clocks; 0 = off (Ethernet link pulses)
 //
 // CFG0 bits (chroma ctrl_reg; the datapath ones are decoded in prism_datapath.v):
 //     1:0  shift_in_sel      6 clr_not_load     7 latch_in_out    8 shift_en
@@ -84,7 +86,7 @@
 //     20   FIFO flag slot E (default empty)   21 FIFO flag slot F (default full)
 //     22   crc_ok   23 count1_wrap   24 sema_in   25 other_shard_halt
 //     26   FIFO B flag slot E   27 FIFO B flag slot F (shard 0, unfractured; else 0)
-//     31:28 spare
+//     28    timer2 tick (slot default; CFG2 may select something else)   31:29 spare
 //
 // CFG1 (per shard):
 //     3:0 / 7:4 / 11:8 / 15:12  in_prev[0..3] source: PRISM input number of the
@@ -206,6 +208,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     localparam [6:0] SH_CFG2    = 7'h34;    // input slot selects
     localparam [6:0] SH_CONST   = 7'h38;    // constants K3..K0 (K3 also the comm match value)
     localparam [6:0] SH_CFG3    = 7'h3C;    // Manchester bit recoverer
+    localparam [6:0] SH_PRELOAD2 = 7'h40;   // free-running timer period (24 bits)
     localparam       CFG3_MRX_EN    = 3;    // CFG3: [2:0] pin, [3] enable, [7:4] clocks per half bit
     localparam       CFG3_SHIFT_MRX = 8;    //       [8] shifter input = recovered bit
 
@@ -240,6 +243,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     wire [32*SHARDS-1:0] cfg1_v;
     wire [32*SHARDS-1:0] cfg2_v;
     wire [32*SHARDS-1:0] cfg3_v;
+    wire [32*SHARDS-1:0] preload2_v;
     wire [32*SHARDS-1:0] const_v;
     wire [32*SHARDS-1:0] fifo_st_v;
     wire [8*SHARDS-1:0]  fifo_head_v;
@@ -418,6 +422,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire  [3:0]               pin_out = out_s[3:0];
             wire                      sema_clr = exec & out_s[OUT_SEMA_CLEAR] & fractured;
             wire [31:0]               cfg3;
+            wire [31:0]               preload2;
+            wire                      preload2_en;
             wire                      mrx_valid, mrx_value;      // Manchester bit recoverer
             wire                      shift_in_bit = cfg3[CFG3_SHIFT_MRX]    ? mrx_value :
                                                      cfg0[CFG_SHIFT_IN_COND] ? cond_s[0] : pin_in[{1'b0, cfg0[1:0]}];
@@ -597,11 +603,40 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign in_s[13:12] = cfg0[CFG_LATCH_IN_OUT] ? {latched_out[6], latched_out[1]} : latched_in;
             assign in_s[14]    = shift_term;
             assign in_s[15]    = count2_eq_comm;
+            // Free-running timer (PRELOAD2): reloads itself and ticks for one
+            // clock every PRELOAD2 + 1 clocks; the default value of input 28.
+            // Nothing in the FSM needs to start it, which is the point: it
+            // paces things like Ethernet link pulses while count1 is busy.
+            reg  [23:0]               timer2;
+            reg                       timer2_tick;
+            always @(posedge clk or negedge rst_n)
+            begin
+                if (!rst_n)
+                begin
+                    timer2      <= 24'h0;
+                    timer2_tick <= 1'b0;
+                end
+                else
+                begin
+                    timer2_tick <= 1'b0;
+                    if (preload2[23:0] == 24'h0)
+                        timer2 <= 24'h0;
+                    else if (timer2 == 24'h0)
+                    begin
+                        timer2      <= preload2[23:0];
+                        timer2_tick <= 1'b1;
+                    end
+                    else
+                        timer2 <= timer2 - 24'd1;
+                end
+            end
+
             genvar sl;
             for (sl = 0; sl < 4; sl = sl + 1)
             begin : SLOTS
                 assign in_s[16+sl] = slot_val(cfg2[4*sl +: 4],    in_prev[sl], in_prev, comm, comm_match, flag2, mrx_valid);
-                assign in_s[28+sl] = slot_val(cfg2[16+4*sl +: 4], 1'b0,        in_prev, comm, comm_match, flag2, mrx_valid);
+                assign in_s[28+sl] = slot_val(cfg2[16+4*sl +: 4], (sl == 0) ? timer2_tick : 1'b0,
+                                              in_prev, comm, comm_match, flag2, mrx_valid);
             end
 
             // Manchester bit recoverer: its bit valid is slot code 15, its bit
@@ -735,6 +770,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign cfg2_en     = win && shard_off == SH_CFG2;
             assign const_en    = win && shard_off == SH_CONST;
             assign cfg3_en     = win && shard_off == SH_CFG3;
+            assign preload2_en = win && shard_off == SH_PRELOAD2;
             assign crc_poly_en = win && shard_off == SH_CRC_POLY;
             assign crc_exp_en  = win && shard_off == SH_CRC_EXP;
 
@@ -787,6 +823,14 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 .data_in    ( latch_data    ),
                 .data_out   ( cfg3          )
             );
+            prism_latch_reg #( .WIDTH ( 32 ) ) preload2_reg
+            (
+                .rst_n      ( rst_n         ),
+                .enable     ( preload2_en   ),
+                .wr         ( latch_wr      ),
+                .data_in    ( latch_data    ),
+                .data_out   ( preload2      )
+            );
             prism_latch_reg #( .WIDTH ( 32 ) ) cfg0_reg
             (
                 .rst_n      ( rst_n         ),
@@ -815,7 +859,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             reg [31:0] cfg0_r;
             reg [20:0] pinmux_r;
             reg [31:0] preload_r;
-            reg [31:0] cfg1_r, crc_poly_r, crc_exp_r, cfg2_r, const_r, cfg3_r;
+            reg [31:0] cfg1_r, crc_poly_r, crc_exp_r, cfg2_r, const_r, cfg3_r, preload2_r;
             always @(posedge clk or negedge rst_n)
             begin
                 if (~rst_n)
@@ -829,6 +873,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                     cfg2_r     <= 32'h0;
                     const_r    <= 32'h0;
                     cfg3_r     <= 32'h0;
+                    preload2_r <= 32'h0;
                 end
                 else
                 begin
@@ -841,6 +886,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                     if (cfg2_en & prism_wr)     cfg2_r     <= data_in;
                     if (const_en & prism_wr)    const_r    <= data_in;
                     if (cfg3_en & prism_wr)     cfg3_r     <= data_in;
+                    if (preload2_en & prism_wr) preload2_r <= data_in;
                 end
             end
             assign cfg0     = cfg0_r;
@@ -852,6 +898,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign cfg2     = cfg2_r;
             assign consts   = const_r;
             assign cfg3     = cfg3_r;
+            assign preload2 = preload2_r;
 `endif
 
             // Export for the read mux and cross-shard use
@@ -866,6 +913,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign cfg1_v    [32*s +: 32] = cfg1;
             assign cfg2_v    [32*s +: 32] = cfg2;
             assign cfg3_v    [32*s +: 32] = cfg3;
+            assign preload2_v[32*s +: 32] = preload2;
             assign const_v   [32*s +: 32] = consts;
             assign fifo_st_v [32*s +: 32] = {10'h0, fifo_count, 4'h0, fifo_af, fifo_ae, fifo_full, fifo_empty};
             assign fifo_head_v[8*s +: 8]  = fifo_head;
@@ -1077,6 +1125,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 SH_CRC_EXP: reg_word = crc_exp_v[32*shard_sel +: 32];
                 SH_CFG2:    reg_word = cfg2_v   [32*shard_sel +: 32];
                 SH_CFG3:    reg_word = cfg3_v   [32*shard_sel +: 32];
+                SH_PRELOAD2: reg_word = preload2_v[32*shard_sel +: 32];
                 SH_CONST:   reg_word = const_v  [32*shard_sel +: 32];
                 default:    reg_word = 32'h0;
             endcase

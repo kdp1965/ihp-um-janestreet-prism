@@ -188,9 +188,11 @@ registers only:
 | +0x28 | CRC ctrl: init value select, poly select |
 | +0x2C | CRC value (read; write = preset) |
 | +0x30 | CRC expected |
-| +0x34 | OUT_MASK (fractured mode) |
-| +0x38 | COND_MASK (fractured mode) |
-| +0x3C-0x7C | spare (Manchester block, count3, ...) |
+| +0x34 | CFG2: input slot selects for inputs 16-19 and 28-31 (4 bits each), section 4h |
+| +0x38 | CONST: K0..K3 (K3 also the comm match value), section 4h |
+| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit), section 4k |
+| +0x40 | PRELOAD2: free-running timer period (24 bits), input 28 ticks every PRELOAD2 + 1 clocks, 0 = off, section 4l |
+| +0x44-0x7C | spare |
 
 The SDK (`prism.h`, item 11) then needs only a base per shard and the
 common block; the per-config remap is the base addresses plus a feature
@@ -669,7 +671,8 @@ Findings:
    in count1 while count1 is the half-bit timer, so the CPU asks for
    pulses.  A second preload, or a free-running timer input, would let
    the chroma keep the link alive alone.  The same applies to the 9.6 us
-   inter-frame gap.
+   inter-frame gap.  (Answered: PRELOAD2, section 4l; the inter-frame gap
+   can use count1, which is idle between frames.)
 4. **count2 as the phase counter** worked because every phase happens to
    be four long (preamble halves, FCS bytes, TP_IDL half bits); a second
    compare value or a third counter would remove that coincidence.
@@ -722,6 +725,26 @@ PRISM with the two SRAM FIFOs.  Still to do: the FPGA / board level
 (differential receiver and driver behind the magnetics), destination
 filtering (software or the CONST table), and the 16 ms link pulses (a
 second timer, finding 3 of 4j).
+
+## 4l. The second timer: PRELOAD2 (2026-09-14)
+
+A free-running 24-bit timer per shard (`PRELOAD2` at +0x40): it reloads
+itself and raises PRISM input 28 for one clock every PRELOAD2 + 1 clocks
+(0 = off).  Input 28 was a spare whose CFG2 default was a constant 0; the
+tick is now that default, so no slot code and no output bit were needed.
+Nothing in the FSM starts or reloads it, which is the point: it paces
+things while count1 is busy.  `chroma_eth_tx` sends a link pulse on the
+tick as well as on the host's toggle (`nlp_tick | (host1 ^ in_prev1)`;
+the compiler wants the bitwise form, `||` with a `!=` inside is rejected),
+so with PRELOAD2 = 959999 at 60 MHz the link stays alive with no CPU
+help, and a frame in flight simply ignores ticks (the FSM is not in IDLE).
+Test: four pulses in four periods, none with the timer off, a frame
+transmitted intact with the timer ticking.  SDK: `prism_set_timer2()`.
+
+If a future feature does need an FSM output rather than an input, the
+escape hatch is to widen the STEW with instantiated latches strobed by
+the existing WROW lines: not as dense as the CFGMEM bits, but a couple of
+outputs times three branches is a few dozen latches per shard.
 
 ## 5. FIFO storage, item 9: SRAM spike result
 

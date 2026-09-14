@@ -56,6 +56,7 @@ REG_CRC_EXP = 0x130
 REG_CFG2    = 0x134       # input slot selects (4 bits each: inputs 16-19, 28-31)
 REG_CONST   = 0x138       # constants K3..K0 (K3 = comm match value)
 REG_CFG3    = 0x13C       # [2:0] Manchester receive pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit
+REG_PRELOAD2= 0x140       # free-running timer period (24 bits): input 28 ticks every PRELOAD2 + 1 clocks; 0 = off
 
 CFG_FIFO_DIR_TX = 1 << 23
 CFG_FIFO_SRAM   = 1 << 31   # this shard's FIFO is its SRAM FIFO

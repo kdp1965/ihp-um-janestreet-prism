@@ -775,6 +775,17 @@ class EthernetTxTest(PrismTest):
             await self.clocks(BIT)
         assert dec.pulses == 1
 
+        self.log("link pulses from the free-running timer (PRELOAD2)")
+        period = BIT * 40                                                     # 40 bit times between pulses
+        await tqv.write_word_reg(REG_PRELOAD2, period - 1)
+        before = dec.pulses
+        await self.clocks(period * 4 + BIT * 4)
+        assert 3 <= dec.pulses - before <= 5, f"{dec.pulses - before} pulses in four periods"
+        await tqv.write_word_reg(REG_PRELOAD2, 0)                             # off
+        before = dec.pulses
+        await self.clocks(period * 2)
+        assert dec.pulses == before, "pulses with the timer off"
+
         self.log("300-byte frame streamed from the SRAM")
         payload = [(i * 31 + 11) & 0xFF for i in range(300)]
         for b in frame(payload):
@@ -790,6 +801,21 @@ class EthernetTxTest(PrismTest):
         assert got == expect, f"{len(got)} bytes"
         await self.clocks(BIT * 4)
         assert await bench.irq()
+
+        self.log("timer pulses do not disturb a frame")
+        await tqv.write_word_reg(REG_PRELOAD2, BIT * 20 - 1)                  # a tick every 20 bit times
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        payload = [(i * 3 + 7) & 0xFF for i in range(80)]
+        for b in frame(payload):
+            await tqv.write_byte_reg(REG_FIFO, b)
+        await tqv.write_byte_reg(REG_TOGGLE, 0)
+        for _ in range(300):
+            if len(dec.frames) == 3:
+                break
+            await self.clocks(BIT * 8)
+        assert len(dec.frames) == 3
+        assert dec.frames[2] == [0x55] * 7 + [0xD5] + payload + eth.crc32(payload)
+        await tqv.write_word_reg(REG_PRELOAD2, 0)
         await bench.disable()
 
 

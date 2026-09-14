@@ -16,11 +16,13 @@
 // (OUT_LOAD_CRC through comm, low byte first), then TP_IDL: two bit
 // times high, release.  count2 counts bytes / half bits in each of those
 // phases against compare = 3.  A toggle of host_in[0] starts a frame
-// (in_prev edge), a toggle of host_in[1] sends a link pulse (one bit high).
+// (in_prev edge), a toggle of host_in[1] or the free-running timer's tick
+// (PRELOAD2, input 28) sends a link pulse (one bit high).
 // The host interrupt is raised at the end of the frame.
 //
-// Not in v1 (findings): inter-frame gap timing, the 16 ms link-pulse
-// timer (the CPU asks for pulses), collision / carrier sense, receive.
+// Not in v1 (findings): inter-frame gap timing, collision / carrier
+// sense.  Receive is chroma_eth_rx.v; the link pulses are paced by
+// PRELOAD2 (16 ms = 960000 - 1 at 60 MHz) when the host sets it.
 //
 // Host set-up: CFG1 in_prev0 <- input 8 (host_in[0]), in_prev1 <- 9;
 // CONST K0 = 0x55; compare = 3; preload = 2; CFG0 |= FIFO_SRAM as wanted;
@@ -118,6 +120,7 @@ module chroma_eth_tx
    wire shift_term  = in_data[14];   // last bit of the byte
    wire in_prev0    = in_data[16];   // host_in[0] at the last start
    wire in_prev1    = in_data[17];   // host_in[1] at the last pulse
+   wire nlp_tick    = in_data[28];   // free-running timer (PRELOAD2): time for a link pulse
    wire fifo_empty  = in_data[20];
 
    // =======================================================
@@ -194,7 +197,7 @@ module chroma_eth_tx
                count1_load  = 1'b1;
                next_state   = ST_A_H1;
             end
-            else if (host1 != in_prev1)       // link pulse
+            else if (nlp_tick | (host1 ^ in_prev1))     // link pulse: the timer, or the host
             begin
                count1_load  = 1'b1;
                next_state   = ST_NLP_A;
