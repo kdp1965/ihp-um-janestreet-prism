@@ -26,7 +26,18 @@ module chroma_fifo_loop
    output reg  [20:0]   pinmux_reg     // uo_out[7:1] source selects
 );
 
-   localparam [20:0] PINMUX             = 21'h1FFFFF;  // no pins driven
+   // uo_out[7:1] sources, 3 bits per pin: pin_out[k], cond_out[k], the
+   // shifter's output bit, or 7 = this chroma leaves the pin alone
+   localparam [2:0]  PIN_OUT0  = 3'd0, PIN_OUT1 = 3'd1, PIN_OUT2 = 3'd2, PIN_OUT3 = 3'd3;
+   localparam [2:0]  PIN_COND0 = 3'd4, PIN_COND1 = 3'd5, PIN_SHIFT = 3'd6, PIN_OFF = 3'd7;
+   localparam [2:0]  UO1_SRC  = PIN_OFF;
+   localparam [2:0]  UO2_SRC  = PIN_OFF;
+   localparam [2:0]  UO3_SRC  = PIN_OFF;
+   localparam [2:0]  UO4_SRC  = PIN_OFF;
+   localparam [2:0]  UO5_SRC  = PIN_OFF;
+   localparam [2:0]  UO6_SRC  = PIN_OFF;
+   localparam [2:0]  UO7_SRC  = PIN_OFF;
+   localparam [20:0] PINMUX    = {UO7_SRC, UO6_SRC, UO5_SRC, UO4_SRC, UO3_SRC, UO2_SRC, UO1_SRC};
 
    // =======================================================
    // States

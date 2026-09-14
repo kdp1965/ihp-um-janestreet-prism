@@ -26,6 +26,7 @@ project:
     - "user_peripherals/prism/prism_datapath.v"
     - "user_peripherals/prism/prism_fifo.v"
     - "user_peripherals/prism/prism_sram_fifo.v"
+    - "user_peripherals/prism/prism_mrx.v"
     - "user_peripherals/prism/sram_2048x32_bb.v"
     - "user_peripherals/prism/prism_crc.v"
     - "user_peripherals/prism/latch_shift_reg.v"

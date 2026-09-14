@@ -1,6 +1,7 @@
 # The PRISM unit tests, one class per subject.  Each runs on the shared
 # PrismBench (bench.py) after a reset; test.py wraps them as cocotb tests.
 
+import cocotb
 from cocotb.triggers import ClockCycles, RisingEdge
 
 from user_peripherals.prism.regs import *
@@ -18,6 +19,7 @@ from user_peripherals.prism.chroma_fifo_loop import *
 from user_peripherals.prism.chroma_edge import *
 from user_peripherals.prism.chroma_usb_ls import *
 from user_peripherals.prism.chroma_eth_tx import *
+from user_peripherals.prism.chroma_eth_rx import *
 
 
 # =============================================================================
@@ -788,6 +790,145 @@ class EthernetTxTest(PrismTest):
         assert got == expect, f"{len(got)} bytes"
         await self.clocks(BIT * 4)
         assert await bench.irq()
+        await bench.disable()
+
+
+class EthernetRxTest(PrismTest):
+    ''' 10BASE-T receive: the Manchester bit recoverer (CFG3) on ui_in[3],
+        the eth_rx chroma assembling bytes into the SRAM FIFO, the host
+        checking the bytes and the CRC32 residue.  A link pulse first (no
+        frame), a 64-byte frame, a 300-byte frame from a line 8% slower than
+        the clock, a frame with a bad FCS. '''
+    name = "ethernet rx"
+
+    async def run(self):
+        tqv, bench = self.tqv, self.bench
+        BIT = 6                                                               # clocks per bit
+        PIN = 3
+        await tqv.write_word_reg(REG_CFG3, PIN | (1 << 3) | ((BIT // 2) << 4) | (1 << 8))
+        await tqv.write_word_reg(REG_CFG2, 15 | (12 << 4) | (11 << 8))       # in16 bit valid, in17 comm[7], in18 comm[6]
+        await tqv.write_word_reg(REG_CONST, 0)                                # K0 = 0 clears comm
+        await tqv.write_byte_reg(REG_COMPARE, 8)                              # bits per byte
+        await tqv.write_word_reg(REG_PRELOAD, 2 * BIT)                        # idle: two bit times
+        await tqv.write_word_reg(REG_CRC_POLY, 0xEDB88320)                    # CRC32, reflected
+        await tqv.write_word_reg(REG_CRC_EXP, 0xDEBB20E3)                     # residue over data + FCS
+        await bench.load_chroma(chroma_eth_rx, chroma_eth_rx_ctrlReg | CFG_FIFO_SRAM, chroma_eth_rx_pinmuxReg)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)                              # flush
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        enc = eth.EthEncoder(self.dut, BIT, rxd=PIN)
+        await enc.idle(BIT * 4)
+
+        async def receive(payload, fcs=None, stretch=0):
+            e = eth.EthEncoder(self.dut, BIT, rxd=PIN, stretch=stretch)
+            await e.frame(payload, fcs=fcs)
+            await self.clocks(BIT * 4)
+            assert await bench.irq(), "no end-of-frame interrupt"
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            expect = payload + (eth.crc32(payload) if fcs is None else fcs)
+            st = await tqv.read_word_reg(REG_FIFO_ST)
+            assert (st >> 8) & 0x3FFF == len(expect), f"FIFO holds {(st >> 8) & 0x3FFF}, expected {len(expect)}"
+            got = [await tqv.read_byte_reg(REG_FIFO) for _ in range(len(expect))]
+            assert got == expect, f"{len(got)} bytes: {[hex(x) for x in got[:12]]} .. {[hex(x) for x in got[-6:]]}"
+            assert await tqv.read_word_reg(REG_FIFO_ST) & 1 == 1
+            return await tqv.read_word_reg(REG_FLAGS), await tqv.read_word_reg(REG_CRC)
+
+        self.log("link pulse: no frame")
+        await enc.link_pulse()
+        await self.clocks(BIT * 4)
+        assert not await bench.irq()
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 1 == 1
+
+        self.log("64-byte frame")
+        payload = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E] + [0x02, 0x00, 0x00, 0x00, 0x00, 0x01] + \
+                  [0x88, 0xCC] + [(i * 7 + 3) & 0xFF for i in range(46)]
+        flags, crc = await receive(payload)
+        assert flags & FLAG_CRC_OK, f"crc_ok clear, CRC = {crc:#x}"
+
+        self.log("300-byte frame, line 8% slower than the clock")
+        payload = [(i * 31 + 11) & 0xFF for i in range(300)]
+        flags, crc = await receive(payload, stretch=6)
+        assert flags & FLAG_CRC_OK, f"crc_ok clear, CRC = {crc:#x}"
+
+        self.log("frame with a corrupted FCS")
+        payload = [(i * 5 + 1) & 0xFF for i in range(60)]
+        bad = eth.crc32(payload)
+        bad[1] ^= 0x10
+        flags, crc = await receive(payload, fcs=bad)
+        assert not (flags & FLAG_CRC_OK), f"crc_ok set on a bad FCS, CRC = {crc:#x}"
+        await bench.disable()
+
+
+class EthernetLoopTest(PrismTest):
+    ''' The Ethernet stretch goal in one PRISM: eth_tx in shard 0 (SRAM 0 as
+        its TX FIFO) and eth_rx in shard 1 (SRAM 1 as its RX FIFO), fractured,
+        with TXD looped back into the receive pin by the bench.  The host
+        queues a frame in shard 0 and reads it back from shard 1. '''
+    name = "ethernet tx -> rx loopback (fractured)"
+
+    async def run(self):
+        tqv, bench = self.tqv, self.bench
+        BIT = 6
+        PIN = 3
+
+        async def loopback():
+            while True:
+                await RisingEdge(self.dut.clk)
+                v = int(self.dut.uo_out.value)
+                txd = (v >> 1) & 1 if (v >> 2) & 1 else 0                    # TXD while TX_EN, else idle low
+                ui = int(self.dut.ui_in.value)
+                self.dut.ui_in.value = (ui | (1 << PIN)) if txd else (ui & ~(1 << PIN))
+        loop_task = cocotb.start_soon(loopback())
+
+        # shard 0: transmitter (as EthernetTxTest)
+        await tqv.write_word_reg(REG_CFG1, 8 | (9 << 4))
+        await tqv.write_word_reg(REG_CONST, 0x55)
+        await tqv.write_byte_reg(REG_COMPARE, 3)
+        await tqv.write_word_reg(REG_PRELOAD, BIT // 2 - 1)
+        await tqv.write_word_reg(REG_CRC_POLY, 0xEDB88320)
+        await tqv.write_byte_reg(REG_HOST, 0)
+        # shard 1: receiver (as EthernetRxTest)
+        await tqv.write_word_reg(REG_CFG3 + SHARD1, PIN | (1 << 3) | ((BIT // 2) << 4) | (1 << 8))
+        await tqv.write_word_reg(REG_CFG2 + SHARD1, 15 | (12 << 4) | (11 << 8))
+        await tqv.write_word_reg(REG_CONST + SHARD1, 0)
+        await tqv.write_byte_reg(REG_COMPARE + SHARD1, 8)
+        await tqv.write_word_reg(REG_PRELOAD + SHARD1, 2 * BIT)
+        await tqv.write_word_reg(REG_CRC_POLY + SHARD1, 0xEDB88320)
+        await tqv.write_word_reg(REG_CRC_EXP + SHARD1, 0xDEBB20E3)
+        await bench.load_fractured(chroma_eth_tx, chroma_eth_tx_ctrlReg | CFG_FIFO_SRAM, chroma_eth_tx_pinmuxReg,
+                                   chroma_eth_rx, chroma_eth_rx_ctrlReg | CFG_FIFO_SRAM, chroma_eth_rx_pinmuxReg)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        await tqv.write_byte_reg(REG_INT_CLR1, 0x80)
+        await self.clocks(BIT * 8)
+
+        async def send_receive(payload):
+            for b in [0x55, 0x55, 0x55, 0xD5] + payload:
+                await tqv.write_byte_reg(REG_FIFO, b)
+            await tqv.write_byte_reg(REG_TOGGLE, 0)                           # shard 0: send
+            for _ in range(len(payload) * 2 + 100):
+                if await bench.irq(IRQ1_MASK):
+                    break
+                await self.clocks(BIT * 8)
+            assert await bench.irq(IRQ1_MASK), "receiver never finished"
+            assert await bench.irq(IRQ0_MASK), "transmitter never finished"
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            await tqv.write_byte_reg(REG_INT_CLR1, 0x80)
+            expect = payload + eth.crc32(payload)
+            st = await tqv.read_word_reg(REG_FIFO_ST + SHARD1)
+            assert (st >> 8) & 0x3FFF == len(expect), f"RX FIFO holds {(st >> 8) & 0x3FFF}, expected {len(expect)}"
+            got = [await tqv.read_byte_reg(REG_FIFO + SHARD1) for _ in range(len(expect))]
+            assert got == expect, f"{len(got)} bytes: {[hex(x) for x in got[:12]]} .. {[hex(x) for x in got[-6:]]}"
+            assert await tqv.read_word_reg(REG_FLAGS + SHARD1) & FLAG_CRC_OK, "crc_ok clear"
+            assert await tqv.read_word_reg(REG_FIFO_ST) & 1 == 1                # TX FIFO drained
+
+        self.log("64-byte frame, shard 0 -> shard 1")
+        await send_receive([0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E] + [0x02, 0x00, 0x00, 0x00, 0x00, 0x01] +
+                           [0x88, 0xCC] + [(i * 7 + 3) & 0xFF for i in range(46)])
+        self.log("300-byte frame through both SRAM FIFOs")
+        await send_receive([(i * 31 + 11) & 0xFF for i in range(300)])
+        loop_task.kill()
+        await tqv.write_word_reg(REG_FRAC_CFG, 0)
         await bench.disable()
 
 

@@ -679,6 +679,49 @@ Findings:
 6. Receive is the open question: classifying 3- versus 6-clock edge
    intervals with two-flop synchronised inputs and one decision per clock
    is where a hardware decoder or a faster clock would be needed.
+   (Answered in 4k with the Manchester bit recoverer.)
+
+## 4k. Ethernet receiver: the stretch goal closed in RTL (2026-09-14)
+
+Receive needed two small datapath additions (section 4j, finding 6):
+
+- **A Manchester bit recoverer per shard** (`prism_mrx.v`, CFG3 at +0x3C:
+  [2:0] the PRISM input carrying the line, [3] enable, [7:4] clocks per
+  half bit, [8] shifter input = the recovered bit).  It runs on the PRISM
+  clock; an edge on the synchronised line is accepted when three quarters
+  of a bit (hb + hb/2 clocks) have passed since the last accepted edge, so
+  the boundary transition between two equal bits is skipped and every
+  mid-bit edge re-times the decoder; the level after the accepted edge is
+  the bit.  Its "bit valid" is CFG2 slot code 15 and stays set until the
+  FSM's shift consumes it, so a two-state receive loop never misses a bit.
+  About 25 flops per shard; the FSM keeps every decision (SFD, bytes,
+  CRC, end of frame).
+- **The shifter can take that bit as its input**, and with the reflected
+  CRC32 taking the shifter input bit, one transition per received bit
+  does shift + CRC + count.
+
+`chromas/chroma_eth_rx.v` is four states: WAIT (a bit: shift and reload
+the idle timer; idle: keep comm clear from K0 = 0), CHK (comm[7:6] = 1, 1:
+the SFD just ended, so clear the CRC and the bit counter), DWAIT (a bit:
+shift, CRC, count, reload the timer; timer terminal: end of frame, host
+interrupt, clear comm), DCHK (eight bits: push comm into the FIFO).  The
+preamble / SFD needs no comparator: 0x55 .. 0xD5 sent LSB first are
+strictly alternating until the two 1s that end the SFD, and comm[7:6] are
+inputs through slot codes 12 and 11.  The FCS is checked by the host
+(or a chroma) through `crc_ok`: CRC_EXPECTED = 0xDEBB20E3, the CRC32
+residue after data + FCS.  A partial last byte is dropped; a link pulse
+is one bit that never becomes an SFD and times out.
+
+Tests: `EthernetRxTest` (link pulse ignored, a 64-byte frame, a 300-byte
+frame from a line 8% slower than the clock, a corrupted FCS reported) and
+`EthernetLoopTest`: eth_tx in shard 0 on SRAM 0 and eth_rx in shard 1 on
+SRAM 1, fractured, with TXD looped into ui_in[3] by the bench; the host
+queues a frame in shard 0 and reads it back from shard 1 with crc_ok.
+That is the stretch goal in RTL: transmit and receive at once on one
+PRISM with the two SRAM FIFOs.  Still to do: the FPGA / board level
+(differential receiver and driver behind the magnetics), destination
+filtering (software or the CONST table), and the 16 ms link pulses (a
+second timer, finding 3 of 4j).
 
 ## 5. FIFO storage, item 9: SRAM spike result
 

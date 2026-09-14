@@ -1,7 +1,7 @@
-# 10BASE-T line model for the PRISM Ethernet transmitter tests: a
-# Manchester decoder on the device's TXD / TX_EN outputs, and the Ethernet
-# CRC32.  Bit time = BIT clocks; a 1 is low then high, a 0 high then low;
-# TP_IDL (both halves high) ends the frame.
+# 10BASE-T line models for the PRISM Ethernet tests: a Manchester decoder
+# on the device's TXD / TX_EN outputs, a Manchester encoder driving a ui_in
+# pin, and the Ethernet CRC32.  Bit time = BIT clocks; a 1 is low then
+# high, a 0 high then low; TP_IDL (both halves high) ends the frame.
 
 try:
     from cocotb.triggers import RisingEdge
@@ -84,3 +84,54 @@ class EthDecoder:
             # wait for TX_EN to drop before looking for the next frame
             while self.lines()[1]:
                 await RisingEdge(self.dut.clk)
+
+
+class EthEncoder:
+    """Drives ui_in[rxd] with 10BASE-T frames and link pulses.  A frame is
+       the preamble, SFD, payload and FCS, Manchester coded at `bit` clocks
+       per bit, then TP_IDL (high for two bit times) and idle low.  `stretch`
+       > 0 inserts one extra clock every `stretch` half bits, a line that is
+       slower than the device clock by 1 / (2 * stretch); `phase` delays the
+       start by that many clocks."""
+
+    def __init__(self, dut, bit_clocks, rxd=3, stretch=0):
+        self.dut = dut
+        self.bit = bit_clocks
+        self.rxd = rxd
+        self.stretch = stretch
+        self._n = 0
+
+    def _drive(self, level):
+        v = int(self.dut.ui_in.value)
+        v = (v | (1 << self.rxd)) if level else (v & ~(1 << self.rxd))
+        self.dut.ui_in.value = v
+
+    async def _half(self, level):
+        self._drive(level)
+        n = self.bit // 2
+        self._n += 1
+        if self.stretch and self._n % self.stretch == 0:
+            n += 1
+        for _ in range(n):
+            await RisingEdge(self.dut.clk)
+
+    async def idle(self, clocks):
+        self._drive(0)
+        for _ in range(clocks):
+            await RisingEdge(self.dut.clk)
+
+    async def frame(self, payload, preamble=7, fcs=None):
+        data = [0x55] * preamble + [0xD5] + payload + (crc32(payload) if fcs is None else fcs)
+        for byte in data:
+            for i in range(8):
+                bit = (byte >> i) & 1
+                await self._half(1 - bit)
+                await self._half(bit)
+        for _ in range(4):                    # TP_IDL: two bit times high
+            await self._half(1)
+        await self.idle(self.bit * 4)
+
+    async def link_pulse(self):
+        await self._half(1)
+        await self._half(1)
+        await self.idle(self.bit * 4)

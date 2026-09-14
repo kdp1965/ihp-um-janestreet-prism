@@ -34,9 +34,12 @@
 //     +0x2C  CRC      value; write = preset
 //     +0x30  CRC_EXPECTED
 //     +0x34  CFG2     input slot selects: [3:0]/[7:4]/[11:8]/[15:12] inputs 16-19, [19:16]..[31:28] inputs 28-31
-//                     (0 = default: in_prev[i] / 0, 1-4 in_prev[0..3], 5-12 comm[0..7], 13 comm == K3, 14 flag2)
+//                     (0 = default: in_prev[i] / 0, 1-4 in_prev[0..3], 5-12 comm[0..7], 13 comm == K3, 14 flag2,
+//                      15 Manchester bit valid)
 //     +0x38  CONST    constants K0 [7:0] .. K3 [31:24]; OUT_COMM_LOAD source with CFG0[30] (select = {out20, out18}),
 //                     K3 also the comm match value
+//     +0x3C  CFG3     Manchester bit recoverer (prism_mrx.v): [2:0] receive pin (PRISM input 0-6), [3] enable,
+//                     [7:4] clocks per half bit, [8] shifter input = the recovered bit (slot code 15 = bit valid)
 //
 // CFG0 bits (chroma ctrl_reg; the datapath ones are decoded in prism_datapath.v):
 //     1:0  shift_in_sel      6 clr_not_load     7 latch_in_out    8 shift_en
@@ -202,6 +205,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     localparam [6:0] SH_CRC_EXP = 7'h30;
     localparam [6:0] SH_CFG2    = 7'h34;    // input slot selects
     localparam [6:0] SH_CONST   = 7'h38;    // constants K3..K0 (K3 also the comm match value)
+    localparam [6:0] SH_CFG3    = 7'h3C;    // Manchester bit recoverer
+    localparam       CFG3_MRX_EN    = 3;    // CFG3: [2:0] pin, [3] enable, [7:4] clocks per half bit
+    localparam       CFG3_SHIFT_MRX = 8;    //       [8] shifter input = recovered bit
 
     localparam  FIFO_DEPTH  = 16;
     localparam  FIFO_AW     = 4;
@@ -233,6 +239,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     wire [32*SHARDS-1:0] flags_v;
     wire [32*SHARDS-1:0] cfg1_v;
     wire [32*SHARDS-1:0] cfg2_v;
+    wire [32*SHARDS-1:0] cfg3_v;
     wire [32*SHARDS-1:0] const_v;
     wire [32*SHARDS-1:0] fifo_st_v;
     wire [8*SHARDS-1:0]  fifo_head_v;
@@ -257,7 +264,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
         input       dflt;
         input [3:0] in_prev;
         input [7:0] comm;
-        input       match, flag2;
+        input       match, flag2, mrx_valid;
         begin
             case (code)
                 4'd0:    slot_val = dflt;
@@ -273,6 +280,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 4'd10:   slot_val = comm[5];
                 4'd11:   slot_val = comm[6];
                 4'd12:   slot_val = comm[7];
+                4'd15:   slot_val = mrx_valid;
                 4'd13:   slot_val = match;
                 4'd14:   slot_val = flag2;
                 default: slot_val = 1'b0;
@@ -409,14 +417,17 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire [PRISM_INPUTS-1:0]   in_s;
             wire  [3:0]               pin_out = out_s[3:0];
             wire                      sema_clr = exec & out_s[OUT_SEMA_CLEAR] & fractured;
-            wire                      shift_in_bit = cfg0[CFG_SHIFT_IN_COND] ? cond_s[0] : pin_in[{1'b0, cfg0[1:0]}];
+            wire [31:0]               cfg3;
+            wire                      mrx_valid, mrx_value;      // Manchester bit recoverer
+            wire                      shift_in_bit = cfg3[CFG3_SHIFT_MRX]    ? mrx_value :
+                                                     cfg0[CFG_SHIFT_IN_COND] ? cond_s[0] : pin_in[{1'b0, cfg0[1:0]}];
             // FIFO / CRC
             wire [31:0]               cfg1;
             wire [31:0]               cfg2;
             wire [31:0]               consts;
             wire [31:0]               crc_poly;
             wire [31:0]               crc_exp;
-            wire                      cfg1_en, cfg2_en, const_en, crc_poly_en, crc_exp_en;
+            wire                      cfg1_en, cfg2_en, const_en, crc_poly_en, crc_exp_en, cfg3_en;
             reg                       flag2;
             // OUT_COMM_LOAD source: preload[7:0], or constant K[{out20, out18}]
             wire  [7:0]               k_sel = out_s[OUT_K_SEL1] ? (out_s[OUT_K_SEL0] ? consts[31:24] : consts[23:16])
@@ -589,9 +600,23 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             genvar sl;
             for (sl = 0; sl < 4; sl = sl + 1)
             begin : SLOTS
-                assign in_s[16+sl] = slot_val(cfg2[4*sl +: 4],    in_prev[sl], in_prev, comm, comm_match, flag2);
-                assign in_s[28+sl] = slot_val(cfg2[16+4*sl +: 4], 1'b0,        in_prev, comm, comm_match, flag2);
+                assign in_s[16+sl] = slot_val(cfg2[4*sl +: 4],    in_prev[sl], in_prev, comm, comm_match, flag2, mrx_valid);
+                assign in_s[28+sl] = slot_val(cfg2[16+4*sl +: 4], 1'b0,        in_prev, comm, comm_match, flag2, mrx_valid);
             end
+
+            // Manchester bit recoverer: its bit valid is slot code 15, its bit
+            // the shifter input with CFG3[8]; consumed by the FSM's shift
+            prism_mrx i_mrx
+            (
+                .clk     ( clk                    ),
+                .rst_n   ( rst_n                  ),
+                .enable  ( cfg3[CFG3_MRX_EN]      ),
+                .line    ( in_s[cfg3[2:0]]        ),
+                .hb      ( cfg3[7:4]              ),
+                .consume ( out_s[OUT_SHIFT]       ),
+                .valid   ( mrx_valid              ),
+                .value   ( mrx_value              )
+            );
             assign in_s[20]    = fifo_flag(1'b0, cfg1[25:24], fifo_empty, fifo_full, fifo_ae, fifo_af);
             assign in_s[21]    = fifo_flag(1'b1, cfg1[27:26], fifo_empty, fifo_full, fifo_ae, fifo_af);
             assign in_s[22]    = crc_ok;
@@ -709,6 +734,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign cfg1_en     = win && shard_off == SH_CFG1;
             assign cfg2_en     = win && shard_off == SH_CFG2;
             assign const_en    = win && shard_off == SH_CONST;
+            assign cfg3_en     = win && shard_off == SH_CFG3;
             assign crc_poly_en = win && shard_off == SH_CRC_POLY;
             assign crc_exp_en  = win && shard_off == SH_CRC_EXP;
 
@@ -753,6 +779,14 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 .data_in    ( latch_data    ),
                 .data_out   ( consts        )
             );
+            prism_latch_reg #( .WIDTH ( 32 ) ) cfg3_reg
+            (
+                .rst_n      ( rst_n         ),
+                .enable     ( cfg3_en       ),
+                .wr         ( latch_wr      ),
+                .data_in    ( latch_data    ),
+                .data_out   ( cfg3          )
+            );
             prism_latch_reg #( .WIDTH ( 32 ) ) cfg0_reg
             (
                 .rst_n      ( rst_n         ),
@@ -781,7 +815,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             reg [31:0] cfg0_r;
             reg [20:0] pinmux_r;
             reg [31:0] preload_r;
-            reg [31:0] cfg1_r, crc_poly_r, crc_exp_r, cfg2_r, const_r;
+            reg [31:0] cfg1_r, crc_poly_r, crc_exp_r, cfg2_r, const_r, cfg3_r;
             always @(posedge clk or negedge rst_n)
             begin
                 if (~rst_n)
@@ -794,6 +828,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                     crc_exp_r  <= 32'h0;
                     cfg2_r     <= 32'h0;
                     const_r    <= 32'h0;
+                    cfg3_r     <= 32'h0;
                 end
                 else
                 begin
@@ -805,6 +840,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                     if (crc_exp_en & prism_wr)  crc_exp_r  <= data_in;
                     if (cfg2_en & prism_wr)     cfg2_r     <= data_in;
                     if (const_en & prism_wr)    const_r    <= data_in;
+                    if (cfg3_en & prism_wr)     cfg3_r     <= data_in;
                 end
             end
             assign cfg0     = cfg0_r;
@@ -815,6 +851,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign crc_exp  = crc_exp_r;
             assign cfg2     = cfg2_r;
             assign consts   = const_r;
+            assign cfg3     = cfg3_r;
 `endif
 
             // Export for the read mux and cross-shard use
@@ -828,6 +865,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                                             count2_cmp, count1_wrap, count1_term};
             assign cfg1_v    [32*s +: 32] = cfg1;
             assign cfg2_v    [32*s +: 32] = cfg2;
+            assign cfg3_v    [32*s +: 32] = cfg3;
             assign const_v   [32*s +: 32] = consts;
             assign fifo_st_v [32*s +: 32] = {10'h0, fifo_count, 4'h0, fifo_af, fifo_ae, fifo_full, fifo_empty};
             assign fifo_head_v[8*s +: 8]  = fifo_head;
@@ -1038,6 +1076,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 SH_CRC:     reg_word = crc_v    [32*shard_sel +: 32];
                 SH_CRC_EXP: reg_word = crc_exp_v[32*shard_sel +: 32];
                 SH_CFG2:    reg_word = cfg2_v   [32*shard_sel +: 32];
+                SH_CFG3:    reg_word = cfg3_v   [32*shard_sel +: 32];
                 SH_CONST:   reg_word = const_v  [32*shard_sel +: 32];
                 default:    reg_word = 32'h0;
             endcase
