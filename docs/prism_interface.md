@@ -512,6 +512,25 @@ Metal4, at least 2.1 um wide and within 10 um of both edges; the local
 flow does not run it, so check `runs/wokwi/final/lef` for short power
 rects after any PDN change (see the tidy pass above).
 
+### 4d.2 Floorplan experiment: a macro in the top row (2026-09-16, run 14)
+
+Tried after run 13: `CFGMEMS_LEFT[1].cfgmem_lo` moved out of the left
+column to the top row at (941.75, 619.92) N (pins south, on the 44.96
+um stripe grid between `LEFT[1].cfgmem_hi` and `CFGMEMS[3].cfgmem_hi`),
+and `CFGMEMS_LEFT[0].cfgmem_hi` raised 9 rows to y 291.06 so its channel
+grew to 200 um.  Global routing liked it: wirelength 2.83 M um (3.01 in
+run 13), Metal3 usage 71.4% / overflow 2438 (76.6% / 5621), Metal2
+overflow 795 (1590), and the Metal3 demand map (`tools/route_heat.py`)
+flatter, its busiest bin 15% lower.  Detailed routing did not: the
+count tracked run 13 to iteration 12, then fell behind (342 flat for
+three passes, a 1112 bounce on the wide ripup against run 13's 639, 93
+at iteration 32 where run 13 had 6), with a persistent set of Metal4
+signal shorts run 13 never showed.  The power stripes over the moved
+macro were checked and sit exactly on its rails, so those shorts are
+routing, most likely the split lo/hi pair's mux nets crossing the top
+stripe.  Stopped at iteration 32 and reverted to the run 13 floorplan;
+the global-routing gain says the idea has merit, but not in this form.
+
 ## 4e. Bank addressing when unfractured (timing)
 
 Unfractured, shard 1's state index register tracks the low bits of

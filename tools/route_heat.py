@@ -27,8 +27,15 @@ with open(f) as fh:
             for j in range(j0, j1+1):
                 oy = min(y1, (j+1)*BY) - max(y0, j*BY)
                 dem[L][j][i] += max(oy, 0)
-macros = [(3.36,3.78,420.0,195.12),(3.36,340.2,420.0,531.54)] + \
-         [(x, y, x+331.2, y+86.94) for x in (537.11, 1346.39) for y in (3.78, 257.04, 366.66, 619.92)]
+# macro outlines from the run's resolved config (sizes by macro type)
+import json, os
+SIZES = {'CFGMEM': (331.2, 86.94), 'RM_IHPSG13_1P_512x32': (416.64, 191.34)}
+macros = []
+cfg = json.load(open(f'{run}/resolved.json')) if os.path.exists(f'{run}/resolved.json') else {}
+for mname, m in cfg.get('MACROS', {}).items():
+    w, h = next((v for k, v in SIZES.items() if mname.startswith(k)), (0, 0))
+    for inst in m.get('instances', {}).values():
+        x, y = inst['location']; macros.append((x, y, x + w, y + h))
 def inmacro(cx, cy): return any(a<=cx<=c and b<=cy<=d for a,b,c,d in macros)
 for L in ('Metal3', 'Metal2'):
     g = dem[L]; mx = max(max(r) for r in g)
@@ -41,3 +48,5 @@ for L in ('Metal3', 'Metal2'):
             row += ('#' if inmacro(cx, cy) and d < 5 else str(d))
         print(f"{(j+1)*BY:6.0f} {row}")
     print('       ' + ''.join(str((i//10)%10) if i%10==0 else ' ' for i in range(NX)) + '  (x/100 um)')
+    flat = sorted((v for r in g for v in r), reverse=True)
+    print(f"   {L}: total {sum(flat)/1e6:.3f} M um, max bin {mx:.0f}, mean of top 20 bins {sum(flat[:20])/20:.0f}, bins >= 80% of max: {sum(1 for v in flat if v >= 0.8*mx)}")
