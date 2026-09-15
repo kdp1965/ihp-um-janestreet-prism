@@ -653,6 +653,143 @@ class EdgeTest(PrismTest):
         await bench.disable()
 
 
+class Timer2Test(PrismTest):
+    ''' Timer 2 (PRELOAD2): free-running it ticks every PRELOAD2 + 1 clocks
+        whatever the FSM does; with [24] the count restarts each time the
+        shard enters state [29:25] (a retriggerable timeout, no STEW bits);
+        with [30] as well it ticks once per entry and then waits.  The edge
+        chroma's WAIT -> CNT_PIN -> WAIT round trip on every pin transition
+        is the entry; the timer and its tick are peeked and replayed against
+        a model of the counter clock by clock. '''
+    name = "timer 2 (PRELOAD2 restart on state entry)"
+
+    class Peek:
+        def __init__(self, dut, shard):
+            prism = dut.user_project.i_peripherals.i_prism
+            self.clk  = dut.clk
+            self.si   = prism.i_prism.trace_si if shard == 0 else prism.i_prism.trace_si_1
+            self.t    = prism.SH[shard].timer2
+            self.tick = prism.SH[shard].timer2_tick
+            self.samples = []
+        async def _run(self):
+            while True:
+                await FallingEdge(self.clk)
+                self.samples.append((int(self.si.value), int(self.t.value), int(self.tick.value)))
+        def start(self):
+            self.task = cocotb.start_soon(self._run())
+        def stop(self):
+            self.task.kill()
+        def replay(self, first, period, state=None, one_shot=False, armed=False):
+            ''' Samples first.. against the counter model; returns (ticks, entries) '''
+            s = self.samples
+            t, ticks, entries = s[first][1], 0, 0
+            for k in range(first + 1, len(s)):
+                entry = state is not None and s[k][0] == state and s[k - 1][0] != state
+                tick = 0
+                if entry:
+                    t, armed = period - 1, True; entries += 1
+                elif one_shot and state is not None and not armed:
+                    pass
+                elif t == 0:
+                    t, tick, armed = period - 1, 1, not one_shot
+                else:
+                    t -= 1
+                assert s[k][1:] == (t, tick), f"sample {k}: {s[k]} expected timer {t} tick {tick}"
+                ticks += tick
+            return ticks, entries
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        dut.ui_in[2].value = 0
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        await tqv.write_word_reg(REG_CFG1, (2 << 0) | (8 << 4))
+        await bench.load_chroma(chroma_edge, chroma_edge_ctrlReg, chroma_edge_pinmuxReg)
+        peek = self.Peek(dut, 0)
+        peek.start()
+        await self.clocks(20)
+        P = 20
+
+        def toggle():
+            dut.ui_in[2].value = 1 - int(dut.ui_in[2].value)
+
+        async def toggles(gaps):
+            for g in gaps:
+                toggle()
+                await self.clocks(g)
+
+        self.log("free-running: a tick every 20 clocks, pin transitions change nothing")
+        await tqv.write_word_reg(REG_PRELOAD2, P - 1)
+        await self.clocks(5)
+        first = len(peek.samples)
+        await toggles((8, 5, 30, 4, 12, 9, 6, 40, 4, 7))
+        await self.clocks(60)
+        ticks, entries = peek.replay(first, P)
+        n = len(peek.samples) - first
+        assert ticks in (n // P, n // P + 1) and entries == 0, (ticks, entries, n)
+        n = await tqv.read_byte_reg(REG_COUNT2)
+        assert n == 10, n
+
+        self.log("restart on entry into CNT_PIN: a tick 20 clocks after the last entry")
+        await tqv.write_word_reg(REG_PRELOAD2, (P - 1) | T2_RELOAD | T2_STATE(1))
+        await self.clocks(5)
+        first = len(peek.samples)
+        await toggles((8, 5, 30, 4, 12, 9, 6, 40, 4, 7))     # the 30 and 40 gaps time out, then free-running
+        await self.clocks(100)
+        ticks, entries = peek.replay(first, P, state=1)
+        assert entries == 10 and 6 <= ticks <= 8, (ticks, entries)
+        # a burst closer than the period never ticks: the timeout is held off
+        first = len(peek.samples)
+        await toggles((8, 5, 4, 7, 9, 6, 4, 8, 5, 4))
+        ticks, entries = peek.replay(first, P, state=1)
+        assert entries == 10 and ticks == 0, (ticks, entries)
+        await self.clocks(60)
+        ticks, entries = peek.replay(first, P, state=1)
+        assert ticks == 3, ticks                                # 60 clocks after the burst: 3 free-running ticks
+
+        self.log("one-shot: one tick per entry, none while entries keep coming")
+        await tqv.write_word_reg(REG_PRELOAD2, (P - 1) | T2_RELOAD | T2_STATE(1) | T2_ONESHOT)
+        await self.clocks(5)
+        first = len(peek.samples)
+        await self.clocks(100)
+        assert peek.replay(first, P, state=1, one_shot=True) == (0, 0)       # idle until an entry
+        await toggles((40, 40, 40))
+        ticks, entries = peek.replay(first, P, state=1, one_shot=True)
+        assert (ticks, entries) == (3, 3), (ticks, entries)
+        first = len(peek.samples)
+        await toggles((8, 5, 4, 7, 9, 6, 4, 8, 5, 4))
+        await self.clocks(100)
+        ticks, entries = peek.replay(first, P, state=1, one_shot=True, armed=False)
+        assert (ticks, entries) == (1, 10), (ticks, entries)  # the burst ends in one timeout
+        await tqv.write_word_reg(REG_PRELOAD2, 0)
+        await self.clocks(3)
+        assert peek.samples[-1][1:] == (0, 0)
+        peek.stop()
+
+        self.log("fractured: shard 1's timer restarts on its own entries into CNT_HOST")
+        await bench.disable()
+        await tqv.write_word_reg(REG_CFG1 + SHARD1, (2 << 0) | (8 << 4))
+        await bench.load_fractured(chroma_edge, chroma_edge_ctrlReg, chroma_edge_pinmuxReg,
+                                   chroma_edge, chroma_edge_ctrlReg, chroma_edge_pinmuxReg)
+        peek = self.Peek(dut, 1)
+        peek.start()
+        await tqv.write_word_reg(REG_PRELOAD2 + SHARD1, (P - 1) | T2_RELOAD | T2_STATE(2) | T2_ONESHOT)
+        await self.clocks(5)
+        first = len(peek.samples)
+        for m in range(4):                                  # shard 1's host toggles: CNT_HOST entries
+            await tqv.write_byte_reg(REG_TOGGLE + SHARD1, 0x00)
+            await self.clocks(30)
+        await toggles((30, 30))                             # pin transitions are shard 0's business
+        await self.clocks(30)
+        ticks, entries = peek.replay(first, P, state=2, one_shot=True)
+        assert (ticks, entries) == (4, 4), (ticks, entries)
+        peek.stop()
+        await tqv.write_word_reg(REG_PRELOAD2 + SHARD1, 0)
+        await tqv.write_word_reg(REG_CFG1, 0)
+        await tqv.write_word_reg(REG_CFG1 + SHARD1, 0)
+        dut.ui_in[2].value = 0
+        await bench.disable()
+
+
 # =============================================================================
 # Low-Speed USB interface Chroma unit test
 # =============================================================================
@@ -1260,6 +1397,41 @@ class TraceTest(PrismTest):
         assert await fifo_bytes(SHARD1) == 3
         assert await tqv.read_byte_reg(REG_FIFO + SHARD1) == 0x40
         await tqv.write_word_reg(REG_CFG0 + SHARD1, 0)
+
+        # ---- into the other SRAM: shard 0 traces into SRAM 1, its own SRAM FIFO untouched
+        self.log("shard 0 traces into SRAM 1 (TRC_OTHER) while its SRAM 0 FIFO keeps its bytes")
+        await tqv.write_word_reg(REG_CFG0, CFG_FIFO_DIR_TX | CFG_FIFO_SRAM)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        for b in range(5):
+            await tqv.write_byte_reg(REG_FIFO, 0x50 + b)
+        await tqv.write_word_reg(REG_TRACE_CFG, TRC_EN | TRC_OTHER | TRC_TRIG_STATE | TRC_STATE(1))
+        st = await status()
+        assert st & 0x1b == TRC_ST_ACTIVE, f"{st:#x}"              # (done lingers from the last trace)
+        await tqv.write_byte_reg(REG_FIFO, 0x55)                 # SRAM 0 is not traced: the push lands
+        assert await fifo_bytes() == 6
+        await bench.enable()
+        await tqv.write_word_reg(REG_TRACE_CTRL, TRC_ARM)         # arm flushes SRAM 1, not SRAM 0
+        await self.clocks(40)
+        assert (await status()) & TRC_ST_ARMED and await fifo_bytes() == 6
+        await activity(1200)
+        st = await status()
+        assert st & 0x1f == TRC_ST_ACTIVE | TRC_ST_DONE, f"{st:#x}"
+        assert await fifo_bytes() == 6 and await fifo_bytes(SHARD1) == TRC_ENTRIES * 2
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX | CFG_FIFO_SRAM)
+        await tqv.write_byte_reg(REG_FIFO + SHARD1, 0x77)        # SRAM 1 is traced: dropped
+        assert await fifo_bytes(SHARD1) == TRC_ENTRIES * 2
+        got = await readout(48, SHARD1)                          # shard 0's entries through window 1
+        off = mon0.check(got)
+        assert trace_si(got[0]) == 1 and got[0] & TRC_E_EXEC, f"{got[0]:#x}"
+        mon0.check_outputs(got, chroma_edge)
+        assert trace_si(mon0.entries[off - 1]) != 1
+        assert await fifo_bytes(SHARD1) == (TRC_ENTRIES - 48) * 2
+        assert await fifo_bytes() == 6                           # SRAM 0's FIFO bytes, all still there
+        assert await tqv.read_byte_reg(REG_FIFO) == 0x50
+        await tqv.write_word_reg(REG_TRACE_CFG, 0)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, 0)
+        await tqv.write_word_reg(REG_CFG0, 0)
+        await bench.disable()
 
         # ---- fractured: one shard at a time (shard 0 wins), each into its own SRAM
         self.log("fractured: shard 0 then shard 1 trace the same kind of edge into their own SRAMs")

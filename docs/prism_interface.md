@@ -191,8 +191,8 @@ registers only:
 | +0x34 | CFG2: input slot selects for inputs 16-19 and 28-31 (4 bits each), section 4h |
 | +0x38 | CONST: K0..K3 (K3 also the comm match value), section 4h |
 | +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit), section 4k |
-| +0x40 | PRELOAD2: free-running timer period (24 bits), input 28 ticks every PRELOAD2 + 1 clocks, 0 = off, section 4l |
-| +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
+| +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
+| +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
 | +0x48 | TRACE_CTRL: write [0] arm (flushes the SRAM FIFO), [1] stop; read [0] armed, [1] running, [2] done, [3] big, [4] active.  Entry (16 bits) = [4:0] SI, [10:5] LUT mux inputs, [11] tree 0 matched, [12] tree 1 taken, [13] executing; the traced SRAM's FIFO then serves the entries as bytes through +0x20 of the window that reads that SRAM (count = FIFO bytes / 2) |
 | +0x4C-0x7C | spare |
 
@@ -774,6 +774,23 @@ help, and a frame in flight simply ignores ticks (the FSM is not in IDLE).
 Test: four pulses in four periods, none with the timer off, a frame
 transmitted intact with the timer ticking.  SDK: `prism_set_timer2()`.
 
+Restart on state entry (2026-09-15): with PRELOAD2[24] the count also
+restarts from the period whenever the shard enters state PRELOAD2[29:25]
+(the core's next SI is that state and the current SI is not: the first
+clock of a visit, so a state that loops on itself restarts it once, and
+a debugger step into the state restarts it too), which makes the tick a
+retriggerable timeout - "nothing for N clocks since the last entry into
+RX_BIT" - with no STEW bits and no chroma code, since input 28 is the
+tick as before.  Without [30] the timer free-runs after the timeout
+(a tick every period until the next entry); with [30] (one-shot) it
+ticks once per timeout and then waits for the next entry, so a burst of
+entries closer than the period ends in exactly one tick.  Writing a
+period of 0 stops and clears it.  Test: `test_timer2` replays the
+counter and its tick clock by clock against a model of the register for
+free-running, restart and one-shot, on shard 0 (pin edges entering
+CNT_PIN) and on shard 1 while fractured (host toggles entering
+CNT_HOST).  SDK: `prism_set_timer2_retrigger(clocks, state, one_shot)`.
+
 If a future feature does need an FSM output rather than an input, the
 escape hatch is to widen the STEW with instantiated latches strobed by
 the existing WROW lines: not as dense as the CFGMEM bits, but a couple of
@@ -804,12 +821,17 @@ Storage: one shard traces at a time.  Shard s traces into SRAM s while
 its `TRACE_CFG[0]` is set (shard 0 wins if both shards enable: shard 1's
 tracer then reports inactive until shard 0's is switched off); with
 `TRACE_CFG[1]` as well it takes both SRAMs as one 2048-entry buffer
-(entries 0..1023 in SRAM 0).  A single 16-bit bus and three strobes,
-registered once at the top of the peripheral from the tracing shard's
-signals, reach the SRAM trace ports.  Arming flushes the SRAM's FIFO and
-pushes into a traced SRAM are dropped, so a chroma cannot stream from
-that SRAM while it is being traced into - use the flop FIFO, or the
-other SRAM.
+(entries 0..1023 in SRAM 0); with `TRACE_CFG[6]` ("other", 2026-09-15)
+it traces into the other shard's SRAM instead of its own, so a chroma
+streaming a frame from its SRAM FIFO (Ethernet TX, or RX filling it) can
+be traced while it does so, the entries then read through the other
+shard's window.  A single 16-bit bus and three strobes, registered once
+at the top of the peripheral from the tracing shard's signals, reach the
+SRAM trace ports; "other" only changes which SRAM's port takes them and
+which SRAM's `full` the shard watches.  Arming flushes the traced SRAM's
+FIFO and pushes into a traced SRAM are dropped, so a chroma cannot
+stream from the SRAM being traced into - use the flop FIFO, or the other
+SRAM.
 
 Host sequence: TRACE_CFG (trigger, storage), TRACE_CTRL = 1 (arm: the
 buffer restarts at entry 0 and the SRAM's FIFO is flushed), wait for done
@@ -880,12 +902,22 @@ Metal3 spacing item at a WROW pin), and `PL_RESIZER_SETUP_SLACK_MARGIN`
 on a shard-flop-to-SRAM-pin path).  Run 10: routing 0, KLayout DRC 0,
 LVS clean, IR drop 0.78 / 0.40 mV, typical setup +0.50 ns / hold +0.21
 ns, fast-corner hold +0.03 ns, 80 power ports legal; one antenna net left
-after the three repair passes (a warning, not a precheck item).  Test:
+after the three repair passes (a warning, not a precheck item).  Run 11
+(the "other SRAM" option and the timer restart, 2026-09-15): routing 0
+in 20 iterations, one antenna re-route pass, antenna 0, KLayout DRC 0,
+LVS clean, IR drop 0.86 / 0.65 mV, typical setup +0.59 ns / hold +0.25
+ns, fast-corner hold +0.08 ns, 80 power ports legal; +11k um2 of
+standard cells over run 10 (2.8%, mostly antenna cells and hold
+buffers; the logic itself is 1.8k um2), the same slow-corner setup
+warning as run 10 (-7.3 ns at 125 C / 1.08 V against the 14 ns TT
+constraint).  Test:
 `test_trace` checks every trigger, the stop (odd count), both SRAMs as
 one buffer (all 1024 entries of SRAM 0 and the first of SRAM 1 through
-shard 1's window), the FIFO around a trace, shard 0 then shard 1 tracing
-the same kind of edge while fractured (shard 0 wins while both enable),
-and the host's output reconstruction, all against a golden record of the
+shard 1's window), the FIFO around a trace, shard 0 tracing into SRAM 1
+while its SRAM 0 FIFO keeps its bytes (the entries through shard 1's
+window, a push into SRAM 1 dropped), shard 0 then shard 1 tracing the
+same kind of edge while fractured (shard 0 wins while both enable), and
+the host's output reconstruction, all against a golden record of the
 core taps sampled every clock.
 
 ## 5. FIFO storage, item 9: SRAM spike result

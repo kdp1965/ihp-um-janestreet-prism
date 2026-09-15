@@ -56,7 +56,10 @@ REG_CRC_EXP = 0x130
 REG_CFG2    = 0x134       # input slot selects (4 bits each: inputs 16-19, 28-31)
 REG_CONST   = 0x138       # constants K3..K0 (K3 = comm match value)
 REG_CFG3    = 0x13C       # [2:0] Manchester receive pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit
-REG_PRELOAD2= 0x140       # free-running timer period (24 bits): input 28 ticks every PRELOAD2 + 1 clocks; 0 = off
+REG_PRELOAD2= 0x140       # timer 2 period (24 bits): input 28 ticks every PRELOAD2 + 1 clocks; 0 = off
+T2_RELOAD    = 1 << 24    # restart the count on entry into state T2_STATE(si): retriggerable timeout
+def T2_STATE(si): return (si & 0x1f) << 25
+T2_ONESHOT   = 1 << 30    # with T2_RELOAD: one tick per entry, then wait for the next entry
 REG_TRACE_CFG  = 0x144    # trace configuration (TRC_*), write-only
 REG_TRACE_CTRL = 0x148    # write TRC_ARM / TRC_STOP; read TRC_ST_*
                           # readout: the traced SRAM's FIFO wrapper serves the 16-bit entries as bytes (low
@@ -65,6 +68,7 @@ REG_TRACE_CTRL = 0x148    # write TRC_ARM / TRC_STOP; read TRC_ST_*
 # ---- trace ------------------------------------------------------------------
 TRC_EN         = 1 << 0   # this shard's trace owns its SRAM (the SRAM FIFO is held flushed)
 TRC_BIG        = 1 << 1   # both SRAMs as one 1024-entry buffer (shard 0 first)
+TRC_OTHER      = 1 << 6   # into the other shard's SRAM (this shard's SRAM FIFO keeps running)
 TRC_TRIG_NOW   = 0 << 2   # trigger at once
 TRC_TRIG_STATE = 1 << 2   # in state TRC_STATE(si)
 TRC_TRIG_JUMP  = 2 << 2   # state TRC_STATE(si) taking either jump

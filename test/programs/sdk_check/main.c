@@ -151,6 +151,27 @@ int main(void)
     prism_fifo_flush();
     check("idle after trace", wait_idle(), prism_dbg_status());
 
+    /* ---- 1c. trace into the other SRAM: the entries come through shard 1's window */
+    prism_trace_config(PRISM_TRACE_OTHER | PRISM_TRACE_TRIG_STATE | PRISM_TRACE_STATE(UART_TX_STATE_DATA));
+    prism_trace_arm();
+    prism_fifo_push(0x5A);
+    check("trace other done", prism_trace_wait(2000), prism_trace_status());
+    check("trace other own fifo", prism_trace_count() == 0, prism_fifo_status());   /* shard 0's FIFO: not the trace */
+    prism_set_shard(1);
+    check("trace other count", prism_trace_count() == PRISM_TRACE_ENTRIES, prism_fifo_status());
+    v = prism_trace_read();
+    check("trace other entry 0", PRISM_TRACE_SI(v) == UART_TX_STATE_DATA && (v & PRISM_TRACE_EXEC), v);
+    prism_set_shard(0);
+    prism_trace_off();
+    check("idle after trace other", wait_idle(), prism_dbg_status());
+
+    /* ---- 1d. timer 2 as a retriggerable one-shot: the register takes the fields */
+    prism_set_timer2_retrigger(1000, UART_TX_STATE_DATA, true);
+    v = prism_read32(prism_shard_reg(PRISM_SH_PRELOAD2));
+    check("timer2 retrigger", v == (999u | PRISM_PRELOAD2_RELOAD | PRISM_PRELOAD2_STATE(UART_TX_STATE_DATA) | PRISM_PRELOAD2_ONESHOT), v);
+    prism_set_timer2(0);
+    check("timer2 off", prism_read32(prism_shard_reg(PRISM_SH_PRELOAD2)) == 0, 0);
+
     /* ---- 2. conditional breakpoint: DATA state when its bit time ends -- */
     prism_dbg_set_breakpoint_cond(0, UART_TX_STATE_DATA, PRISM_BPC_IF);
     prism_fifo_push(0x5A);

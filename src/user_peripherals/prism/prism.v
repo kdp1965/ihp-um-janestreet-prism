@@ -178,6 +178,8 @@ module prism
    // ============================
    output  wire [SI_BITS-1:0]      trace_si,
    output  wire [SI_BITS-1:0]      trace_si_1,
+   output  wire [SI_BITS-1:0]      trace_nsi,          // next state (the transition about to happen)
+   output  wire [SI_BITS-1:0]      trace_nsi_1,
    output  wire [STATE_INPUTS-1:0] trace_mux,
    output  wire [STATE_INPUTS-1:0] trace_mux_1,
    output  wire [1:0]              trace_match,
@@ -611,6 +613,8 @@ module prism
    end
    assign trace_si      = curr_si[0];
    assign trace_si_1    = curr_si[1];
+   assign trace_nsi     = next_si[0];
+   assign trace_nsi_1   = next_si[1];
    assign trace_mux     = trace_mux_s[0];
    assign trace_mux_1   = trace_mux_s[1];
    assign trace_match   = trace_match_s[0];

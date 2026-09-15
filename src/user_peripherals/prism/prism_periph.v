@@ -40,10 +40,14 @@
 //                     K3 also the comm match value
 //     +0x3C  CFG3     Manchester bit recoverer (prism_mrx.v): [2:0] receive pin (PRISM input 0-6), [3] enable,
 //                     [7:4] clocks per half bit, [8] shifter input = the recovered bit (slot code 15 = bit valid)
-//     +0x40  PRELOAD2 free-running timer: a 24-bit down counter reloads from it and raises input 28 (default
-//                     slot value) for one clock every PRELOAD2 + 1 clocks; 0 = off (Ethernet link pulses)
+//     +0x40  PRELOAD2 [23:0] timer 2 period: a 24-bit down counter reloads from it and raises input 28 (default
+//                     slot value) for one clock every PRELOAD2 + 1 clocks; 0 = off (Ethernet link pulses).
+//                     [24] restart the count on entry into state [29:25] (next SI == it, current SI != it):
+//                     a retriggerable timeout with no STEW bits; [30] one-shot: after its tick the timer
+//                     waits for the next entry instead of running on
 //     +0x44  TRACE_CFG  (write-only) [0] enable (this shard's trace owns its SRAM; one shard at a time, shard 0 wins),
-//                       [1] big: both SRAMs as one buffer, [3:2] trigger: 0 = at once, 1 = in state [12:8], 2 = state
+//                       [1] big: both SRAMs as one buffer, [6] other: trace into the other shard's SRAM instead of
+//                       this shard's (its own SRAM FIFO keeps running), [3:2] trigger: 0 = at once, 1 = in state [12:8], 2 = state
 //                       [12:8] taking either jump, 3 = an edge on PRISM input [20:16] ([5:4]: 0 rising, 1 falling,
 //                       2/3 either)
 //     +0x48  TRACE_CTRL write [0] arm (flushes the SRAM FIFO, waits for the trigger, then records every clock
@@ -230,6 +234,10 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     localparam       TRC_EDGE = 4;          // [5:4]
     localparam       TRC_SI   = 8;          // [12:8]
     localparam       TRC_IN   = 16;         // [20:16]
+    localparam       TRC_OTHER = 6;         // trace into the other shard's SRAM
+    localparam       T2_RELOAD  = 24;       // PRELOAD2: restart on entry into state [29:25]
+    localparam       T2_STATE   = 25;
+    localparam       T2_ONESHOT = 30;
     localparam       SI_W     = 5;          // state index width (DEPTH 32)
     localparam       CFG3_MRX_EN    = 3;    // CFG3: [2:0] pin, [3] enable, [7:4] clocks per half bit
     localparam       CFG3_SHIFT_MRX = 8;    //       [8] shifter input = recovered bit
@@ -291,12 +299,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     // the SRAM trace ports (one shard's set is registered and sent below);
     // per SRAM whether it is full and whether it holds a finished trace
     // (its window's FIFO then reads it).
-    wire [SHARDS-1:0]    trc_en_v, trc_big_v, trc_active_v, trc_big_act_v, trc_cap_v, trc_stop_v, trc_arm_v;
+    wire [SHARDS-1:0]    trc_en_v, trc_big_v, trc_other_v, trc_active_v, trc_big_act_v, trc_cap_v, trc_stop_v, trc_arm_v;
     wire [SHARDS-1:0]    trc_full_v, trc_held_v;
     wire [16*SHARDS-1:0] trc_din_v;
     wire [32*SHARDS-1:0] trace_st_v;
     localparam           TRC_CFG_W = 21;    // TRACE_CFG bits in use (write-only: no readback, to spare the read mux)
-    wire [SI_W-1:0]      trace_si_0, trace_si_1;
+    wire [SI_W-1:0]      trace_si_0, trace_si_1, trace_nsi_0, trace_nsi_1;
     wire [PRISM_STATE_INPUTS-1:0] trace_mux_0, trace_mux_1;
     wire [1:0]           trace_match_0, trace_match_1;
     // One shard traces at a time (shard 0 wins if both enable): into SRAM
@@ -443,6 +451,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
         .in_prev_cap_1      ( in_prev_cap_v[7:4]                          ),
         .trace_si           ( trace_si_0        ),
         .trace_si_1         ( trace_si_1        ),
+        .trace_nsi          ( trace_nsi_0       ),
+        .trace_nsi_1        ( trace_nsi_1       ),
         .trace_mux          ( trace_mux_0       ),
         .trace_mux_1        ( trace_mux_1       ),
         .trace_match        ( trace_match_0     ),
@@ -686,28 +696,49 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign in_s[13:12] = cfg0[CFG_LATCH_IN_OUT] ? {latched_out[6], latched_out[1]} : latched_in;
             assign in_s[14]    = shift_term;
             assign in_s[15]    = count2_eq_comm;
-            // Free-running timer (PRELOAD2): reloads itself and ticks for one
-            // clock every PRELOAD2 + 1 clocks; the default value of input 28.
-            // Nothing in the FSM needs to start it, which is the point: it
-            // paces things like Ethernet link pulses while count1 is busy.
+            // Timer 2 (PRELOAD2): a down counter that reloads itself and ticks
+            // for one clock every PRELOAD2 + 1 clocks; the default value of
+            // input 28.  Nothing in the FSM needs to start it, which is the
+            // point: it paces things like Ethernet link pulses while count1 is
+            // busy.  With PRELOAD2[24] the count also restarts when the shard
+            // enters state PRELOAD2[29:25] (next SI is it, current SI is not),
+            // a retriggerable timeout that costs no STEW bits; with [30] as
+            // well the timer stops after its tick until the next entry.
+            wire [SI_W-1:0]           si_s  = (s == 0) ? trace_si_0  : trace_si_1;    // current / next state
+            wire [SI_W-1:0]           nsi_s = (s == 0) ? trace_nsi_0 : trace_nsi_1;
+            wire                      t2_entry = preload2[T2_RELOAD] && (nsi_s == preload2[T2_STATE +: SI_W]) &&
+                                                 (si_s != preload2[T2_STATE +: SI_W]);
             reg  [23:0]               timer2;
             reg                       timer2_tick;
+            reg                       timer2_armed;                     // one-shot: counting until the tick
             always @(posedge clk or negedge rst_n)
             begin
                 if (!rst_n)
                 begin
-                    timer2      <= 24'h0;
-                    timer2_tick <= 1'b0;
+                    timer2       <= 24'h0;
+                    timer2_tick  <= 1'b0;
+                    timer2_armed <= 1'b0;
                 end
                 else
                 begin
                     timer2_tick <= 1'b0;
                     if (preload2[23:0] == 24'h0)
-                        timer2 <= 24'h0;
+                    begin
+                        timer2       <= 24'h0;
+                        timer2_armed <= 1'b0;
+                    end
+                    else if (t2_entry)
+                    begin
+                        timer2       <= preload2[23:0];
+                        timer2_armed <= 1'b1;
+                    end
+                    else if (preload2[T2_ONESHOT] && preload2[T2_RELOAD] && !timer2_armed)
+                        ;                                               // one-shot: waiting for the next entry
                     else if (timer2 == 24'h0)
                     begin
-                        timer2      <= preload2[23:0];
-                        timer2_tick <= 1'b1;
+                        timer2       <= preload2[23:0];
+                        timer2_tick  <= 1'b1;
+                        timer2_armed <= !preload2[T2_ONESHOT];
                     end
                     else
                         timer2 <= timer2 - 24'd1;
@@ -855,13 +886,14 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire                      trace_cfg_en;
             wire                      trc_act   = trc_active_v[s];       // owns an SRAM
             wire                      big_act   = trc_big_act_v[s];      // owns both
-            wire [SI_W-1:0]           si_s      = (s == 0) ? trace_si_0    : trace_si_1;
             wire [PRISM_STATE_INPUTS-1:0] mux_s = (s == 0) ? trace_mux_0   : trace_mux_1;
             wire [1:0]                match_s   = (s == 0) ? trace_match_0 : trace_match_1;
             wire [1:0]                trc_trig  = trace_cfg[TRC_TRIG +: 2];
             wire [1:0]                trc_edge  = trace_cfg[TRC_EDGE +: 2];
             wire                      trc_in_now = in_s[trace_cfg[TRC_IN +: 5]];
-            wire                      trc_full_in = big_act ? trc_full_v[(NSRAM > 1) ? NSRAM-1 : 0] : trc_full_v[SI];
+            localparam                SI_OTHER = (NSRAM > 1) ? (1 - SI) : SI;   // the other shard's SRAM
+            wire                      trc_full_in = big_act ? trc_full_v[(NSRAM > 1) ? NSRAM-1 : 0] :
+                                                    trace_cfg[TRC_OTHER] ? trc_full_v[SI_OTHER] : trc_full_v[SI];
             reg                       trc_in_prev;
             reg                       trc_armed, trc_running, trc_done;
             wire                      trc_edge_hit = trc_edge[1] ? (trc_in_now ^ trc_in_prev) :
@@ -879,6 +911,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire                      trc_stop    = trc_act & trc_ctrl_wr & data_in[1] & !data_in[0];
             assign trc_en_v[s]              = trace_cfg[TRC_EN];
             assign trc_big_v[s]             = trace_cfg[TRC_BIG];
+            assign trc_other_v[s]           = trace_cfg[TRC_OTHER];
             assign trc_cap_v[s]             = trc_capture;
             assign trc_stop_v[s]            = trc_stop;
             assign trc_arm_v[s]             = trc_arm;
@@ -1159,11 +1192,14 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire               si_1   = SRAM_SHARED ? sram_own1 : (n != 0);
             wire               req_on = SRAM_SHARED ? sram_any  : sram_sel_v[n];
             // Trace ownership of this SRAM (the FIFO is held flushed meanwhile):
-            // shard 0 when it traces into SRAM 0 or into both, shard 1 when it
-            // traces into SRAM 1 (SRAM 0 if that is the only one) or into both
-            wire               own0   = trc_active_v[0] & (trc_big_act_v[0] | (n == 0));
+            // shard 0 when it traces into SRAM 0 (SRAM 1 with TRACE_CFG[6]) or
+            // into both, shard 1 when it traces into SRAM 1 (SRAM 0 with [6],
+            // or if that is the only one) or into both
+            wire               tgt0   = (NSRAM > 1) && trc_other_v[0];
+            wire               tgt1   = SRAM_SHARED ? 1'b0 : !((NSRAM > 1) && trc_other_v[SHARDS-1]);
+            wire               own0   = trc_active_v[0] & (trc_big_act_v[0] | ((n != 0) == tgt0));
             wire               own1   = trc_active_v[SHARDS-1] &
-                                        (trc_big_act_v[SHARDS-1] | (n == (SRAM_SHARED ? 0 : SHARDS-1)));
+                                        (trc_big_act_v[SHARDS-1] | ((n != 0) == tgt1));
             wire               trace_own = own0 | own1;
             wire               big_own   = trc_big_act_v[0] | trc_big_act_v[SHARDS-1];
             // the trace port: packs the owner's entries into this SRAM and
