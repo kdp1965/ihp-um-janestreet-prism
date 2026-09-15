@@ -192,7 +192,9 @@ registers only:
 | +0x38 | CONST: K0..K3 (K3 also the comm match value), section 4h |
 | +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit), section 4k |
 | +0x40 | PRELOAD2: free-running timer period (24 bits), input 28 ticks every PRELOAD2 + 1 clocks, 0 = off, section 4l |
-| +0x44-0x7C | spare |
+| +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
+| +0x48 | TRACE_CTRL: write [0] arm (flushes the SRAM FIFO), [1] stop; read [0] armed, [1] running, [2] done, [3] big, [4] active.  Entry (16 bits) = [4:0] SI, [10:5] LUT mux inputs, [11] tree 0 matched, [12] tree 1 taken, [13] executing; the traced SRAM's FIFO then serves the entries as bytes through +0x20 of the window that reads that SRAM (count = FIFO bytes / 2) |
+| +0x4C-0x7C | spare |
 
 The SDK (`prism.h`, item 11) then needs only a base per shard and the
 common block; the per-config remap is the base addresses plus a feature
@@ -463,7 +465,7 @@ iterations), typ setup +0.59 ns, KLayout DRC 0 items over 333 rules, LVS
 "circuits match uniquely" with all counts zero.  Then, for Ethernet
 receive and transmit at once, two 512x32 SRAMs (one FIFO per shard,
 section 4i) stacked flush left with their pin faces toward each other,
-(3.36, 3.78) `FS` and (3.36, 294.84) `N`, both wrappers in the 100 um gap:
+(3.36, 3.78) `FS` and (3.36, 340.20) `N` (294.84 until the tracer; section 4m), both wrappers in the 145 um gap:
 GRT 2560, DRT 26348 13229 11974 1492 289 12 3 3 0, typ setup +0.68 ns,
 hold +0.06 ns, slow-corner WNS -6.82 (all three better than with the
 single macro), KLayout DRC 0, LVS clean.  All the 1P x32 macros share the
@@ -776,6 +778,115 @@ If a future feature does need an FSM output rather than an input, the
 escape hatch is to widen the STEW with instantiated latches strobed by
 the existing WROW lines: not as dense as the CFGMEM bits, but a couple of
 outputs times three branches is a few dozen latches per shard.
+
+## 4m. Trace: execution capture into the SRAMs (2026-09-15)
+
+Each shard has a tracer (`prism_periph.v`, registers +0x44 / +0x48).
+From its trigger on, every clock's `{executing, tree 1 taken, tree 0
+matched, the six selected LUT mux input bits, SI[4:0]}` - a 16-bit entry,
+two per SRAM word - is written into an SRAM by the SRAM's trace port
+(`prism_trace_port.v`, next to the macro) until the buffer is full (1024
+entries on the 512x32; `2^(SRAM_AW+1)`), and the host reads the entries
+back.  The 21 outputs of a traced clock are not stored: they follow from
+the entry and the chroma the host loaded (state outputs at STEW bits
+[61:41], tree 1 outputs [82:62], tree 0 outputs [103:83]; while halted
+the outputs were the debugger's), and `prism_trace_outputs()` in the SDK
+rebuilds them; the test checks that rebuild against the real outputs on
+every traced clock.  The triggers: at once; in a given state; that state
+taking either jump (a decision tree fires while the shard executes, so a
+halted shard does not trigger); or an edge (rising, falling, either) on
+any of the 32 PRISM inputs.  Entry 0 is the trigger cycle itself: in the
+"state" case the first cycle in the state, in the "jump" case the cycle
+the tree fires (its match bit set, entry 1 is the target state), in the
+"edge" case the cycle the input changed.
+
+Storage: one shard traces at a time.  Shard s traces into SRAM s while
+its `TRACE_CFG[0]` is set (shard 0 wins if both shards enable: shard 1's
+tracer then reports inactive until shard 0's is switched off); with
+`TRACE_CFG[1]` as well it takes both SRAMs as one 2048-entry buffer
+(entries 0..1023 in SRAM 0).  A single 16-bit bus and three strobes,
+registered once at the top of the peripheral from the tracing shard's
+signals, reach the SRAM trace ports.  Arming flushes the SRAM's FIFO and
+pushes into a traced SRAM are dropped, so a chroma cannot stream from
+that SRAM while it is being traced into - use the flop FIFO, or the
+other SRAM.
+
+Host sequence: TRACE_CFG (trigger, storage), TRACE_CTRL = 1 (arm: the
+buffer restarts at entry 0 and the SRAM's FIFO is flushed), wait for done
+(or stop with TRACE_CTRL = 2, which keeps what was recorded, an odd
+count included), then read the entries as FIFO bytes.  At the end of a
+capture the trace port hands the buffer to the SRAM FIFO wrapper
+(`prism_sram_fifo.v` `load`: count x 2 bytes from word 0 become its
+contents), and while an SRAM holds a finished trace the window that reads
+that SRAM sees it as its SRAM FIFO in RX mode whatever CFG0 says, so
+`FIFO_STATUS` shows count x 2 bytes and each read of +0x20 pops the next
+byte, entry by entry, low byte first; with both SRAMs, entries 1024 and
+up come through shard 1's window.  Until the
+capture is done the window's FIFO works as configured (a chroma on the
+flop FIFO runs untouched while it is being traced); pushes into a traced
+SRAM are dropped.  Switching the trace off, or arming again, gives the
+window its FIFO back.  SDK: `prism_trace_config()`, `prism_trace_arm()`,
+`prism_trace_wait()`, `prism_trace_read()` (four pops), `prism_trace_off()`,
+`PRISM_TRACE_SI/MUX/OUT()`.
+
+Why the entries are 16 bits and the readout goes through the FIFO: the
+tile has one horizontal routing layer (Metal3) and it was at 71% before
+the tracer.  The first version stored 32-bit entries `{out, mux, SI}` and
+had TRACE_ADDR / TRACE_DATA registers with a prefetched read path from
+the SRAMs back into each shard: some 150 nets per shard between the shard
+logic (right of centre, next to the CFGMEM columns) and the SRAMs at the
+far left, and the placer dragged both shards 200-340 um towards the
+SRAMs (global-route wirelength 2.75M -> 3.30M um, overflow 4378 ->
+19735, Metal3 at 89%, with or without flops on the SRAM port: the pull is
+connectivity, not timing).  Reading through the FIFO wrapper instead
+brought the shards back to their places but 46 crossing nets per shard
+still left the overflow at 13434 with Metal3 at 81%, the extra demand
+spread over the whole left two thirds of the tile by the
+routability-driven placer.  Dropping the outputs from the entry (they are
+a function of the STEW) halved the bus and doubled the depth, but with
+both shards tracing at once (16 data bits and three strobes per shard,
+two buses) the overflow was still 6664 and detailed routing plateaued
+near 2000 violations.  So one shard traces at a time: a single 16-bit bus
+with three strobes crosses the tile, from flops, with `full` coming
+back, and the counter and the word packing sit next to the SRAM in the
+trace port.  The last stalls (single shard, 16 bits: detailed routing
+oscillating between 35 and 90 violations) were at the exits of the gaps
+between the LEFT16 column's macros (x 840-870, y 105-240 and x 735-810,
+y 465-600): everything from the SRAM side funnels through those gaps,
+and 21 more nets in that bundle were enough.  To pay for them the SRAM
+FIFO wrapper's almost-empty / almost-full levels (8 bits out) and flags
+(2 back) per shard no longer cross: the shard compares its own CFG1
+levels against the count that crosses anyway, and the flop FIFO storage
+became latch rows (fewer cells in the shard region).
+
+Cost: per shard a 21-bit configuration latch register (write-only) and
+some 10 flops of state; one set of 16 + 3 bus flops; per SRAM the trace
+port (an 11-bit counter, a 16-bit holding register) and the write mux on
+the macro port; the core exports its SI, mux outputs and tree results
+(`trace_*` ports).  Synthesized area 286k um2 against 281k before the
+tracer, after the flop FIFOs became latch rows (section 4b note) and the
+wrapper's flag comparisons moved to the shard.
+
+Closing the tile with the tracer took ten hardens (2026-09-15, log in
+this section and 4d.1): the routing limit of this floorplan is the pair
+of gaps between the macros of each CFGMEM column and the corridor between
+the two SRAMs.  The final recipe, all in `src/config.json`: SRAM 1 at y
+340.20 (corridor 145 um), routing obstructions over both SRAM interiors
+on Metal2-4 with 2.6 um free at the pin faces (the global router had
+planned two corridor nets through the macros), the macro LEFs
+regenerated with no pin clearance towards the macro interior (a 0.02 um
+Metal3 spacing item at a WROW pin), and `PL_RESIZER_SETUP_SLACK_MARGIN`
+0.25 ns (run 9 closed physically but 3.6 ps short at the typical corner
+on a shard-flop-to-SRAM-pin path).  Run 10: routing 0, KLayout DRC 0,
+LVS clean, IR drop 0.78 / 0.40 mV, typical setup +0.50 ns / hold +0.21
+ns, fast-corner hold +0.03 ns, 80 power ports legal; one antenna net left
+after the three repair passes (a warning, not a precheck item).  Test:
+`test_trace` checks every trigger, the stop (odd count), both SRAMs as
+one buffer (all 1024 entries of SRAM 0 and the first of SRAM 1 through
+shard 1's window), the FIFO around a trace, shard 0 then shard 1 tracing
+the same kind of edge while fractured (shard 0 wins while both enable),
+and the host's output reconstruction, all against a golden record of the
+core taps sampled every clock.
 
 ## 5. FIFO storage, item 9: SRAM spike result
 

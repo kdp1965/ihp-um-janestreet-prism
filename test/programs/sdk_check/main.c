@@ -134,6 +134,23 @@ int main(void)
     check("back to idle", wait_idle(), prism_dbg_status());
     check("crc cleared", prism_crc_get() == 0, prism_crc_get());
 
+    /* ---- 1b. trace: from the DATA state on, every clock into the SRAM --- */
+    prism_trace_config(PRISM_TRACE_TRIG_STATE | PRISM_TRACE_STATE(UART_TX_STATE_DATA));
+    prism_trace_arm();
+    check("trace armed", (prism_trace_status() & 0x1Fu) == (PRISM_TRACE_ST_ACTIVE | PRISM_TRACE_ST_ARMED), prism_trace_status());
+    prism_fifo_push(0x5A);                      /* a byte to send: DATA is entered */
+    check("trace done", prism_trace_wait(2000), prism_trace_status());
+    check("trace count", prism_trace_count() == PRISM_TRACE_ENTRIES, prism_fifo_status());
+    v = prism_trace_read();
+    check("trace entry 0", PRISM_TRACE_SI(v) == UART_TX_STATE_DATA && (v & PRISM_TRACE_EXEC), v);
+    check("trace outputs", prism_trace_outputs(v, chroma_uart_tx) <= PRISM_OUT_MASK, prism_trace_outputs(v, chroma_uart_tx));
+    v = prism_trace_read();
+    check("trace entry 1", PRISM_TRACE_SI(v) == UART_TX_STATE_DATA || PRISM_TRACE_SI(v) == UART_TX_STATE_DATA_CHECK, v);
+    check("trace count left", prism_trace_count() == PRISM_TRACE_ENTRIES - 2u, prism_fifo_status());
+    prism_trace_off();
+    prism_fifo_flush();
+    check("idle after trace", wait_idle(), prism_dbg_status());
+
     /* ---- 2. conditional breakpoint: DATA state when its bit time ends -- */
     prism_dbg_set_breakpoint_cond(0, UART_TX_STATE_DATA, PRISM_BPC_IF);
     prism_fifo_push(0x5A);

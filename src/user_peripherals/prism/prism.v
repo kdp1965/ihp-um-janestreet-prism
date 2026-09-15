@@ -173,6 +173,17 @@ module prism
    output wire [3:0]              in_prev_cap_1,
 
    // ============================
+   // Trace taps (per shard): the current SI, the STATE_INPUTS selected LUT
+   // inputs and {tree 1 taken, tree 0 matches}, for the peripheral's tracer
+   // ============================
+   output  wire [SI_BITS-1:0]      trace_si,
+   output  wire [SI_BITS-1:0]      trace_si_1,
+   output  wire [STATE_INPUTS-1:0] trace_mux,
+   output  wire [STATE_INPUTS-1:0] trace_mux_1,
+   output  wire [1:0]              trace_match,
+   output  wire [1:0]              trace_match_1,
+
+   // ============================
    // State Information Table (CFGMEM macros, TTSKY approach)
    // ============================
    output  wire [DH_BITS-1:0]    sit_addr_a,         // Row address for bank A (lo macros)
@@ -580,6 +591,30 @@ module prism
       end
    end
    endgenerate
+
+   /* 
+   =================================================================================
+   Trace taps: what the peripheral's tracer records every clock
+   =================================================================================
+   */
+   wire [STATE_INPUTS-1:0] trace_mux_s   [1:0];
+   wire [1:0]              trace_match_s [1:0];
+   for (genvar s = 0; s <= 1; s++)
+   begin : GEN_TRACE
+      localparam F = FRACTURABLE ? s : 0;
+      for (genvar inp = 0; inp < STATE_INPUTS; inp++)
+      begin : M
+         assign trace_mux_s[s][inp] = input_mux_out[F][inp];
+      end
+      assign trace_match_s[s] = {(DUAL_COMPARE != 0) && compare_match[F][DUAL_COMPARE] && !compare_match[F][0],
+                                 compare_match[F][0]};
+   end
+   assign trace_si      = curr_si[0];
+   assign trace_si_1    = curr_si[1];
+   assign trace_mux     = trace_mux_s[0];
+   assign trace_mux_1   = trace_mux_s[1];
+   assign trace_match   = trace_match_s[0];
+   assign trace_match_1 = trace_match_s[1];
 
    /* 
    =================================================================================

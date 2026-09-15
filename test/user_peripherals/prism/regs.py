@@ -57,6 +57,54 @@ REG_CFG2    = 0x134       # input slot selects (4 bits each: inputs 16-19, 28-31
 REG_CONST   = 0x138       # constants K3..K0 (K3 = comm match value)
 REG_CFG3    = 0x13C       # [2:0] Manchester receive pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit
 REG_PRELOAD2= 0x140       # free-running timer period (24 bits): input 28 ticks every PRELOAD2 + 1 clocks; 0 = off
+REG_TRACE_CFG  = 0x144    # trace configuration (TRC_*), write-only
+REG_TRACE_CTRL = 0x148    # write TRC_ARM / TRC_STOP; read TRC_ST_*
+                          # readout: the traced SRAM's FIFO wrapper serves the 16-bit entries as bytes (low
+                          # byte first) through REG_FIFO of the window that reads that SRAM (RX mode forced)
+
+# ---- trace ------------------------------------------------------------------
+TRC_EN         = 1 << 0   # this shard's trace owns its SRAM (the SRAM FIFO is held flushed)
+TRC_BIG        = 1 << 1   # both SRAMs as one 1024-entry buffer (shard 0 first)
+TRC_TRIG_NOW   = 0 << 2   # trigger at once
+TRC_TRIG_STATE = 1 << 2   # in state TRC_STATE(si)
+TRC_TRIG_JUMP  = 2 << 2   # state TRC_STATE(si) taking either jump
+TRC_TRIG_EDGE  = 3 << 2   # an edge on PRISM input TRC_INPUT(n)
+TRC_EDGE_RISE  = 0 << 4
+TRC_EDGE_FALL  = 1 << 4
+TRC_EDGE_ANY   = 2 << 4
+def TRC_STATE(si): return (si & 0x1f) << 8
+def TRC_INPUT(n):  return (n & 0x1f) << 16
+TRC_ARM  = 1
+TRC_STOP = 2
+TRC_ST_ARMED   = 1 << 0
+TRC_ST_RUNNING = 1 << 1
+TRC_ST_DONE    = 1 << 2
+TRC_ST_BIG     = 1 << 3
+TRC_ST_ACTIVE  = 1 << 4
+TRC_ENTRIES    = 1024     # per SRAM (2 bytes each); both SRAMs = 2048
+# entry (16 bits) = [4:0] SI, [10:5] LUT mux inputs, [11] tree 0 matched, [12] tree 1 taken, [13] executing
+TRC_E_MATCH0 = 1 << 11
+TRC_E_MATCH1 = 1 << 12
+TRC_E_EXEC   = 1 << 13
+def trace_entry(si, mux, match, ex): return (ex << 13) | ((match & 3) << 11) | ((mux & 0x3f) << 5) | (si & 0x1f)
+def trace_si(e):  return e & 0x1f
+def trace_mux(e): return (e >> 5) & 0x3f
+
+def stew_of(chroma, si):
+    ''' The 128-bit STEW of state si from a chroma word list (highest state
+        first, MSW first) '''
+    b = (len(chroma) // STEW_WORDS - 1 - si) * STEW_WORDS
+    return (chroma[b] << 96) | (chroma[b + 1] << 64) | (chroma[b + 2] << 32) | chroma[b + 3]
+
+def trace_outputs(e, chroma):
+    ''' The 21 outputs the shard drove in a traced clock, from the entry and
+        the chroma (state outputs at STEW [61:41], tree 1 outputs [82:62],
+        tree 0 outputs [103:83]); None while halted '''
+    if not e & TRC_E_EXEC:
+        return None
+    stew = stew_of(chroma, trace_si(e))
+    lsb = 83 if e & TRC_E_MATCH0 else 62 if e & TRC_E_MATCH1 else 41
+    return (stew >> lsb) & 0x1FFFFF
 
 CFG_FIFO_DIR_TX = 1 << 23
 CFG_FIFO_SRAM   = 1 << 31   # this shard's FIFO is its SRAM FIFO

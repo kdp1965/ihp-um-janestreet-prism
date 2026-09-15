@@ -12,7 +12,8 @@
 // available combinationally; count / empty / full / programmable
 // almost-empty and almost-full levels feed the PRISM inputs and the status
 // register.  Contents survive PRISM enable / disable (the host may fill a TX
-// FIFO before starting the FSM); only reset and flush clear it.
+// FIFO before starting the FSM); only reset and flush clear it.  The storage
+// is latch rows (see below), written one clock after the push.
 
 `default_nettype none
 
@@ -39,13 +40,11 @@ module prism_fifo
     output wire          almost_full
 );
 
-    reg  [7:0]    mem [0:DEPTH-1];
     reg  [AW-1:0] rd_ptr;
     reg  [AW-1:0] wr_ptr;
 
     assign empty        = (count == 0);
     assign full         = count[AW];
-    assign head         = mem[rd_ptr];
     assign almost_empty = count <= {1'b0, ae_level};
     assign almost_full  = count >= ({1'b1, {AW{1'b0}}} - {1'b0, af_level});
 
@@ -80,19 +79,61 @@ module prism_fifo
         end
     end
 
-    // Storage.  Reset flops on purpose: the contents are don't-care until
-    // written, but the reset flavour of the flop places and routes better
-    // than a block of plain ones (observed on the tile).
-    integer i;
+    // Storage: latch rows (prism_latch_reg, 8 latches each) in two banks,
+    // even rows and odd rows, each bank with its own registered write data,
+    // row and one-clock strobe.  A push loads the bank of the row it goes
+    // to; the row's gate is open during the following clock while that
+    // bank's data bus holds still, and since consecutive pushes hit rows of
+    // opposite parity the bus of a bank never moves while one of its gates
+    // is open or closing (the next push to the same bank is two clocks
+    // later).  The latch is transparent while written, so the head is
+    // available the clock after the push as with flops.  Reset: the row
+    // gates open with rst_n low and the data registers reset to 0.
+    // Against 8 flops plus 8 write muxes per row this is about a third less
+    // area and far fewer cells in the shard's densest area.
+    reg  [7:0]    wq   [0:1];                  // next write data per bank
+    reg  [AW-2:0] wrow [0:1];                  // its row within the bank
+    reg  [1:0]    wst;                         // one-clock write strobe per bank
+    wire [7:0]    mem_w [0:DEPTH-1];
+
     always @(posedge clk or negedge rst_n)
     begin
         if (!rst_n)
         begin
-            for (i = 0; i < DEPTH; i = i + 1)
-                mem[i] <= 8'h0;
+            wq[0] <= 8'h0; wq[1] <= 8'h0;
+            wrow[0] <= {(AW-1){1'b0}}; wrow[1] <= {(AW-1){1'b0}};
+            wst   <= 2'b00;
         end
-        else if (do_push)
-            mem[wr_ptr] <= push_data;
+        else
+        begin
+            wst <= 2'b00;
+            if (do_push)
+            begin
+                wq[wr_ptr[0]]   <= push_data;
+                wrow[wr_ptr[0]] <= wr_ptr[AW-1:1];
+                wst[wr_ptr[0]]  <= 1'b1;
+            end
+        end
     end
+
+    genvar r;
+    generate
+        for (r = 0; r < DEPTH; r = r + 1)
+        begin : ROW
+            localparam B  = r % 2;
+            localparam RR = r / 2;
+            wire gate = wst[B] & (wrow[B] == RR);
+            prism_latch_reg #( .WIDTH ( 8 ) ) i_row
+            (
+                .rst_n    ( rst_n     ),
+                .enable   ( gate      ),
+                .wr       ( 1'b1      ),
+                .data_in  ( wq[B]     ),
+                .data_out ( mem_w[r]  )
+            );
+        end
+    endgenerate
+
+    assign head = mem_w[rd_ptr];
 
 endmodule

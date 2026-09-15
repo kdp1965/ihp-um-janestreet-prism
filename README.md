@@ -50,8 +50,9 @@ pins facing east) at x = 537.11 um and bank B (hi macros, `CFGMEM_IHP16`,
 pins facing west) at 1346.39 um, with the PRISM logic in the 478 um
 channel between them.  The two 512x32 SRAM FIFO macros (one per shard,
 2 KB each) are stacked flush left at the bottom with their pin faces
-toward each other: (3.36, 3.78 um) `FS` and (3.36, 294.84 um) `N`, the
-100 um gap between them holding both FIFO wrappers; TinyQV lives above
+toward each other: (3.36, 3.78 um) `FS` and (3.36, 340.20 um) `N`, the
+145 um gap between them holding both FIFO wrappers and the trace ports;
+TinyQV lives above
 the stack under the tile pins.  All the 1P x32 macros share one width
 and the same power-column positions, so the stripes on the columns of
 the lower one serve the upper one too.  A CFGMEM column is a routing wall (Metal2 blocked, Metal3 chopped),

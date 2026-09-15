@@ -2,7 +2,7 @@
 # PrismBench (bench.py) after a reset; test.py wraps them as cocotb tests.
 
 import cocotb
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge
 
 from user_peripherals.prism.regs import *
 from user_peripherals.prism.bench import PrismTest
@@ -992,4 +992,312 @@ class FracturedTest(PrismTest):
         # Shard 1 interrupt clear through its own INT_CLR byte
         await tqv.write_byte_reg(REG_INT_CLR1, 0x80)
         assert not await bench.irq(IRQ1_MASK)
+        await tqv.write_word_reg(REG_FRAC_CFG, 0)
+
+
+# =============================================================================
+# Trace: execution capture into the SRAMs
+# =============================================================================
+class TraceMonitor:
+    ''' Golden model of the trace: what the tracer records every clock for
+        one shard, sampled at the falling edge (stable, and what the next
+        rising edge captures), plus the outputs actually driven, to check
+        the host's reconstruction. '''
+    def __init__(self, dut, shard):
+        prism = dut.user_project.i_peripherals.i_prism
+        core  = prism.i_prism
+        self.clk = dut.clk
+        self.si  = core.trace_si    if shard == 0 else core.trace_si_1
+        self.mux = core.trace_mux   if shard == 0 else core.trace_mux_1
+        self.mt  = core.trace_match if shard == 0 else core.trace_match_1
+        self.out = core.out_data    if shard == 0 else core.out_data_1
+        self.inp = core.in_data     if shard == 0 else core.in_data_1
+        self.ex  = prism.SH[shard].exec
+        self.cap = prism.SH[shard].trc_capture          # the cycles an entry is captured
+        self.entries = []
+        self.outs    = []
+        self.inputs  = []
+        self.caps    = []
+        self.task = None
+
+    @staticmethod
+    def iv(sig):
+        try: return int(sig.value)
+        except ValueError: return 0
+
+    async def _run(self):
+        while True:
+            await FallingEdge(self.clk)
+            self.entries.append(trace_entry(self.iv(self.si), self.iv(self.mux), self.iv(self.mt), self.iv(self.ex)))
+            self.outs.append(self.iv(self.out))
+            self.inputs.append(self.iv(self.inp))
+            self.caps.append(self.iv(self.cap))
+
+    def start(self):
+        self.task = cocotb.start_soon(self._run())
+
+    def stop(self):
+        if self.task is not None:
+            self.task.kill()
+
+    def start_of_capture(self):
+        ''' Golden index of entry 0 of the most recent capture '''
+        i = len(self.caps) - 1
+        while i >= 0 and not self.caps[i]:
+            i -= 1
+        while i >= 0 and self.caps[i]:
+            i -= 1
+        assert i + 1 < len(self.caps), "no capture seen"
+        return i + 1
+
+    def check(self, got, first=0):
+        ''' `got` must be entries first.. of the most recent capture; returns
+            the golden index of entry 0 '''
+        off = self.start_of_capture()
+        exp = self.entries[off + first: off + first + len(got)]
+        if got != exp:
+            k = next((i for i in range(min(len(got), len(exp))) if got[i] != exp[i]), min(len(got), len(exp)))
+            assert False, (f"entries {first}..: {len(got)} read, {len(exp)} expected; first difference at {first + k}: "
+                           f"got " + " ".join(f"{e:04x}" for e in got[k:k + 6]) + " expected " +
+                           " ".join(f"{e:04x}" for e in exp[k:k + 6]) + f" (capture run length {self.run_length()})")
+        return off
+
+    def run_length(self):
+        off = self.start_of_capture(); n = 0
+        while off + n < len(self.caps) and self.caps[off + n]:
+            n += 1
+        return n
+
+    def check_outputs(self, got, chroma, first=0):
+        ''' The host's reconstruction of the outputs from each entry and the
+            chroma must be what the shard drove in that clock '''
+        off = self.start_of_capture()
+        for k, e in enumerate(got):
+            exp = trace_outputs(e, chroma)
+            if exp is not None:
+                assert exp == self.outs[off + first + k], f"entry {first + k} {e:04x}: outputs {exp:06x} != {self.outs[off + first + k]:06x}"
+
+
+class TraceTest(PrismTest):
+    ''' The tracer: from the trigger on, every clock's {executing, tree
+        results, six LUT inputs, SI} of a shard goes into its SRAM (two
+        16-bit entries per word) until the buffer is full, then the host
+        reads the entries back as FIFO bytes and rebuilds the outputs from
+        the chroma.  Triggers: at once, in a state, a state taking a jump,
+        an edge on a PRISM input.  Each shard into its own SRAM at the same
+        time, or one shard into both SRAMs as a 2048-entry buffer.  Checked
+        against a golden record of the core's taps every clock. '''
+    name = "trace (execution capture into the SRAMs)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        dut.ui_in[2].value = 0
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        await tqv.write_word_reg(REG_CFG1, (2 << 0) | (8 << 4))
+        await bench.load_chroma(chroma_edge, chroma_edge_ctrlReg, chroma_edge_pinmuxReg)
+        mon0 = self.start(TraceMonitor(dut, 0))
+        await self.clocks(20)
+
+        def toggle():
+            dut.ui_in[2].value = 1 - int(dut.ui_in[2].value)
+
+        async def activity(clocks):
+            ''' Pin transitions at odd gaps for about `clocks` clocks '''
+            gaps = (5, 9, 13, 7, 30, 11, 6, 8, 21, 4)
+            n = 0
+            while n < clocks:
+                for g in gaps:
+                    toggle()
+                    await self.clocks(g)
+                    n += g
+
+        async def status(base=0):
+            return await tqv.read_word_reg(REG_TRACE_CTRL + base)
+
+        async def readout(count, base=0):
+            ''' The next `count` entries of the trace in the SRAM read through
+                window `base`: two FIFO bytes each, low byte first '''
+            for _ in range(50):
+                if await tqv.read_word_reg(REG_FIFO_ST + base) & 1 == 0:
+                    break
+                await self.clocks(4)
+            got = []
+            for _ in range(count):
+                lo = await tqv.read_byte_reg(REG_FIFO + base)
+                got.append(lo | (await tqv.read_byte_reg(REG_FIFO + base)) << 8)
+            return got
+
+        # The STEW word order the reconstruction relies on: the core's STEW
+        # of the current state (WAIT) reads back as the chroma's words
+        stew = 0
+        for w in range(STEW_WORDS):
+            stew |= (await tqv.read_word_reg(REG_STEW0 + 4 * w)) << (32 * w)
+        assert stew == stew_of(chroma_edge, 0), f"{stew:#034x} != {stew_of(chroma_edge, 0):#034x}"
+
+        async def fifo_bytes(base=0):
+            return (await tqv.read_word_reg(REG_FIFO_ST + base) >> 8) & 0x3FFF
+
+        # ---- trigger in a state: CNT_PIN (1) ---------------------------------
+        self.log("trigger in state CNT_PIN, 1024 entries into SRAM 0")
+        cfg = TRC_EN | TRC_TRIG_STATE | TRC_STATE(1)
+        await tqv.write_word_reg(REG_TRACE_CFG, cfg)                # (write-only)
+        st = await status()
+        assert st & 0x1f == TRC_ST_ACTIVE, f"{st:#x}"
+        await tqv.write_word_reg(REG_TRACE_CTRL, TRC_ARM)
+        await self.clocks(60)                                       # WAIT, no transition: still armed
+        st = await status()
+        assert st & 0x1f == TRC_ST_ACTIVE | TRC_ST_ARMED, f"{st:#x}"
+        await activity(1200)
+        st = await status()
+        assert st & 0x1f == TRC_ST_ACTIVE | TRC_ST_DONE, f"{st:#x}"
+        assert await fifo_bytes() == TRC_ENTRIES * 2                # the FIFO serves the trace
+        got = await readout(48)
+        assert trace_si(got[0]) == 1 and got[0] & TRC_E_EXEC, f"{got[0]:#x}"   # entry 0: the trigger cycle
+        assert trace_outputs(got[0], chroma_edge) & (1 << 9)        # CNT_PIN: OUT_COUNT2_INC
+        assert trace_si(got[1]) == 0                                # back to WAIT
+        off = mon0.check(got)
+        mon0.check_outputs(got, chroma_edge)
+        assert trace_si(mon0.entries[off - 1]) != 1                 # not in CNT_PIN the cycle before
+        assert await fifo_bytes() == (TRC_ENTRIES - 48) * 2
+        mon0.check(await readout(16), 48)                           # reading on continues
+
+        # ---- trigger on a jump: WAIT (0) taking either branch ----------------
+        self.log("trigger on WAIT taking a jump")
+        await tqv.write_word_reg(REG_TRACE_CFG, TRC_EN | TRC_TRIG_JUMP | TRC_STATE(0))
+        await tqv.write_word_reg(REG_TRACE_CTRL, TRC_ARM)
+        await self.clocks(80)                                       # in WAIT, nothing jumps
+        assert (await status()) & TRC_ST_ARMED
+        toggle()
+        await activity(1200)
+        st = await status()
+        assert st & 0x1f == TRC_ST_ACTIVE | TRC_ST_DONE, f"{st:#x}"
+        got = await readout(8)
+        assert trace_si(got[0]) == 0 and trace_si(got[1]) == 1, [hex(e) for e in got[:2]]
+        assert got[0] & (TRC_E_MATCH0 | TRC_E_MATCH1)               # the jump cycle
+        assert trace_outputs(got[1], chroma_edge) & (1 << 9)
+        off = mon0.check(got)
+        mon0.check_outputs(got, chroma_edge)
+        assert trace_si(mon0.entries[off - 1]) == 0                  # WAIT before the jump
+
+        # ---- trigger on an input edge: input 2 rising, falling, either -------
+        self.log("trigger on an edge of input 2")
+        dut.ui_in[2].value = 0
+        await self.clocks(30)
+        for edge, level in ((TRC_EDGE_RISE, 1), (TRC_EDGE_FALL, 0), (TRC_EDGE_ANY, 1)):
+            await tqv.write_word_reg(REG_TRACE_CFG, TRC_EN | TRC_TRIG_EDGE | edge | TRC_INPUT(2))
+            await tqv.write_word_reg(REG_TRACE_CTRL, TRC_ARM)
+            await self.clocks(60)
+            assert (await status()) & TRC_ST_ARMED
+            dut.ui_in[2].value = level
+            await activity(1200)
+            st = await status()
+            assert st & TRC_ST_DONE and await fifo_bytes() == TRC_ENTRIES * 2, f"{st:#x}"
+            got = await readout(8)
+            off = mon0.check(got)
+            assert (mon0.inputs[off] >> 2) & 1 == level             # the edge cycle
+            assert (mon0.inputs[off - 1] >> 2) & 1 == 1 - level
+            assert trace_si(got[0]) == 0                            # WAIT sees the edge
+            dut.ui_in[2].value = level
+            await self.clocks(30)
+
+        # ---- trigger at once, stopped by the host ----------------------------
+        self.log("immediate trigger, stop")
+        await tqv.write_word_reg(REG_TRACE_CFG, TRC_EN | TRC_TRIG_NOW)
+        await tqv.write_word_reg(REG_TRACE_CTRL, TRC_ARM)
+        await activity(41)                                          # (an odd count is likely)
+        st = await status()
+        assert st & 0x7 == TRC_ST_RUNNING, f"{st:#x}"
+        await tqv.write_word_reg(REG_TRACE_CTRL, TRC_STOP)
+        st = await status()
+        n = await fifo_bytes() // 2
+        assert st & 0x7 == TRC_ST_DONE and 40 < n < TRC_ENTRIES, f"{st:#x} {n}"
+        got = await readout(n)                                      # every entry
+        mon0.check(got)
+        mon0.check_outputs(got, chroma_edge)
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 1 == 1        # and nothing more
+
+        # ---- both SRAMs as one buffer for shard 0 ----------------------------
+        self.log("big buffer: 2048 entries across both SRAMs")
+        await tqv.write_word_reg(REG_TRACE_CFG + SHARD1, TRC_EN)   # shard 1 asks too: it gets nothing
+        await tqv.write_word_reg(REG_TRACE_CFG, TRC_EN | TRC_BIG | TRC_TRIG_NOW)
+        assert (await status(SHARD1)) & TRC_ST_ACTIVE == 0
+        await tqv.write_word_reg(REG_TRACE_CTRL, TRC_ARM)
+        await activity(2200)
+        st = await status()
+        assert st & 0x1f == TRC_ST_ACTIVE | TRC_ST_BIG | TRC_ST_DONE, f"{st:#x}"
+        assert await fifo_bytes() == TRC_ENTRIES * 2 and await fifo_bytes(SHARD1) == TRC_ENTRIES * 2
+        got = await readout(TRC_ENTRIES)                                       # all of SRAM 0 through window 0
+        mon0.check(got)
+        mon0.check_outputs(got, chroma_edge)
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 1 == 1
+        mon0.check(await readout(8, SHARD1), TRC_ENTRIES)                      # SRAM 1 through window 1
+        await tqv.write_word_reg(REG_TRACE_CFG, 0)
+        assert (await status(SHARD1)) & TRC_ST_ACTIVE                          # shard 1 has SRAM 1 now
+        await tqv.write_word_reg(REG_TRACE_CFG + SHARD1, 0)
+
+        # ---- the SRAM FIFO while traced, and back once the trace lets go -----
+        self.log("SRAM FIFO around a trace")
+        await bench.disable()
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX | CFG_FIFO_SRAM)
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+        for b in range(5):
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, 0x30 + b)
+        assert await fifo_bytes(SHARD1) == 5
+        # traced (a trigger that cannot fire: state 15 with the PRISM off): pushes dropped
+        await tqv.write_word_reg(REG_TRACE_CFG + SHARD1, TRC_EN | TRC_TRIG_STATE | TRC_STATE(15))
+        await tqv.write_byte_reg(REG_FIFO + SHARD1, 0x77)
+        assert await fifo_bytes(SHARD1) == 5
+        await tqv.write_word_reg(REG_TRACE_CTRL + SHARD1, TRC_ARM)             # arm flushes it
+        assert await fifo_bytes(SHARD1) == 0
+        assert (await status(SHARD1)) & 0x1f == TRC_ST_ACTIVE | TRC_ST_ARMED
+        await tqv.write_word_reg(REG_TRACE_CTRL + SHARD1, TRC_STOP)            # nothing recorded
+        st = await status(SHARD1)
+        assert st & 0x1f == TRC_ST_ACTIVE | TRC_ST_DONE, f"{st:#x}"
+        assert await fifo_bytes(SHARD1) == 0
+        await tqv.write_word_reg(REG_TRACE_CFG + SHARD1, 0)
+        for b in range(3):
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, 0x40 + b)
+        assert await fifo_bytes(SHARD1) == 3
+        assert await tqv.read_byte_reg(REG_FIFO + SHARD1) == 0x40
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, 0)
+
+        # ---- fractured: one shard at a time (shard 0 wins), each into its own SRAM
+        self.log("fractured: shard 0 then shard 1 trace the same kind of edge into their own SRAMs")
+        await tqv.write_word_reg(REG_CFG1 + SHARD1, (2 << 0) | (8 << 4))
+        await bench.load_fractured(chroma_edge, chroma_edge_ctrlReg, chroma_edge_pinmuxReg,
+                                   chroma_edge, chroma_edge_ctrlReg, chroma_edge_pinmuxReg)
+        mon1 = self.start(TraceMonitor(dut, 1))
+        await self.clocks(20)
+        for base in (0, SHARD1):
+            await tqv.write_word_reg(REG_TRACE_CFG + base, TRC_EN | TRC_TRIG_EDGE | TRC_EDGE_ANY | TRC_INPUT(2))
+        assert (await status()) & TRC_ST_ACTIVE and not (await status(SHARD1)) & TRC_ST_ACTIVE   # shard 0 wins
+        gots = {}
+        for base, mon in ((0, mon0), (SHARD1, mon1)):
+            await tqv.write_word_reg(REG_TRACE_CTRL + base, TRC_ARM)
+            await self.clocks(40)
+            assert (await status(base)) & TRC_ST_ARMED
+            toggle()
+            for m in range(3):                                      # shard 1's host toggles: only it sees them
+                await tqv.write_byte_reg(REG_TOGGLE + SHARD1, 0x00)
+            await activity(1200)
+            st = await status(base)
+            assert st & 0x1f == TRC_ST_ACTIVE | TRC_ST_DONE, f"{base:#x}: {st:#x}"
+            assert await fifo_bytes(base) == TRC_ENTRIES * 2
+            got = await readout(60, base)
+            mon.check(got)
+            mon.check_outputs(got, chroma_edge)
+            assert trace_si(got[0]) == 0
+            gots[base] = got
+            await tqv.write_word_reg(REG_TRACE_CFG + base, 0)          # hand over to shard 1
+            if base == 0:
+                assert (await status(SHARD1)) & TRC_ST_ACTIVE
+        # shard 1 counted its host toggles (CNT_HOST = 2) somewhere in its trace, shard 0 never
+        assert any(trace_si(e) == 2 for e in gots[SHARD1]) and not any(trace_si(e) == 2 for e in gots[0])
+
+        await tqv.write_word_reg(REG_TRACE_CFG, 0)
+        await tqv.write_word_reg(REG_TRACE_CFG + SHARD1, 0)
+        await tqv.write_word_reg(REG_CFG1, 0)
+        await tqv.write_word_reg(REG_CFG1 + SHARD1, 0)
+        dut.ui_in[2].value = 0
+        await bench.disable()
         await tqv.write_word_reg(REG_FRAC_CFG, 0)

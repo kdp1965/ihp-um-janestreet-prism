@@ -42,6 +42,19 @@
 //                     [7:4] clocks per half bit, [8] shifter input = the recovered bit (slot code 15 = bit valid)
 //     +0x40  PRELOAD2 free-running timer: a 24-bit down counter reloads from it and raises input 28 (default
 //                     slot value) for one clock every PRELOAD2 + 1 clocks; 0 = off (Ethernet link pulses)
+//     +0x44  TRACE_CFG  (write-only) [0] enable (this shard's trace owns its SRAM; one shard at a time, shard 0 wins),
+//                       [1] big: both SRAMs as one buffer, [3:2] trigger: 0 = at once, 1 = in state [12:8], 2 = state
+//                       [12:8] taking either jump, 3 = an edge on PRISM input [20:16] ([5:4]: 0 rising, 1 falling,
+//                       2/3 either)
+//     +0x48  TRACE_CTRL write [0] arm (flushes the SRAM FIFO, waits for the trigger, then records every clock
+//                       until the buffer is full), [1] stop; read [0] armed, [1] running, [2] done, [3] big,
+//                       [4] active.  Entry (16 bits, two per SRAM word, prism_trace_port.v) = [4:0] SI,
+//                       [10:5] LUT mux inputs, [11] tree 0 matched, [12] tree 1 taken, [13] executing (not
+//                       halted); the outputs follow from these and the STEW.  1024 entries per SRAM.
+//            Readout: the SRAM FIFO wrapper then serves the entries (2 bytes each, low byte first) through the
+//            FIFO register of the window that reads that SRAM (shard s's for SRAM s), which acts as the SRAM
+//            FIFO in RX mode while the SRAM holds a finished trace (until the trace is switched off or armed
+//            again; the shard's own FIFO works as configured until then).  Pushes into a traced SRAM are dropped.
 //
 // CFG0 bits (chroma ctrl_reg; the datapath ones are decoded in prism_datapath.v):
 //     1:0  shift_in_sel      6 clr_not_load     7 latch_in_out    8 shift_en
@@ -209,6 +222,15 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     localparam [6:0] SH_CONST   = 7'h38;    // constants K3..K0 (K3 also the comm match value)
     localparam [6:0] SH_CFG3    = 7'h3C;    // Manchester bit recoverer
     localparam [6:0] SH_PRELOAD2 = 7'h40;   // free-running timer period (24 bits)
+    localparam [6:0] SH_TRACE_CFG  = 7'h44; // trace: configuration
+    localparam [6:0] SH_TRACE_CTRL = 7'h48; //        arm / stop, status
+    localparam       TRC_EN   = 0;          // TRACE_CFG bits
+    localparam       TRC_BIG  = 1;
+    localparam       TRC_TRIG = 2;          // [3:2]
+    localparam       TRC_EDGE = 4;          // [5:4]
+    localparam       TRC_SI   = 8;          // [12:8]
+    localparam       TRC_IN   = 16;         // [20:16]
+    localparam       SI_W     = 5;          // state index width (DEPTH 32)
     localparam       CFG3_MRX_EN    = 3;    // CFG3: [2:0] pin, [3] enable, [7:4] clocks per half bit
     localparam       CFG3_SHIFT_MRX = 8;    //       [8] shifter input = recovered bit
 
@@ -255,10 +277,58 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     // SRAM FIFO: per-shard requests, and the one FIFO's outputs
     wire [SHARDS-1:0]    sram_sel_v, sram_push_v, sram_pop_v, sram_flush_v;
     wire [8*SHARDS-1:0]  sram_pdata_v;
-    wire [8*SHARDS-1:0]  sram_lvl_v;        // {af_level, ae_level}
     wire [8*SHARDS-1:0]  sram_head_v;       // per SRAM FIFO instance (index = shard, or 0 when shared)
     wire [14*SHARDS-1:0] sram_count_v;
-    wire [SHARDS-1:0]    sram_empty_v, sram_full_v, sram_ae_v, sram_af_v;
+    wire [SHARDS-1:0]    sram_empty_v, sram_full_v;
+    localparam [13:0]    SRAM_BYTES = 14'd4 << SRAM_AW;
+    // ---- SRAM FIFOs: prism_sram_fifo.v on IHP single-port macros ---------------
+    // SRAM_FIFO = 1: one FIFO owned by the shard with CFG0[31] set (shard 0
+    // first), its requests routed here and its flags / head fed back.
+    // SRAM_FIFO = 2: one FIFO per shard (shard s <-> SRAM s), no sharing.
+    localparam SRAM_SHARED = (SRAM_FIFO == 1);
+    localparam NSRAM       = (SRAM_FIFO > SHARDS) ? SHARDS : SRAM_FIFO;
+    // Trace (section 4m): per shard the 16-bit entry and three strobes for
+    // the SRAM trace ports (one shard's set is registered and sent below);
+    // per SRAM whether it is full and whether it holds a finished trace
+    // (its window's FIFO then reads it).
+    wire [SHARDS-1:0]    trc_en_v, trc_big_v, trc_active_v, trc_big_act_v, trc_cap_v, trc_stop_v, trc_arm_v;
+    wire [SHARDS-1:0]    trc_full_v, trc_held_v;
+    wire [16*SHARDS-1:0] trc_din_v;
+    wire [32*SHARDS-1:0] trace_st_v;
+    localparam           TRC_CFG_W = 21;    // TRACE_CFG bits in use (write-only: no readback, to spare the read mux)
+    wire [SI_W-1:0]      trace_si_0, trace_si_1;
+    wire [PRISM_STATE_INPUTS-1:0] trace_mux_0, trace_mux_1;
+    wire [1:0]           trace_match_0, trace_match_1;
+    // One shard traces at a time (shard 0 wins if both enable): into SRAM
+    // s (SRAM 0 when there is only one), or with TRACE_CFG[1] into both
+    // SRAMs as one buffer.  One 16-bit bus and three strobes cross the tile
+    // from a single set of flops here to the SRAM trace ports.  Two shards.
+    assign trc_active_v[0]        = (NSRAM > 0) && trc_en_v[0];
+    assign trc_active_v[SHARDS-1] = (NSRAM > 0) && trc_en_v[SHARDS-1] && !trc_en_v[0];
+    assign trc_big_act_v[0]        = (NSRAM > 1) && trc_active_v[0] && trc_big_v[0];
+    assign trc_big_act_v[SHARDS-1] = (NSRAM > 1) && trc_active_v[SHARDS-1] && trc_big_v[SHARDS-1];
+    wire        trc_sel1 = trc_active_v[SHARDS-1];      // whose entry goes out
+    reg  [15:0] trc_bus_din;
+    reg         trc_bus_cap, trc_bus_arm, trc_bus_stop, trc_stop_r;
+    always @(posedge clk or negedge rst_n)
+    begin
+        if (!rst_n)
+        begin
+            trc_bus_din  <= 16'h0;
+            trc_bus_cap  <= 1'b0;
+            trc_bus_arm  <= 1'b0;
+            trc_bus_stop <= 1'b0;
+            trc_stop_r   <= 1'b0;
+        end
+        else
+        begin
+            trc_bus_din  <= trc_sel1 ? trc_din_v[16*(SHARDS-1) +: 16] : trc_din_v[15:0];
+            trc_bus_cap  <= trc_sel1 ? trc_cap_v[SHARDS-1]  : trc_cap_v[0];
+            trc_bus_arm  <= trc_sel1 ? trc_arm_v[SHARDS-1]  : trc_arm_v[0];
+            trc_stop_r   <= trc_sel1 ? trc_stop_v[SHARDS-1] : trc_stop_v[0];  // stop reaches the port after the last entry
+            trc_bus_stop <= trc_stop_r;
+        end
+    end
 
     // Input slot (inputs 16-19 and 28-31, CFG2 4 bits each): 0 = the slot's
     // default (in_prev[i] for 16-19, 0 for 28-31), 1-4 = in_prev[0..3],
@@ -371,6 +441,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
         .in_prev_src_1      ( in_prev_num_v[4*IN_NUM_BITS +: 4*IN_NUM_BITS] ),
         .in_prev_cap        ( in_prev_cap_v[3:0]                          ),
         .in_prev_cap_1      ( in_prev_cap_v[7:4]                          ),
+        .trace_si           ( trace_si_0        ),
+        .trace_si_1         ( trace_si_1        ),
+        .trace_mux          ( trace_mux_0       ),
+        .trace_mux_1        ( trace_mux_1       ),
+        .trace_match        ( trace_match_0     ),
+        .trace_match_1      ( trace_match_1     ),
         .sit_addr_a         ( sit_addr_a        ),
         .sit_addr_b         ( sit_addr_b        ),
         .stew_a             ( stew_a            ),
@@ -441,7 +517,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire  [7:0]               comm_load_data = cfg0[CFG_COMM_LOAD_K] ? k_sel : preload[7:0];
             wire                      comm_match = (comm == consts[31:24]);
             wire  [7:0]               crc_byte;
-            wire                      fifo_dir = cfg0[CFG_FIFO_DIR];
+            // While the SRAM this window reads holds a finished trace, the
+            // window's FIFO is that SRAM FIFO in RX mode: the host pops the
+            // trace entries (the shard's own FIFO is frozen meanwhile; until
+            // the capture is done it works as configured)
+            wire                      fifo_traced;
+            wire                      fifo_dir = cfg0[CFG_FIFO_DIR] & !fifo_traced;
             // Unfractured, shard 0's OUT_FIFO_WR_RD strobes FIFO A (own,
             // OUT_FIFO_PUSH_POP = 0) or FIFO B (shard 1's, = 1), each per
             // its own direction.
@@ -457,8 +538,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire                      fifo_empty, fifo_full, fifo_ae, fifo_af;
             // This shard's FIFO storage: the flop FIFO, or the SRAM FIFO (CFG0[31])
             localparam                SI = (SRAM_FIFO == 1) ? 0 : s;     // the SRAM FIFO serving this shard
-            wire                      fifo_sram = (SRAM_FIFO != 0) && cfg0[CFG_FIFO_SRAM] &&
+            wire                      fifo_sram = (SRAM_FIFO != 0) && (cfg0[CFG_FIFO_SRAM] || fifo_traced) &&
                                                   (SRAM_FIFO != 1 || s == 0 || !cfg0_v[CFG_FIFO_SRAM]);
+            assign fifo_traced = (SRAM_FIFO != 0) && trc_held_v[SI];
             wire  [7:0]               lf_head;
             wire  [FIFO_AW:0]         lf_count;
             wire                      lf_empty, lf_full, lf_ae, lf_af;
@@ -560,14 +642,15 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign fifo_count = fifo_sram ? sram_count_v[14*SI +: 14] : {{(13-FIFO_AW){1'b0}}, lf_count};
             assign fifo_empty = fifo_sram ? sram_empty_v[SI] : lf_empty;
             assign fifo_full  = fifo_sram ? sram_full_v[SI]  : lf_full;
-            assign fifo_ae    = fifo_sram ? sram_ae_v[SI]    : lf_ae;
-            assign fifo_af    = fifo_sram ? sram_af_v[SI]    : lf_af;
+            // SRAM FIFO almost-empty / almost-full (levels in 64-byte units),
+            // compared here so only the count crosses from the SRAM side
+            assign fifo_ae    = fifo_sram ? (sram_count_v[14*SI +: 14] <= {4'h0, cfg1[16 +: 4], 6'b0}) : lf_ae;
+            assign fifo_af    = fifo_sram ? (sram_count_v[14*SI +: 14] >= (SRAM_BYTES - {4'h0, cfg1[20 +: 4], 6'b0})) : lf_af;
             assign sram_sel_v[s]          = fifo_sram;
             assign sram_push_v[s]         = f_push;
             assign sram_pdata_v[8*s +: 8] = f_pdata;
             assign sram_pop_v[s]          = f_pop;
             assign sram_flush_v[s]        = fifo_flush;
-            assign sram_lvl_v[8*s +: 8]   = cfg1[23:16];
 
             // CRC over the bit the shifter is receiving (crc_src = 0) or
             // transmitting (crc_src = 1) in the cycle OUT_CRC_UPDATE is set
@@ -762,7 +845,86 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 end
             end
 
+            // ---- Trace (section 4m): from the trigger on, every clock's
+            // {executing, tree 1 taken, tree 0 matched, the six selected LUT
+            // inputs, SI} goes to the SRAM trace port (next to the SRAM,
+            // prism_trace_port.v) until the buffer is full; the SRAM FIFO
+            // wrapper then serves the entries to the host as bytes.  One shard
+            // at a time: the entry and strobes are picked and registered above.
+            wire [TRC_CFG_W-1:0]      trace_cfg;
+            wire                      trace_cfg_en;
+            wire                      trc_act   = trc_active_v[s];       // owns an SRAM
+            wire                      big_act   = trc_big_act_v[s];      // owns both
+            wire [SI_W-1:0]           si_s      = (s == 0) ? trace_si_0    : trace_si_1;
+            wire [PRISM_STATE_INPUTS-1:0] mux_s = (s == 0) ? trace_mux_0   : trace_mux_1;
+            wire [1:0]                match_s   = (s == 0) ? trace_match_0 : trace_match_1;
+            wire [1:0]                trc_trig  = trace_cfg[TRC_TRIG +: 2];
+            wire [1:0]                trc_edge  = trace_cfg[TRC_EDGE +: 2];
+            wire                      trc_in_now = in_s[trace_cfg[TRC_IN +: 5]];
+            wire                      trc_full_in = big_act ? trc_full_v[(NSRAM > 1) ? NSRAM-1 : 0] : trc_full_v[SI];
+            reg                       trc_in_prev;
+            reg                       trc_armed, trc_running, trc_done;
+            wire                      trc_edge_hit = trc_edge[1] ? (trc_in_now ^ trc_in_prev) :
+                                                     trc_edge[0] ? (!trc_in_now & trc_in_prev) :
+                                                                   (trc_in_now & !trc_in_prev);
+            wire                      trc_si_hit = (si_s == trace_cfg[TRC_SI +: SI_W]);
+            wire                      trc_trigger = trc_armed &
+                                                    ((trc_trig == 2'd0) |
+                                                     (trc_trig == 2'd1 && trc_si_hit) |
+                                                     (trc_trig == 2'd2 && trc_si_hit && exec && (|match_s)) |
+                                                     (trc_trig == 2'd3 && trc_edge_hit));
+            wire                      trc_capture = trc_act & (trc_running | trc_trigger) & !trc_full_in;
+            wire                      trc_ctrl_wr = prism_wr && win && shard_off == SH_TRACE_CTRL;
+            wire                      trc_arm     = trc_act & trc_ctrl_wr & data_in[0];
+            wire                      trc_stop    = trc_act & trc_ctrl_wr & data_in[1] & !data_in[0];
+            assign trc_en_v[s]              = trace_cfg[TRC_EN];
+            assign trc_big_v[s]             = trace_cfg[TRC_BIG];
+            assign trc_cap_v[s]             = trc_capture;
+            assign trc_stop_v[s]            = trc_stop;
+            assign trc_arm_v[s]             = trc_arm;
+            assign trc_din_v[16*s +: 16]    = {2'b00, exec, match_s, mux_s, si_s};
+            assign trace_st_v [32*s +: 32]  = {27'h0, trc_act, big_act, trc_done, trc_running, trc_armed};
+
+            always @(posedge clk or negedge rst_n)
+            begin
+                if (!rst_n)
+                begin
+                    trc_in_prev <= 1'b0;
+                    trc_armed   <= 1'b0;
+                    trc_running <= 1'b0;
+                    trc_done    <= 1'b0;
+                end
+                else
+                begin
+                    trc_in_prev <= trc_in_now;
+
+                    if (!trc_act)
+                    begin
+                        trc_armed   <= 1'b0;
+                        trc_running <= 1'b0;
+                    end
+                    else if (trc_arm)
+                    begin
+                        trc_armed   <= 1'b1;
+                        trc_running <= 1'b0;
+                        trc_done    <= 1'b0;
+                    end
+                    else if (trc_stop || (trc_running && trc_full_in))   // (full_in lingers 2 clocks after an arm)
+                    begin
+                        trc_armed   <= 1'b0;
+                        trc_running <= 1'b0;
+                        trc_done    <= 1'b1;
+                    end
+                    else if (trc_capture)
+                    begin
+                        trc_armed   <= 1'b0;
+                        trc_running <= 1'b1;
+                    end
+                end
+            end
+
             // Configuration registers: latches (area) or flops (FPGA)
+            assign trace_cfg_en = win && shard_off == SH_TRACE_CFG;
             assign cfg0_en    = win && shard_off == SH_CFG0;
             assign pinmux_en  = win && shard_off == SH_PINMUX;
             assign preload_en = win && shard_off == SH_PRELOAD;
@@ -831,6 +993,14 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 .data_in    ( latch_data    ),
                 .data_out   ( preload2      )
             );
+            prism_latch_reg #( .WIDTH ( TRC_CFG_W ) ) trace_cfg_reg
+            (
+                .rst_n      ( rst_n                    ),
+                .enable     ( trace_cfg_en             ),
+                .wr         ( latch_wr                 ),
+                .data_in    ( latch_data[TRC_CFG_W-1:0] ),
+                .data_out   ( trace_cfg                )
+            );
             prism_latch_reg #( .WIDTH ( 32 ) ) cfg0_reg
             (
                 .rst_n      ( rst_n         ),
@@ -860,6 +1030,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             reg [20:0] pinmux_r;
             reg [31:0] preload_r;
             reg [31:0] cfg1_r, crc_poly_r, crc_exp_r, cfg2_r, const_r, cfg3_r, preload2_r;
+            reg [TRC_CFG_W-1:0] trace_cfg_r;
             always @(posedge clk or negedge rst_n)
             begin
                 if (~rst_n)
@@ -874,6 +1045,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                     const_r    <= 32'h0;
                     cfg3_r     <= 32'h0;
                     preload2_r <= 32'h0;
+                    trace_cfg_r <= 0;
                 end
                 else
                 begin
@@ -887,6 +1059,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                     if (const_en & prism_wr)    const_r    <= data_in;
                     if (cfg3_en & prism_wr)     cfg3_r     <= data_in;
                     if (preload2_en & prism_wr) preload2_r <= data_in;
+                    if (trace_cfg_en & prism_wr) trace_cfg_r <= data_in[TRC_CFG_W-1:0];
                 end
             end
             assign cfg0     = cfg0_r;
@@ -899,6 +1072,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign consts   = const_r;
             assign cfg3     = cfg3_r;
             assign preload2 = preload2_r;
+            assign trace_cfg = trace_cfg_r;
 `endif
 
             // Export for the read mux and cross-shard use
@@ -974,12 +1148,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     // (TinyQV takes the low bits), so e.g. COUNTS + 1 reads compare.
     // =============================================================
     reg [31:0] reg_word;
-    // ---- SRAM FIFOs: prism_sram_fifo.v on IHP single-port macros ---------------
-    // SRAM_FIFO = 1: one FIFO owned by the shard with CFG0[31] set (shard 0
-    // first), its requests routed here and its flags / head fed back.
-    // SRAM_FIFO = 2: one FIFO per shard (shard s <-> SRAM s), no sharing.
-    localparam SRAM_SHARED = (SRAM_FIFO == 1);
-    localparam NSRAM       = (SRAM_FIFO > SHARDS) ? SHARDS : SRAM_FIFO;
+    // ---- SRAM FIFOs (see the localparams above) and the trace's use of the SRAMs
     wire       sram_own1   = sram_sel_v[SHARDS-1] & ~sram_sel_v[0];     // shared: shard 1 owns it
     wire       sram_any    = |sram_sel_v;
     genvar n;
@@ -989,37 +1158,76 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             // the requesting shard: the owner when shared, shard n otherwise
             wire               si_1   = SRAM_SHARED ? sram_own1 : (n != 0);
             wire               req_on = SRAM_SHARED ? sram_any  : sram_sel_v[n];
-            wire               push   = req_on & sram_push_v[si_1];
+            // Trace ownership of this SRAM (the FIFO is held flushed meanwhile):
+            // shard 0 when it traces into SRAM 0 or into both, shard 1 when it
+            // traces into SRAM 1 (SRAM 0 if that is the only one) or into both
+            wire               own0   = trc_active_v[0] & (trc_big_act_v[0] | (n == 0));
+            wire               own1   = trc_active_v[SHARDS-1] &
+                                        (trc_big_act_v[SHARDS-1] | (n == (SRAM_SHARED ? 0 : SHARDS-1)));
+            wire               trace_own = own0 | own1;
+            wire               big_own   = trc_big_act_v[0] | trc_big_act_v[SHARDS-1];
+            // the trace port: packs the owner's entries into this SRAM and
+            // hands them to the FIFO wrapper when the capture ends
+            wire               port_wen, port_full, port_held, port_load;
+            wire [SRAM_AW-1:0] port_addr;
+            wire        [31:0] port_din;
+            wire [SRAM_AW+2:0] port_bytes;
+            prism_trace_port #( .AW ( SRAM_AW ) ) i_trace
+            (
+                .clk        ( clk                    ),
+                .rst_n      ( rst_n                  ),
+                .own        ( trace_own              ),
+                .big        ( big_own                ),
+                .upper      ( n != 0                 ),
+                .lower_full ( trc_full_v[0]          ),
+                .arm        ( trc_bus_arm            ),
+                .cap        ( trc_bus_cap            ),
+                .stop       ( trc_bus_stop           ),
+                .entry      ( trc_bus_din            ),
+                .full       ( port_full              ),
+                .held       ( port_held              ),
+                .load       ( port_load              ),
+                .load_bytes ( port_bytes             ),
+                .wen        ( port_wen               ),
+                .addr       ( port_addr              ),
+                .din        ( port_din               )
+            );
+            wire               push   = req_on & sram_push_v[si_1] & !trace_own;   // a traced SRAM takes no pushes
             wire               pop    = req_on & sram_pop_v[si_1];
-            wire               flush  = req_on & sram_flush_v[si_1];
+            wire               flush  = (req_on & sram_flush_v[si_1]) | (trace_own & trc_bus_arm);
             wire         [7:0] pdata  = sram_pdata_v[8*si_1 +: 8];
-            wire         [7:0] lvl    = sram_lvl_v[8*si_1 +: 8];
-            wire [SRAM_AW-1:0] sram_addr;
+            wire [SRAM_AW-1:0] f_addr;
             wire [SRAM_AW+2:0] sram_cnt;
-            wire        [31:0] sram_din, sram_bm, sram_dout;
-            wire               sram_wen, sram_ren;
+            wire        [31:0] f_din, f_bm, sram_dout;
+            wire               f_wen, f_ren;
+            // the macro port: the trace port's write in the clocks it has one, else the FIFO's
+            wire [SRAM_AW-1:0] sram_addr = port_wen ? port_addr  : f_addr;
+            wire        [31:0] sram_din  = port_wen ? port_din   : f_din;
+            wire        [31:0] sram_bm   = port_wen ? {32{1'b1}} : f_bm;
+            wire               sram_wen  = port_wen | f_wen;
+            wire               sram_ren  = !port_wen & f_ren;
             assign sram_count_v[14*n +: 14] = sram_cnt;          // zero-extended
+            assign trc_full_v[n]            = port_full;
+            assign trc_held_v[n]            = trace_own & port_held;
             prism_sram_fifo #( .AW ( SRAM_AW ) ) i_sram_fifo
             (
                 .clk          ( clk                    ),
                 .rst_n        ( rst_n                  ),
                 .flush        ( flush                  ),
+                .load         ( port_load              ),
+                .load_bytes   ( port_bytes             ),
                 .push         ( push                   ),
                 .push_data    ( pdata                  ),
                 .pop          ( pop                    ),
-                .ae_level     ( lvl[3:0]               ),
-                .af_level     ( lvl[7:4]               ),
                 .head         ( sram_head_v[8*n +: 8]  ),
                 .count        ( sram_cnt               ),
                 .empty        ( sram_empty_v[n]        ),
                 .full         ( sram_full_v[n]         ),
-                .almost_empty ( sram_ae_v[n]           ),
-                .almost_full  ( sram_af_v[n]           ),
-                .sram_addr    ( sram_addr              ),
-                .sram_din     ( sram_din               ),
-                .sram_bm      ( sram_bm                ),
-                .sram_wen     ( sram_wen               ),
-                .sram_ren     ( sram_ren               ),
+                .sram_addr    ( f_addr                 ),
+                .sram_din     ( f_din                  ),
+                .sram_bm      ( f_bm                   ),
+                .sram_wen     ( f_wen                  ),
+                .sram_ren     ( f_ren                  ),
                 .sram_dout    ( sram_dout              )
             );
             // IHP single-port SRAM: A_DLY must be tied high, BIST off.  Separate
@@ -1100,8 +1308,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign sram_count_v[14*n +: 14] = 14'h0;
             assign sram_empty_v[n]          = 1'b1;
             assign sram_full_v[n]           = 1'b1;
-            assign sram_ae_v[n]             = 1'b1;
-            assign sram_af_v[n]             = 1'b0;
+            assign trc_held_v[n]            = 1'b0;
+            assign trc_full_v[n]            = 1'b0;
         end
     endgenerate
 
@@ -1127,6 +1335,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 SH_CFG3:    reg_word = cfg3_v   [32*shard_sel +: 32];
                 SH_PRELOAD2: reg_word = preload2_v[32*shard_sel +: 32];
                 SH_CONST:   reg_word = const_v  [32*shard_sel +: 32];
+                SH_TRACE_CTRL: reg_word = trace_st_v  [32*shard_sel +: 32];
                 default:    reg_word = 32'h0;
             endcase
         end

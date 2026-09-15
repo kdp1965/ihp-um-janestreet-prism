@@ -19,6 +19,10 @@
 //
 // The read data of the macro is registered (one clock after A_REN).
 // Contents survive PRISM disable like the flop FIFO; flush empties it.
+// The almost-empty / almost-full levels (64-byte units) are compared by the
+// shard from `count`, so that only the count crosses the tile.
+// `load` makes the FIFO serve load_bytes bytes from word 0 that something
+// else (the tracer) wrote into the SRAM directly, oldest byte first.
 // Almost-empty / almost-full levels are in 64-byte units.
 `default_nettype none
 module prism_sram_fifo
@@ -29,17 +33,16 @@ module prism_sram_fifo
     input  wire          clk,
     input  wire          rst_n,
     input  wire          flush,
+    input  wire          load,              // the SRAM holds load_bytes bytes from word 0 (a trace): serve them
+    input  wire [AW+2:0] load_bytes,
     input  wire          push,
     input  wire    [7:0] push_data,
     input  wire          pop,
-    input  wire    [3:0] ae_level,          // almost empty: count <= level * 64
-    input  wire    [3:0] af_level,          // almost full:  count >= bytes - level * 64
     output wire    [7:0] head,
-    output wire [AW+2:0] count,             // bytes held (0 .. 4 * 2^AW)
+    output wire [AW+2:0] count,             // bytes held (0 .. 4 * 2^AW); the almost-empty /
+                                            // almost-full flags are derived from it by the shard
     output wire          empty,             // no byte available to pop right now
     output wire          full,              // no room for a push right now
-    output wire          almost_empty,
-    output wire          almost_full,
     // SRAM port (A_MEN = ren | wen)
     output reg  [AW-1:0] sram_addr,
     output reg    [31:0] sram_din,
@@ -73,8 +76,6 @@ module prism_sram_fifo
     assign count        = cnt;
     assign empty        = (cnt == 0) || !head_valid;
     assign full         = cnt[AW+2];        // cnt == BYTES
-    assign almost_empty = cnt <= {ae_level, 6'b0};
-    assign almost_full  = cnt >= (BYTES - {af_level, 6'b0});
 
     wire push_ok = push && !full;
     wire pop_ok  = pop && !empty;
@@ -116,6 +117,18 @@ module prism_sram_fifo
         begin
             wr_ptr <= 0; rd_ptr <= 0; cnt <= 0;
             rd_v <= 1'b0; rd_need <= 1'b0; read_pending <= 1'b0;
+        end
+        else if (load)
+        begin
+            // the write pointer rounds up to a word boundary so the reader
+            // never sees a "word being assembled" (the last, partial word is
+            // in the SRAM, not in asm_w); flush before pushing again
+            wr_ptr <= {load_bytes[AW+1:2] + {{AW-1{1'b0}}, |load_bytes[1:0]}, 2'b00};
+            rd_ptr <= 0;
+            cnt    <= load_bytes;
+            rd_v   <= 1'b0;
+            rd_need <= (load_bytes != 0);   // fetch word 0
+            read_pending <= 1'b0;
         end
         else
         begin
