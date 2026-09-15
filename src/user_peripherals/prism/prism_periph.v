@@ -45,6 +45,11 @@
 //                     [24] restart the count on entry into state [29:25] (next SI == it, current SI != it):
 //                     a retriggerable timeout with no STEW bits; [30] one-shot: after its tick the timer
 //                     waits for the next entry instead of running on
+//     +0x4C  CONST_TAB the 16x8 latch FIFO as an addressable constant table: [0] enable (OUT_COMM_LOAD loads comm
+//                     from the row at the 4-bit index instead of preload / K), {OUT_K_SEL1, OUT_K_SEL0} = how the
+//                     index moves on each load: 0 clear, 1 + 1, 2 + [10:8] add_to_idx, 3 = [7:4] idx_load
+//                     (+ idx_load with [1]); [2] post: the byte loaded is the row before the move (default:
+//                     after it); a write also sets the index from [19:16], which reads back live
 //     +0x44  TRACE_CFG  (write-only) [0] enable (this shard's trace owns its SRAM; one shard at a time, shard 0 wins),
 //                       [1] big: both SRAMs as one buffer, [6] other: trace into the other shard's SRAM instead of
 //                       this shard's (its own SRAM FIFO keeps running), [3:2] trigger: 0 = at once, 1 = in state [12:8], 2 = state
@@ -228,6 +233,13 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     localparam [6:0] SH_PRELOAD2 = 7'h40;   // free-running timer period (24 bits)
     localparam [6:0] SH_TRACE_CFG  = 7'h44; // trace: configuration
     localparam [6:0] SH_TRACE_CTRL = 7'h48; //        arm / stop, status
+    localparam [6:0] SH_CTAB    = 7'h4C;    // constant table: the latch FIFO as addressable constants
+    localparam       CT_EN        = 0;      // CONST_TAB bits
+    localparam       CT_LOAD_ADDS = 1;      // index mode 3 adds idx_load instead of loading it
+    localparam       CT_POST      = 2;      // load the row before the index moves
+    localparam       CT_LOAD      = 4;      // [7:4]  idx_load
+    localparam       CT_ADD       = 8;      // [10:8] add_to_idx
+    localparam       CTAB_W       = 11;
     localparam       TRC_EN   = 0;          // TRACE_CFG bits
     localparam       TRC_BIG  = 1;
     localparam       TRC_TRIG = 2;          // [3:2]
@@ -275,6 +287,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     wire [32*SHARDS-1:0] cfg3_v;
     wire [32*SHARDS-1:0] preload2_v;
     wire [32*SHARDS-1:0] const_v;
+    wire [32*SHARDS-1:0] ctab_v;
     wire [32*SHARDS-1:0] fifo_st_v;
     wire [8*SHARDS-1:0]  fifo_head_v;
     wire [8*SHARDS-1:0]  comm_v;            // comm register per shard (FIFO push data)
@@ -524,8 +537,36 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             // OUT_COMM_LOAD source: preload[7:0], or constant K[{out20, out18}]
             wire  [7:0]               k_sel = out_s[OUT_K_SEL1] ? (out_s[OUT_K_SEL0] ? consts[31:24] : consts[23:16])
                                                                 : (out_s[OUT_K_SEL0] ? consts[15:8]  : consts[7:0]);
-            wire  [7:0]               comm_load_data = cfg0[CFG_COMM_LOAD_K] ? k_sel : preload[7:0];
+            wire  [7:0]               comm_load_data;
             wire                      comm_match = (comm == consts[31:24]);
+            // Constant table (CONST_TAB): the latch FIFO's 16 rows as
+            // constants at a 4-bit index; {OUT_K_SEL1, OUT_K_SEL0} says how
+            // the index moves on each OUT_COMM_LOAD (clear, + 1, + add_to_idx,
+            // = or + idx_load) and the row loaded is the one after the move
+            // (before it with CT_POST).  A host write sets the index.  While
+            // the shard is not executing the head is the row at the index,
+            // whatever the outputs say, so the host and the debugger see it.
+            wire [CTAB_W-1:0]         ctab;
+            wire                      ctab_en;
+            wire                      ctab_wr  = prism_wr && win && shard_off == SH_CTAB;
+            reg   [3:0]               const_idx;
+            wire  [1:0]               idx_mode = {out_s[OUT_K_SEL1], out_s[OUT_K_SEL0]};
+            wire  [3:0]               idx_next = idx_mode == 2'd0 ? 4'd0 :
+                                                 idx_mode == 2'd1 ? const_idx + 4'd1 :
+                                                 idx_mode == 2'd2 ? const_idx + {1'b0, ctab[CT_ADD +: 3]} :
+                                                 ctab[CT_LOAD_ADDS] ? const_idx + ctab[CT_LOAD +: 4] :
+                                                                      ctab[CT_LOAD +: 4];
+            wire  [3:0]               tab_idx  = (ctab[CT_POST] | !exec) ? const_idx : idx_next;
+            wire                      tab_load = exec & out_s[OUT_COMM_LOAD] & ctab[CT_EN];
+            always @(posedge clk or negedge rst_n)
+            begin
+                if (!rst_n)
+                    const_idx <= 4'h0;
+                else if (ctab_wr)
+                    const_idx <= data_in[19:16];
+                else if (tab_load)
+                    const_idx <= idx_next;
+            end
             wire  [7:0]               crc_byte;
             // While the SRAM this window reads holds a finished trace, the
             // window's FIFO is that SRAM FIFO in RX mode: the host pops the
@@ -554,6 +595,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire  [7:0]               lf_head;
             wire  [FIFO_AW:0]         lf_count;
             wire                      lf_empty, lf_full, lf_ae, lf_af;
+            assign comm_load_data = ctab[CT_EN]           ? lf_head :          // the constant table's row
+                                    cfg0[CFG_COMM_LOAD_K] ? k_sel   : preload[7:0];
             wire [31:0]               crc_value, crc_out;
             wire                      crc_ok;
             // in_prev edge-capture flops: CFG1[4i+3:4i] = source input number
@@ -639,6 +682,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 .push         ( f_push & !fifo_sram              ),
                 .push_data    ( f_pdata                          ),
                 .pop          ( f_pop & !fifo_sram               ),
+                .tab_en       ( ctab[CT_EN]                      ),
+                .tab_idx      ( tab_idx                          ),
                 .ae_level     ( cfg1[16 +: FIFO_AW]              ),
                 .af_level     ( cfg1[20 +: FIFO_AW]              ),
                 .head         ( lf_head                          ),
@@ -968,6 +1013,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign preload2_en = win && shard_off == SH_PRELOAD2;
             assign crc_poly_en = win && shard_off == SH_CRC_POLY;
             assign crc_exp_en  = win && shard_off == SH_CRC_EXP;
+            assign ctab_en     = win && shard_off == SH_CTAB;
 
 `ifndef SYNTH_FPGA
             prism_latch_reg #( .WIDTH ( 32 ) ) cfg1_reg
@@ -1034,6 +1080,14 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 .data_in    ( latch_data[TRC_CFG_W-1:0] ),
                 .data_out   ( trace_cfg                )
             );
+            prism_latch_reg #( .WIDTH ( CTAB_W ) ) ctab_reg
+            (
+                .rst_n      ( rst_n                  ),
+                .enable     ( ctab_en                ),
+                .wr         ( latch_wr               ),
+                .data_in    ( latch_data[CTAB_W-1:0] ),
+                .data_out   ( ctab                   )
+            );
             prism_latch_reg #( .WIDTH ( 32 ) ) cfg0_reg
             (
                 .rst_n      ( rst_n         ),
@@ -1064,6 +1118,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             reg [31:0] preload_r;
             reg [31:0] cfg1_r, crc_poly_r, crc_exp_r, cfg2_r, const_r, cfg3_r, preload2_r;
             reg [TRC_CFG_W-1:0] trace_cfg_r;
+            reg [CTAB_W-1:0] ctab_r;
             always @(posedge clk or negedge rst_n)
             begin
                 if (~rst_n)
@@ -1079,6 +1134,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                     cfg3_r     <= 32'h0;
                     preload2_r <= 32'h0;
                     trace_cfg_r <= 0;
+                    ctab_r     <= 0;
                 end
                 else
                 begin
@@ -1093,6 +1149,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                     if (cfg3_en & prism_wr)     cfg3_r     <= data_in;
                     if (preload2_en & prism_wr) preload2_r <= data_in;
                     if (trace_cfg_en & prism_wr) trace_cfg_r <= data_in[TRC_CFG_W-1:0];
+                    if (ctab_en & prism_wr)     ctab_r     <= data_in[CTAB_W-1:0];
                 end
             end
             assign cfg0     = cfg0_r;
@@ -1106,6 +1163,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign cfg3     = cfg3_r;
             assign preload2 = preload2_r;
             assign trace_cfg = trace_cfg_r;
+            assign ctab      = ctab_r;
 `endif
 
             // Export for the read mux and cross-shard use
@@ -1122,6 +1180,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign cfg3_v    [32*s +: 32] = cfg3;
             assign preload2_v[32*s +: 32] = preload2;
             assign const_v   [32*s +: 32] = consts;
+            assign ctab_v    [32*s +: 32] = {12'h0, const_idx, 5'h0, ctab};
             assign fifo_st_v [32*s +: 32] = {10'h0, fifo_count, 4'h0, fifo_af, fifo_ae, fifo_full, fifo_empty};
             assign fifo_head_v[8*s +: 8]  = fifo_head;
             assign comm_v     [8*s +: 8]  = comm;
@@ -1372,6 +1431,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 SH_PRELOAD2: reg_word = preload2_v[32*shard_sel +: 32];
                 SH_CONST:   reg_word = const_v  [32*shard_sel +: 32];
                 SH_TRACE_CTRL: reg_word = trace_st_v  [32*shard_sel +: 32];
+                SH_CTAB:    reg_word = ctab_v   [32*shard_sel +: 32];
                 default:    reg_word = 32'h0;
             endcase
         end

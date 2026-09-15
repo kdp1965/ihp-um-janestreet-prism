@@ -165,6 +165,22 @@ int main(void)
     prism_trace_off();
     check("idle after trace other", wait_idle(), prism_dbg_status());
 
+    /* ---- 1c2. constant table: the flop FIFO's rows read back at the index */
+    {
+        static const uint8_t tab[16] = { 0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+                                         0x98, 0xA9, 0xBA, 0xCB, 0xDC, 0xED, 0xFE, 0x0F };
+        uint32_t cfg0 = prism_read32(prism_shard_reg(PRISM_SH_CFG0));
+        prism_const_table_load(tab, 16);
+        check("const table cfg0 kept", prism_read32(prism_shard_reg(PRISM_SH_CFG0)) == cfg0, cfg0);
+        prism_const_table(PRISM_CTAB_EN | PRISM_CTAB_POST | PRISM_CTAB_INDEX(3));   /* post: the row at the index */
+        check("const table index", prism_const_table_index() == 3, prism_const_table_index());
+        check("const table row 3", prism_read8(prism_shard_reg(PRISM_SH_FIFO)) == tab[3], prism_read8(prism_shard_reg(PRISM_SH_FIFO)));
+        prism_const_table(PRISM_CTAB_EN | PRISM_CTAB_POST | PRISM_CTAB_INDEX(14));
+        check("const table row 14", prism_read8(prism_shard_reg(PRISM_SH_FIFO)) == tab[14], prism_read8(prism_shard_reg(PRISM_SH_FIFO)));
+        prism_const_table(0);
+        prism_fifo_flush();
+    }
+
     /* ---- 1d. timer 2 as a retriggerable one-shot: the register takes the fields */
     prism_set_timer2_retrigger(1000, UART_TX_STATE_DATA, true);
     v = prism_read32(prism_shard_reg(PRISM_SH_PRELOAD2));

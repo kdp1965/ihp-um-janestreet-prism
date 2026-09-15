@@ -60,6 +60,13 @@ REG_PRELOAD2= 0x140       # timer 2 period (24 bits): input 28 ticks every PRELO
 T2_RELOAD    = 1 << 24    # restart the count on entry into state T2_STATE(si): retriggerable timeout
 def T2_STATE(si): return (si & 0x1f) << 25
 T2_ONESHOT   = 1 << 30    # with T2_RELOAD: one tick per entry, then wait for the next entry
+REG_CTAB    = 0x14C       # constant table: the latch FIFO as addressable constants (CT_*); [19:16] = the index
+CT_EN        = 1 << 0     # OUT_COMM_LOAD loads comm from the table row at the index
+CT_LOAD_ADDS = 1 << 1     # index mode 3 ({K_SEL1, K_SEL0} = 3) adds idx_load instead of loading it
+CT_POST      = 1 << 2     # the byte loaded is the row before the index moves (default: after)
+def CT_LOAD(n): return (n & 0xf) << 4
+def CT_ADD(n):  return (n & 0x7) << 8
+def CT_IDX(n):  return (n & 0xf) << 16    # a write sets the index
 REG_TRACE_CFG  = 0x144    # trace configuration (TRC_*), write-only
 REG_TRACE_CTRL = 0x148    # write TRC_ARM / TRC_STOP; read TRC_ST_*
                           # readout: the traced SRAM's FIFO wrapper serves the 16-bit entries as bytes (low
@@ -111,6 +118,7 @@ def trace_outputs(e, chroma):
     return (stew >> lsb) & 0x1FFFFF
 
 CFG_FIFO_DIR_TX = 1 << 23
+CFG_COMM_LOAD_K = 1 << 30   # OUT_COMM_LOAD loads K[{out20, out18}] from CONST
 CFG_FIFO_SRAM   = 1 << 31   # this shard's FIFO is its SRAM FIFO
 FLAG_CRC_OK     = 1 << 10   # FLAGS: CRC value == CRC_EXPECTED
 

@@ -193,6 +193,7 @@ registers only:
 | +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit), section 4k |
 | +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
 | +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
+| +0x4C | CONST_TAB: the 16x8 latch FIFO as addressable constants, section 4n: [0] enable (OUT_COMM_LOAD loads the row at the 4-bit index; {OUT_K_SEL1, OUT_K_SEL0} = how the index moves on each load: 0 clear, 1 + 1, 2 + add_to_idx [10:8], 3 = idx_load [7:4], or + idx_load with [1]), [2] post (the row before the move; default after), [19:16] the index (a write sets it, reads back live) |
 | +0x48 | TRACE_CTRL: write [0] arm (flushes the SRAM FIFO), [1] stop; read [0] armed, [1] running, [2] done, [3] big, [4] active.  Entry (16 bits) = [4:0] SI, [10:5] LUT mux inputs, [11] tree 0 matched, [12] tree 1 taken, [13] executing; the traced SRAM's FIFO then serves the entries as bytes through +0x20 of the window that reads that SRAM (count = FIFO bytes / 2) |
 | +0x4C-0x7C | spare |
 
@@ -919,6 +920,75 @@ window, a push into SRAM 1 dropped), shard 0 then shard 1 tracing the
 same kind of edge while fractured (shard 0 wins while both enable), and
 the host's output reconstruction, all against a golden record of the
 core taps sampled every clock.
+
+## 4n. Constant table: the latch FIFO as addressable constants (2026-09-15)
+
+When a shard streams from its SRAM FIFO (CFG0[31]) its 16x8 latch FIFO
+sits idle; `CONST_TAB` (+0x4C) turns those 16 rows into constants a
+chroma indexes - a MAC address, an IP header, a fixed reply - without
+spending states on OUT_K_SEL bit patterns for every byte.  With
+CONST_TAB[0] set, OUT_COMM_LOAD loads comm from the row at a 4-bit
+index (flops) instead of preload[7:0] or K[]; the two constant-select
+outputs become the index mode for that load: `{OUT_K_SEL1, OUT_K_SEL0}`
+= 0 clears the index, 1 adds one, 2 adds `add_to_idx` (CONST_TAB[10:8]),
+3 loads `idx_load` (CONST_TAB[7:4]) - or adds it with CONST_TAB[1], so
+a chroma that needs two strides and no jump can have them.  Every load
+moves the index (add 0 if it must not).  The byte loaded is the row
+*after* the move, so "clear" reads row 0, "+1" the next row, "load"
+the row jumped to, all in the same load; CONST_TAB[2] (post) reads the
+row *before* the move instead, for chromas that want a plain
+post-increment walk.  The index wraps modulo 16.  A write to CONST_TAB
+also sets the index from [19:16] (the host's reset before a run), and
+[19:16] read back live.  The comm match against K3 (CONST[31:24]) is
+untouched, and CONST's K[] loads still work with the table off.
+
+The table is loaded the way the flop FIFO is: select it (CFG0[31] = 0)
+in TX mode, flush, push 16 bytes, then select the SRAM FIFO again - the
+latch rows keep their contents (`prism_const_table_load()` does exactly
+that and restores CFG0).  In table mode the FIFO's head is the indexed
+row, so with the flop FIFO selected the host sees a row at +0x20: the
+row at the index while the shard is not executing (disabled or halted)
+or with post set, otherwise the row the executing shard's current
+outputs would load next (an idle chroma's outputs say "clear": row 0).
+The FIFO pointers are not otherwise touched, so a chroma using the
+table must not also pop that FIFO.  Cost: a 4-bit register and adder per shard and a second
+select on the existing 16:1 head mux (`prism_fifo.v` `tab_en`,
+`tab_idx`).  Test: `test_const_table` with `chroma_const_tab` (six
+loads: clear, +1, +1, +add, load/add idx_load, +1; pushed into the SRAM
+FIFO and read back) checks pre and post update, the add-idx_load
+option, wrap-around, a preset index, the read-back, the host's view of
+a row, and the same loads from K[] with the table off.  SDK:
+`prism_const_table_load()`, `prism_const_table()`,
+`prism_const_table_index()`, `PRISM_CTAB_*`.
+
+Hardening (2026-09-15/16): run 12, the first with the table, stopped at
+6 shorts after 60 router passes, all in one 30 x 35 um pocket of shard
+1's constant / CFG2 logic.  The pocket was only 37% utilized; what
+filled it was 59 antenna diodes, 16 of them on two mux-select nets,
+crowding the pin access of the cells between them (the diode total was
+the same as run 11's, about 11k; the placement had simply landed them
+together).  `tools/route_heat.py` and `tools/cell_density.py` (maps of
+Metal2/3 demand from the routing guides and of cell density from an
+.odb) showed the general pressure to be the two channel-height stripes
+of the band between the CFGMEM columns, at 60% utilization against the
+55% target, with Metal3 the only horizontal signal layer (the PDK's
+LibreLane default excludes Metal1, `RT_MIN_LAYER`, and Tiny Tapeout
+reserves TopMetal1).  Fix: pad the diodes.  LibreLane's `DIODE_PADDING`
+turned out to have no effect here - it is declared for the routing
+steps, but the 10.9k heuristic diodes are legalized by a
+DetailedPlacement sub-step that never sees it (run 13a was bit-identical
+to run 12) - so the config now sets `DPL_CELL_PADDING` 2 (one site each
+side) with a `CELL_PAD_EXCLUDE` list of 28 star-only patterns that
+strips the padding from every master except `sg13cmos5l_antennanp`
+(checked against all 87 library masters; star-only because the Tcl and
+Python matchers differ on anything else).  Run 13: routing 0 in 37
+passes plus a clean antenna re-route, KLayout DRC 0, LVS clean, antenna
+0, IR drop 0.67 mV, typical setup +0.33 ns / hold +0.27 ns, fast hold
++0.10 ns, 80 power ports legal, the same slow-corner setup warning as
+before (-7.7 ns at 125 C / 1.08 V against the 14 ns constraint); 1202
+hold buffers this time (280 in run 11), std-cell area 418.8k um2.  The
+worst typical path is state flops -> CFGMEM decoder -> decision-tree
+logic, as before, not the table's adder and row select.
 
 ## 5. FIFO storage, item 9: SRAM spike result
 

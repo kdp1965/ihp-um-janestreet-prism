@@ -242,5 +242,37 @@
     "Metal4 3.36 3.78 420.0 192.5",
     "Metal4 3.36 342.8 420.0 531.54"
   ],
-  "PL_RESIZER_SETUP_SLACK_MARGIN": 0.25
+  "PL_RESIZER_SETUP_SLACK_MARGIN": 0.25,
+  "DIODE_PADDING": 2,
+  "DPL_CELL_PADDING": 2,
+  "CELL_PAD_EXCLUDE": [
+    "CFGMEM*",
+    "RM*",
+    "sg13cmos5l_a2*",
+    "sg13cmos5l_and*",
+    "sg13cmos5l_buf*",
+    "sg13cmos5l_decap*",
+    "sg13cmos5l_dfrbp*",
+    "sg13cmos5l_dlhq*",
+    "sg13cmos5l_dlhr*",
+    "sg13cmos5l_dllr*",
+    "sg13cmos5l_dlygate*",
+    "sg13cmos5l_ebufn*",
+    "sg13cmos5l_einvn*",
+    "sg13cmos5l_fill*",
+    "sg13cmos5l_inv*",
+    "sg13cmos5l_lgcp*",
+    "sg13cmos5l_mux*",
+    "sg13cmos5l_nand*",
+    "sg13cmos5l_nor*",
+    "sg13cmos5l_o*",
+    "sg13cmos5l_sdfbbp*",
+    "sg13cmos5l_sdfrbp*",
+    "sg13cmos5l_sighold*",
+    "sg13cmos5l_slgcp*",
+    "sg13cmos5l_tiehi*",
+    "sg13cmos5l_tielo*",
+    "sg13cmos5l_xnor*",
+    "sg13cmos5l_xor*"
+  ]
 }

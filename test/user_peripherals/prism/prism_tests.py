@@ -17,6 +17,7 @@ from user_peripherals.prism.chroma_gpio24 import *
 from user_peripherals.prism.chroma_uart_tx import *
 from user_peripherals.prism.chroma_fifo_loop import *
 from user_peripherals.prism.chroma_edge import *
+from user_peripherals.prism.chroma_const_tab import *
 from user_peripherals.prism.chroma_usb_ls import *
 from user_peripherals.prism.chroma_eth_tx import *
 from user_peripherals.prism.chroma_eth_rx import *
@@ -788,6 +789,107 @@ class Timer2Test(PrismTest):
         await tqv.write_word_reg(REG_CFG1 + SHARD1, 0)
         dut.ui_in[2].value = 0
         await bench.disable()
+
+
+class ConstTableTest(PrismTest):
+    ''' CONST_TAB: the shard's 16x8 latch FIFO as addressable constants.
+        The host loads 16 bytes through the flop FIFO, then the const_tab
+        chroma performs six comm loads with the index modes clear, + 1, + 1,
+        + add_to_idx, = / + idx_load, + 1 and pushes each byte into the
+        SRAM FIFO for the host to read back.  Pre and post index update,
+        the add-idx_load option, wrap-around, the host's index write and
+        read-back, the host's view of the current row, and the same loads
+        from CONST's K[] with the table off. '''
+    name = "constant table (the latch FIFO as addressable constants)"
+
+    async def run(self):
+        tqv, bench = self.tqv, self.bench
+        table = [((i + 1) * 0x1D) & 0xFF for i in range(16)]         # 16 distinct bytes
+        MODES = (0, 1, 1, 2, 3, 1)                                    # the chroma's six loads
+
+        def model(L, A, load_adds, post, idx):
+            out = []
+            for m in MODES:
+                nxt = (0 if m == 0 else idx + 1 if m == 1 else idx + A if m == 2 else
+                       idx + L if load_adds else L) & 15
+                out.append(table[idx if post else nxt])
+                idx = nxt
+            return out, idx
+
+        self.log("load the table through the flop FIFO")
+        await bench.disable()
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        await tqv.write_word_reg(REG_CFG0, CFG_FIFO_DIR_TX)          # the flop FIFO, host pushes
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        for b in table:
+            await tqv.write_byte_reg(REG_FIFO, b)
+        assert await tqv.read_word_reg(REG_FIFO_ST) & 0x1F03 == 0x1002          # 16 bytes, full
+        await bench.load_chroma(chroma_const_tab, chroma_const_tab_ctrlReg, chroma_const_tab_pinmuxReg)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)                     # the SRAM FIFO (RX) takes the pushes
+
+        async def run_once(cfg, idx0=0):
+            ''' One pass of the chroma with CONST_TAB = cfg and the index preset; the six bytes '''
+            await tqv.write_word_reg(REG_CTAB, cfg | CT_IDX(idx0))
+            assert (await tqv.read_word_reg(REG_CTAB)) == (cfg | CT_IDX(idx0))
+            c2 = await tqv.read_byte_reg(REG_COUNT2)
+            await tqv.write_byte_reg(REG_HOST, 0x01)
+            await self.clocks(60)
+            await tqv.write_byte_reg(REG_HOST, 0x00)
+            await self.clocks(20)
+            assert await bench.curr_state() == 0
+            assert (await tqv.read_byte_reg(REG_COUNT2) - c2) & 0xFF == 6
+            st = await tqv.read_word_reg(REG_FIFO_ST)
+            assert (st >> 8) & 0x3FFF == 6, f"{st:#x}"
+            got = []
+            for _ in range(6):
+                for _ in range(20):
+                    if await tqv.read_word_reg(REG_FIFO_ST) & 1 == 0:
+                        break
+                    await self.clocks(2)
+                got.append(await tqv.read_byte_reg(REG_FIFO))
+            return got
+
+        async def check(cfg, L, A, load_adds, post, idx0=0):
+            got = await run_once(cfg, idx0)
+            exp, idx = model(L, A, load_adds, post, idx0)
+            assert got == exp, f"{cfg:#x} idx0 {idx0}: got {got} expected {exp}"
+            assert (await tqv.read_word_reg(REG_CTAB) >> 16) & 0xF == idx
+
+        self.log("pre-update: the row after the move; load, then add idx_load")
+        await check(CT_EN | CT_LOAD(9) | CT_ADD(3), 9, 3, False, False)
+        await check(CT_EN | CT_LOAD_ADDS | CT_LOAD(9) | CT_ADD(3), 9, 3, True, False)
+        self.log("post-update: the row before the move, from a preset index")
+        await check(CT_EN | CT_POST | CT_LOAD(9) | CT_ADD(3), 9, 3, False, True, idx0=4)
+        await check(CT_EN | CT_POST | CT_LOAD_ADDS | CT_LOAD(9) | CT_ADD(3), 9, 3, True, True)
+        self.log("wrap-around")
+        await check(CT_EN | CT_LOAD(15) | CT_ADD(7), 15, 7, False, False)
+        await check(CT_EN | CT_LOAD_ADDS | CT_LOAD(15) | CT_ADD(7), 15, 7, True, False, idx0=13)
+
+        self.log("table off: the same loads take K[] from CONST")
+        await tqv.write_word_reg(REG_CONST, 0xD4C3B2A1)
+        await tqv.write_word_reg(REG_CFG0, CFG_FIFO_SRAM | CFG_COMM_LOAD_K)
+        got = await run_once(0)
+        assert got == [0xA1, 0xB2, 0xB2, 0xC3, 0xD4, 0xB2], got
+        await tqv.write_word_reg(REG_CFG0, CFG_FIFO_SRAM)
+        got = await run_once(0)                                      # neither: preload[7:0] = 0
+        assert got == [0] * 6, got
+
+        self.log("host view: with the flop FIFO selected, the FIFO register reads the row at the index")
+        await tqv.write_word_reg(REG_CFG0, 0)                        # the flop FIFO, RX
+        for i in (7, 0, 15):                                         # executing: the row post mode names
+            await tqv.write_word_reg(REG_CTAB, CT_EN | CT_POST | CT_IDX(i))
+            assert await tqv.read_byte_reg(REG_FIFO) == table[i]
+        await tqv.write_word_reg(REG_CTAB, CT_EN | CT_IDX(7))        # pre mode while executing (idle
+        assert await tqv.read_byte_reg(REG_FIFO) == table[0]        # outputs = "clear"): row 0
+        await bench.disable()                                        # not executing: the index's row
+        for i in (7, 3, 15):
+            await tqv.write_word_reg(REG_CTAB, CT_EN | CT_IDX(i))
+            assert await tqv.read_byte_reg(REG_FIFO) == table[i]
+        await tqv.write_word_reg(REG_CTAB, 0)
+        await tqv.write_word_reg(REG_CFG0, CFG_FIFO_DIR_TX)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)                     # the table's bytes out of the flop FIFO
+        await tqv.write_word_reg(REG_CFG0, 0)
+        await tqv.write_word_reg(REG_CONST, 0)
 
 
 # =============================================================================

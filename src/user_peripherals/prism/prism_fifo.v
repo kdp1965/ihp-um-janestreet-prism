@@ -14,6 +14,11 @@
 // register.  Contents survive PRISM enable / disable (the host may fill a TX
 // FIFO before starting the FSM); only reset and flush clear it.  The storage
 // is latch rows (see below), written one clock after the push.
+//
+// Constant-table mode (tab_en, CONST_TAB in prism_periph.v): the head is
+// row tab_idx instead of the read pointer's row, so the 16 rows serve as
+// addressable constants for OUT_COMM_LOAD; pushes and flushes still work
+// (that is how the host loads the table).
 
 `default_nettype none
 
@@ -31,6 +36,8 @@ module prism_fifo
     input  wire          pop,
     input  wire  [AW-1:0] ae_level,             // almost_empty when count <= ae_level
     input  wire  [AW-1:0] af_level,             // almost_full  when count >= DEPTH - af_level
+    input  wire          tab_en,                // constant table: head = row tab_idx
+    input  wire  [AW-1:0] tab_idx,
 
     output wire  [7:0]   head,
     output reg   [AW:0]  count,
@@ -134,6 +141,6 @@ module prism_fifo
         end
     endgenerate
 
-    assign head = mem_w[rd_ptr];
+    assign head = mem_w[tab_en ? tab_idx : rd_ptr];
 
 endmodule
