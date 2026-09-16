@@ -56,6 +56,16 @@ REG_CRC_EXP = 0x130
 REG_CFG2    = 0x134       # input slot selects (4 bits each: inputs 16-19, 28-31)
 REG_CONST   = 0x138       # constants K3..K0 (K3 = comm match value)
 REG_CFG3    = 0x13C       # [2:0] Manchester receive pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit
+                          # [27:16] edge-clocked sampler (CFG3_SMP_*)
+CFG3_SMP_EN    = 1 << 16  # sampler enable
+def CFG3_SMP_SRC(n): return (n & 0x1f) << 17   # the PRISM input whose edge clocks it
+CFG3_SMP_RISE  = 0 << 22
+CFG3_SMP_FALL  = 1 << 22
+CFG3_SMP_ANY   = 2 << 22
+CFG3_SMP_SHIFT = 1 << 24  # actions on the edge: shift the shifter
+CFG3_SMP_CNT2  = 1 << 25  #   count2 + 1
+CFG3_SMP_LATCH = 1 << 26  #   capture the in_prev flops
+CFG3_SMP_TIMER = 1 << 27  #   count1 clear / load
 REG_PRELOAD2= 0x140       # timer 2 period (24 bits): input 28 ticks every PRELOAD2 + 1 clocks; 0 = off
 T2_RELOAD    = 1 << 24    # restart the count on entry into state T2_STATE(si): retriggerable timeout
 def T2_STATE(si): return (si & 0x1f) << 25
@@ -121,6 +131,7 @@ CFG_FIFO_DIR_TX = 1 << 23
 CFG_COMM_LOAD_K = 1 << 30   # OUT_COMM_LOAD loads K[{out20, out18}] from CONST
 CFG_FIFO_SRAM   = 1 << 31   # this shard's FIFO is its SRAM FIFO
 FLAG_CRC_OK     = 1 << 10   # FLAGS: CRC value == CRC_EXPECTED
+FLAG_SMP_PENDING = 1 << 11  # FLAGS: sampler edge not yet consumed by the FSM (OUT_SHIFT / OUT_LATCH)
 
 # ---- debugger ---------------------------------------------------------------
 DBG_HALT_REQ   = 0x00001

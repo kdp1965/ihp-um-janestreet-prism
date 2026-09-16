@@ -198,3 +198,97 @@ class Ws2812Slave(Model):
             if count >= 35:
                 self.grb |= 1
             prev = val
+
+
+class I2cSlave(Model):
+    ''' I2C target behind the i2c_master chroma's two external open-drain
+        buffers: uo_out[1] = 1 pulls SCL low, uo_out[2] = 1 pulls SDA low.
+        Every clock the model resolves the two lines (master pull-lows, its
+        own SDA pull-low, else the pull-ups) and drives them back into
+        ui_in[1] (SCL) and ui_in[0] (SDA), then decodes START / STOP /
+        bytes, ACKs its address (and every byte written to it), and serves
+        `read_data` on reads until the master NAKs.  Events: ('start',),
+        ('stop',), ('addr', byte, acked), ('write', byte, acked),
+        ('read', byte, master_acked). '''
+
+    def __init__(self, dut, address):
+        super().__init__(dut)
+        self.addr = address
+        self.read_data = []
+        self.rx = []
+        self.events = []
+        self.scl_rises = []                      # clock index of each SCL rising edge
+        self.drive_low = False                   # the slave pulling SDA low
+        dut.ui_in[0].value = 1
+        dut.ui_in[1].value = 1
+
+    async def run(self):
+        scl_prev, sda_prev = 1, 1
+        phase = 'idle'                           # idle | rx | ack_out | tx | ack_in
+        shreg, nbits, clock_i = 0, 0, 0
+        addressed = reading = False
+        tx_byte, tx_bits = 0, 0
+        while True:
+            await RisingEdge(self.dut.clk)
+            clock_i += 1
+            uo = int(self.dut.uo_out.value)
+            scl = 0 if (uo >> 1) & 1 else 1
+            sda = 0 if ((uo >> 2) & 1 or self.drive_low) else 1
+            self.dut.ui_in[1].value = scl
+            self.dut.ui_in[0].value = sda
+            if scl and scl_prev:                              # SDA moves while SCL high
+                if sda_prev and not sda:                      # START (or repeated START)
+                    self.events.append(('start',))
+                    phase, shreg, nbits = 'rx', 0, 0
+                    addressed = reading = False
+                    self.drive_low = False
+                    self.addr_byte = True
+                elif not sda_prev and sda:                    # STOP
+                    self.events.append(('stop',))
+                    phase = 'idle'
+                    self.drive_low = False
+            elif scl and not scl_prev:                        # SCL rising: sample
+                self.scl_rises.append(clock_i)
+                if phase == 'rx':
+                    shreg = ((shreg << 1) | sda) & 0xFF
+                    nbits += 1
+                elif phase == 'ack_in':                       # the master's ACK of our byte
+                    acked = (sda == 0)
+                    self.events.append(('read', tx_byte, acked))
+                    if not acked:
+                        phase = 'idle_wait'
+            elif not scl and scl_prev:                        # SCL falling: drive
+                if phase == 'rx' and nbits == 8:
+                    if self.addr_byte:
+                        addressed = ((shreg >> 1) == self.addr)
+                        reading = bool(shreg & 1)
+                        self.events.append(('addr', shreg, addressed))
+                    else:
+                        self.rx.append(shreg)
+                        self.events.append(('write', shreg, addressed))
+                    self.drive_low = addressed                # ACK
+                    phase = 'ack_out'
+                elif phase == 'ack_out':                      # ACK bit over
+                    self.drive_low = False
+                    self.addr_byte = False
+                    if addressed and reading:
+                        tx_byte = self.read_data.pop(0) if self.read_data else 0xFF
+                        tx_bits = 8
+                        phase = 'tx'
+                    else:
+                        phase, shreg, nbits = 'rx', 0, 0
+                elif phase == 'ack_in':                       # master ACKed (seen on the rising edge): next byte
+                    tx_byte = self.read_data.pop(0) if self.read_data else 0xFF
+                    tx_bits = 8
+                    phase = 'tx'
+                if phase == 'tx':
+                    if tx_bits > 0:
+                        self.drive_low = not ((tx_byte >> (tx_bits - 1)) & 1)
+                        tx_bits -= 1
+                    else:                                     # 8 bits out: release for the master's ACK
+                        self.drive_low = False
+                        phase = 'ack_in'
+                elif phase == 'idle_wait':                    # NAKed: stay quiet until STOP / START
+                    self.drive_low = False
+                    phase = 'rx_done'
+            scl_prev, sda_prev = scl, sda

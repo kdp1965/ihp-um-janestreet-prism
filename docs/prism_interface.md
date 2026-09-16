@@ -190,7 +190,7 @@ registers only:
 | +0x30 | CRC expected |
 | +0x34 | CFG2: input slot selects for inputs 16-19 and 28-31 (4 bits each), section 4h |
 | +0x38 | CONST: K0..K3 (K3 also the comm match value), section 4h |
-| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit), section 4k |
+| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load), section 4p |
 | +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
 | +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
 | +0x4C | CONST_TAB: the 16x8 latch FIFO as addressable constants, section 4n: [0] enable (OUT_COMM_LOAD loads the row at the 4-bit index; {OUT_K_SEL1, OUT_K_SEL0} = how the index moves on each load: 0 clear, 1 + 1, 2 + add_to_idx [10:8], 3 = idx_load [7:4], or + idx_load with [1]), [2] post (the row before the move; default after), [19:16] the index (a write sets it, reads back live) |
@@ -1008,6 +1008,104 @@ before (-7.7 ns at 125 C / 1.08 V against the 14 ns constraint); 1202
 hold buffers this time (280 in run 11), std-cell area 418.8k um2.  The
 worst typical path is state flops -> CFGMEM decoder -> decision-tree
 logic, as before, not the table's adder and row select.
+
+## 4o. I2C master chroma (2026-09-16)
+
+`chromas/chroma_i2c_master.v`: an I2C controller for a board with two
+external open-drain (tri-state) buffers.  Each line gets one PRISM
+output meaning "pull the line low" - 1 = the buffer drives the line
+low, 0 = released - so the idle value of an unset output releases the
+bus, and the line levels come back on ui_in pins:
+
+| signal | pin | function |
+|---|---|---|
+| pin_out[0] | uo_out[1] | SCL pull-low |
+| cond_out[0] | uo_out[2] | SDA pull-low (the data bit is `cond_out[0] = 1; if (shift_data) cond_out[0] = 0`) |
+| in[0] | ui_in[0] | SDA level, also the shifter's input (shift_in_sel = 0) |
+| in[1] | ui_in[1] | SCL level (unused so far: no clock stretching) |
+
+Host side, shard 0 unfractured so it owns both FIFOs (as the fifo_loop
+chroma does): FIFO B (shard 1's window, CFG0 fifo_dir = TX) holds the
+bytes to send, the first one the address with R/W = 0; CONST K0 holds
+the address with R/W = 1 for a read; COMPARE (+0x11) the number of
+bytes to read, 0 for none; CFG2[3:0] = 14 puts flag2 on input 16 (the
+FSM's "read phase" flag, set with OUT_LATCH / OUT_FLAG2 when it loads
+K0); PRELOAD = the SCL phase length minus one (212 at 64 MHz for about
+100 kHz).  host_in[0] = 1 starts a transaction: START, every FIFO B
+byte followed by the slave's ACK, then if COMPARE is not 0 a repeated
+START (the first START if FIFO B was empty), K0, and COMPARE bytes read
+into FIFO A (own, RX) with ACK, NAK on the last, STOP, host interrupt;
+count2 counts the bytes read.  The FSM waits in DONE until host_in[0]
+drops.  A NAK from the slave aborts with a STOP: the unsent bytes stay
+in FIFO B and nothing lands in FIFO A, which is the host's error flag
+(no status register bit was needed).
+
+Timing: count1 paces every phase (PRELOAD + 1 clocks).  A transmitted
+bit is three phases - SCL low with the bit set, SCL high, SCL low with
+the bit still held, then the shift - so SDA never moves within a phase
+of an SCL edge and the period is 3 x (PRELOAD + 1).  Received bits are
+sampled at the end of SCL high (the shift takes the synchronized SDA);
+the ACK the same way.  The state machine is 25 states (IDLE, START1/2,
+TX_LOW/HIGH/FALL/CHECK, ACK_LOW/HIGH/FALL, ACK_NEXT1/2, NAK_FALL,
+RS_LOW/HIGH, RX_LOW/HIGH/CHECK, MACK_LOW/HIGH/FALL, STOP_LOW/HIGH/REL,
+DONE); decision states carry at most two explicit targets (the
+compiler's INC / loop_si rule), and every wait state is entered by an
+explicit jump.  Left out: clock stretching (SCL_in is wired but not
+read), multi-master arbitration, and FIFO A back-pressure (the host
+sizes COMPARE to the 16 bytes).
+
+Test: `test_i2c_master` with the `I2cSlave` model in `models.py`, which
+resolves the two lines every clock from the master's pull-lows and its
+own, drives them into ui_in, decodes START / STOP / bytes, ACKs its
+address and serves read data until the master NAKs.  Checked: a 3-byte
+write, a 3-byte read (ACK, ACK, NAK), a register-address write with a
+repeated START and a 2-byte read, a write and a read to an absent
+address (NAK, STOP, the leftover byte in FIFO B, nothing in FIFO A),
+the completion interrupt / DONE / IDLE sequence, and the SCL period.
+
+## 4p. Edge-clocked sampler (2026-09-16)
+
+The generalisation of the Manchester recoverer's trick: CFG3[27:16]
+names one PRISM input (any of the 32, [21:17]) and an edge polarity
+([23:22]: rising, falling, either), and on every such edge the shard's
+datapath performs the chosen actions with no state transition: shift
+the shifter with its configured input ([24]), count2 + 1 ([25]),
+capture all four in_prev flops ([26]), count1 clear / load ([27]).
+The actions OR into the FSM's own outputs (one shift if both ask in
+the same clock) and, like them, only act while the shard executes, so
+a debugger halt freezes the sampler too.  A sticky "edge pending" flag
+is set by the edge and cleared when the FSM shifts or latches
+(OUT_SHIFT / OUT_LATCH), or when the sampler or the PRISM is switched
+off; it is input slot code 15, shared with the recoverer's bit valid
+(the two are ORed; a shard uses one or the other), and FLAGS[11] for
+the host.  Cost per shard: a 32:1 mux, two flops and a few gates,
+about 40 cells, and the CFG3 latches.
+
+What it buys: a clocked slave protocol no longer spends its states on
+the bit loop (wait for the edge, shift, wait for the other edge,
+count); the FSM acts at byte boundaries on shift_term or count2.  The
+SPI slave chroma's seven states would become about three, an I2C
+slave's receive and transmit loops collapse to one wait each, and the
+USB chroma's missing "resynchronise on edges" is the count1-reload
+action.  The bit is also taken on the edge clock itself instead of two
+to three clocks later (synchroniser plus decision), so the same
+protocols run about two to three times faster; a state that no longer
+has to watch the clock input keeps one input-mux slot free (the
+wire_map limit).  Masters that generate their own clock gain nothing.
+
+Test: `test_sampler` drives a clock on ui_in[1] and data on ui_in[3]
+under an idle chroma: bytes shifted on rising and on falling edges,
+edges counted on either polarity, a 4-clock clock period, count1
+reloaded from PRELOAD and in_prev captured on an edge (white-box), the
+pending flag in FLAGS and its clearing by the uart_tx chroma's shift.
+SDK: `prism_set_sampler(input, edge, actions)`, `PRISM_CFG3_SMP_*`,
+`PRISM_FLAG_SMP_PENDING`; `prism_set_manchester()` keeps the sampler
+bits and vice versa.  Harden run 15 (sampler + I2C chroma, no other
+RTL change): routing 0 in 30 passes plus a clean re-route, KLayout DRC
+0, LVS clean, antenna 0, typical setup +0.62 ns / hold +0.27 ns, fast
+hold +0.09 ns, 80 power ports legal, std-cell area 422.2k um2 (+3.4k
+over run 13, of which the sampler is a small part: this placement
+needed 243 hold buffers against run 13's 1202).
 
 ## 5. FIFO storage, item 9: SRAM spike result
 

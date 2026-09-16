@@ -39,7 +39,12 @@
 //     +0x38  CONST    constants K0 [7:0] .. K3 [31:24]; OUT_COMM_LOAD source with CFG0[30] (select = {out20, out18}),
 //                     K3 also the comm match value
 //     +0x3C  CFG3     Manchester bit recoverer (prism_mrx.v): [2:0] receive pin (PRISM input 0-6), [3] enable,
-//                     [7:4] clocks per half bit, [8] shifter input = the recovered bit (slot code 15 = bit valid)
+//                     [7:4] clocks per half bit, [8] shifter input = the recovered bit (slot code 15 = bit valid).
+//                     Edge-clocked sampler: [16] enable, [21:17] the PRISM input whose edge clocks it,
+//                     [23:22] 0 rising / 1 falling / 2 either, and the actions on each edge with no state
+//                     transition: [24] shift, [25] count2 + 1, [26] capture the in_prev flops, [27] count1
+//                     clear / load; its sticky "edge pending" is slot code 15 too (cleared by the FSM's
+//                     OUT_SHIFT or OUT_LATCH) and FLAGS[11]
 //     +0x40  PRELOAD2 [23:0] timer 2 period: a 24-bit down counter reloads from it and raises input 28 (default
 //                     slot value) for one clock every PRELOAD2 + 1 clocks; 0 = off (Ethernet link pulses).
 //                     [24] restart the count on entry into state [29:25] (next SI == it, current SI != it):
@@ -253,6 +258,13 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     localparam       SI_W     = 5;          // state index width (DEPTH 32)
     localparam       CFG3_MRX_EN    = 3;    // CFG3: [2:0] pin, [3] enable, [7:4] clocks per half bit
     localparam       CFG3_SHIFT_MRX = 8;    //       [8] shifter input = recovered bit
+    localparam       CFG3_SMP_EN    = 16;   // edge-clocked sampler: [16] enable
+    localparam       CFG3_SMP_SRC   = 17;   //       [21:17] clock input (PRISM input 0-31)
+    localparam       CFG3_SMP_EDGE  = 22;   //       [23:22] 0 rising, 1 falling, 2 either
+    localparam       CFG3_SMP_SHIFT = 24;   //       [24] shift on the edge
+    localparam       CFG3_SMP_CNT2  = 25;   //       [25] count2 + 1 on the edge
+    localparam       CFG3_SMP_LATCH = 26;   //       [26] capture the in_prev flops on the edge
+    localparam       CFG3_SMP_TIMER = 27;   //       [27] count1 clear / load on the edge
 
     localparam  FIFO_DEPTH  = 16;
     localparam  FIFO_AW     = 4;
@@ -524,6 +536,18 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire [31:0]               preload2;
             wire                      preload2_en;
             wire                      mrx_valid, mrx_value;      // Manchester bit recoverer
+            // Edge-clocked sampler (CFG3[27:16]): hardware actions on the
+            // selected edge of one PRISM input, with no state transition
+            wire                      smp_en   = cfg3[CFG3_SMP_EN];
+            wire                      smp_src  = in_s[cfg3[CFG3_SMP_SRC +: 5]];
+            wire  [1:0]               smp_pol  = cfg3[CFG3_SMP_EDGE +: 2];
+            reg                       smp_prev;
+            reg                       smp_pending;               // sticky: an edge the FSM has not consumed
+            wire                      smp_rise = smp_src & ~smp_prev;
+            wire                      smp_fall = ~smp_src & smp_prev;
+            wire                      smp_edge = smp_en & exec & (smp_pol == 2'd0 ? smp_rise :
+                                                                  smp_pol == 2'd1 ? smp_fall : (smp_rise | smp_fall));
+            wire                      event_valid = mrx_valid | smp_pending;   // slot code 15
             wire                      shift_in_bit = cfg3[CFG3_SHIFT_MRX]    ? mrx_value :
                                                      cfg0[CFG_SHIFT_IN_COND] ? cond_s[0] : pin_in[{1'b0, cfg0[1:0]}];
             // FIFO / CRC
@@ -637,9 +661,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 .enable           ( prism_enable                       ),
                 .exec             ( exec                               ),
                 .o_count1_step    ( out_s[OUT_COUNT1_INC_DEC]          ),
-                .o_count1_clrload ( out_s[OUT_COUNT1_CLEAR_LOAD]       ),
-                .o_shift          ( out_s[OUT_SHIFT]                   ),
-                .o_count2_inc     ( out_s[OUT_COUNT2_INC]              ),
+                .o_count1_clrload ( out_s[OUT_COUNT1_CLEAR_LOAD] | (smp_edge & cfg3[CFG3_SMP_TIMER]) ),
+                .o_shift          ( out_s[OUT_SHIFT]             | (smp_edge & cfg3[CFG3_SMP_SHIFT]) ),
+                .o_count2_inc     ( out_s[OUT_COUNT2_INC]        | (smp_edge & cfg3[CFG3_SMP_CNT2])  ),
                 .o_count2_dec     ( out_s[OUT_COUNT2_DEC]              ),
                 .o_count2_clear   ( out_s[OUT_COUNT2_CLEAR]            ),
                 .o_comm_load      ( out_s[OUT_COMM_LOAD]               ),
@@ -793,9 +817,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             genvar sl;
             for (sl = 0; sl < 4; sl = sl + 1)
             begin : SLOTS
-                assign in_s[16+sl] = slot_val(cfg2[4*sl +: 4],    in_prev[sl], in_prev, comm, comm_match, flag2, mrx_valid);
+                assign in_s[16+sl] = slot_val(cfg2[4*sl +: 4],    in_prev[sl], in_prev, comm, comm_match, flag2, event_valid);
                 assign in_s[28+sl] = slot_val(cfg2[16+4*sl +: 4], (sl == 0) ? timer2_tick : 1'b0,
-                                              in_prev, comm, comm_match, flag2, mrx_valid);
+                                              in_prev, comm, comm_match, flag2, event_valid);
             end
 
             // Manchester bit recoverer: its bit valid is slot code 15, its bit
@@ -811,6 +835,24 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 .valid   ( mrx_valid              ),
                 .value   ( mrx_value              )
             );
+            always @(posedge clk or negedge rst_n)
+            begin
+                if (!rst_n)
+                begin
+                    smp_prev    <= 1'b0;
+                    smp_pending <= 1'b0;
+                end
+                else
+                begin
+                    smp_prev <= smp_src;
+                    if (!smp_en || !prism_enable)
+                        smp_pending <= 1'b0;
+                    else if (smp_edge)
+                        smp_pending <= 1'b1;
+                    else if (exec && (out_s[OUT_SHIFT] || out_s[OUT_LATCH]))
+                        smp_pending <= 1'b0;
+                end
+            end
             assign in_s[20]    = fifo_flag(1'b0, cfg1[25:24], fifo_empty, fifo_full, fifo_ae, fifo_af);
             assign in_s[21]    = fifo_flag(1'b1, cfg1[27:26], fifo_empty, fifo_full, fifo_ae, fifo_af);
             assign in_s[22]    = crc_ok;
@@ -913,9 +955,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                         flag2      <= out_s[OUT_FLAG2];
                     end
 
-                    // in_prev: capture the selected source on the core's strobe
+                    // in_prev: capture the selected source on the core's strobe,
+                    // or all four on the sampler's edge
                     if (!prism_enable)
                         in_prev <= 4'h0;
+                    else if (smp_edge && cfg3[CFG3_SMP_LATCH])
+                        in_prev <= in_prev_src_val;
                     else
                         in_prev <= (in_prev & ~in_prev_cap) | (in_prev_src_val & in_prev_cap);
                 end
@@ -1172,7 +1217,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign preload_v[32*s +: 32] = preload;
             assign count1_v [32*s +: 32] = count1;
             assign counts_v [32*s +: 32] = {comm_count, shift_count, comm, compare, count2};
-            assign flags_v  [32*s +: 32] = {21'h0, crc_ok, fifo_full, fifo_empty,
+            assign flags_v  [32*s +: 32] = {20'h0, smp_pending, crc_ok, fifo_full, fifo_empty,
                                             latched_in, shift_data, shift_term, count2_eq_comm,
                                             count2_cmp, count1_wrap, count1_term};
             assign cfg1_v    [32*s +: 32] = cfg1;

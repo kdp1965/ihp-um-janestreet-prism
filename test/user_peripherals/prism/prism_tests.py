@@ -6,7 +6,7 @@ from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge
 
 from user_peripherals.prism.regs import *
 from user_peripherals.prism.bench import PrismTest
-from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, Ws2812Slave
+from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, Ws2812Slave, I2cSlave
 from user_peripherals.prism.encoder import Encoder
 from user_peripherals.prism import usb_model as usb
 from user_peripherals.prism import eth_model as eth
@@ -18,6 +18,7 @@ from user_peripherals.prism.chroma_uart_tx import *
 from user_peripherals.prism.chroma_fifo_loop import *
 from user_peripherals.prism.chroma_edge import *
 from user_peripherals.prism.chroma_const_tab import *
+from user_peripherals.prism.chroma_i2c_master import *
 from user_peripherals.prism.chroma_usb_ls import *
 from user_peripherals.prism.chroma_eth_tx import *
 from user_peripherals.prism.chroma_eth_rx import *
@@ -425,6 +426,211 @@ class UartTxTest(PrismTest):
         assert await bench.curr_state() == 0
         assert await tqv.read_word_reg(REG_CRC) == 0
         assert not await bench.irq()
+
+
+# =============================================================================
+# Edge-clocked sampler unit test
+# =============================================================================
+class SamplerTest(PrismTest):
+    ''' CFG3[27:16]: on the selected edge of one PRISM input the hardware
+        shifts, counts, captures the in_prev flops or reloads count1 with no
+        state transition.  An idle chroma (fifo_loop) leaves the datapath to
+        the sampler; a clock on ui_in[1] and data on ui_in[3] are driven by
+        the test.  Rising, falling and either edge, a 4-clock clock period,
+        the pending flag, and its consumption by the uart_tx chroma's shift. '''
+    name = "edge-clocked sampler (CFG3[27:16])"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        sh0 = dut.user_project.i_peripherals.i_prism.SH[0]
+        CLK, DATA = 1, 3
+        dut.ui_in[CLK].value = 0
+        dut.ui_in[DATA].value = 0
+        await bench.load_chroma(chroma_fifo_loop, chroma_fifo_loop_ctrlReg, chroma_fifo_loop_pinmuxReg)
+        await tqv.write_word_reg(REG_CFG0, (1 << 8) | DATA)            # shifter on, MSB first, input = ui_in[3]
+        await tqv.write_word_reg(REG_CFG1, DATA)                       # in_prev[0] follows ui_in[3]
+
+        def smp(edge, actions):
+            return CFG3_SMP_EN | CFG3_SMP_SRC(CLK) | edge | actions
+
+        async def clock_in(byte, setup=3, high=4, hold=1):
+            ''' 8 clock pulses on ui_in[1]; each bit of the byte, MSB first, is on ui_in[3]
+                `setup` clocks before the rising edge and `hold` clocks after the falling one '''
+            for i in range(8):
+                dut.ui_in[DATA].value = (byte >> (7 - i)) & 1
+                await self.clocks(setup)
+                dut.ui_in[CLK].value = 1
+                await self.clocks(high)
+                dut.ui_in[CLK].value = 0
+                await self.clocks(hold)
+            await self.clocks(8)
+
+        async def flags():
+            return await tqv.read_word_reg(REG_FLAGS)
+
+        self.log("shift + count on rising edges")
+        await tqv.write_word_reg(REG_CFG3, smp(CFG3_SMP_RISE, CFG3_SMP_SHIFT | CFG3_SMP_CNT2))
+        await clock_in(0xA5)
+        assert await tqv.read_byte_reg(REG_COMM) == 0xA5
+        assert await tqv.read_byte_reg(REG_COUNT2) == 8
+        f = await flags()
+        assert f & (1 << 4) and f & FLAG_SMP_PENDING, f"{f:#x}"        # 8 shifts: shift_term; an edge pending
+        await clock_in(0x3C)
+        assert await tqv.read_byte_reg(REG_COMM) == 0x3C
+        assert await tqv.read_byte_reg(REG_COUNT2) == 16
+
+        self.log("shift on falling edges only")
+        await tqv.write_byte_reg(REG_COUNT2, 0)
+        await tqv.write_word_reg(REG_CFG3, smp(CFG3_SMP_FALL, CFG3_SMP_SHIFT))
+        await clock_in(0x5A)
+        assert await tqv.read_byte_reg(REG_COMM) == 0x5A
+        assert await tqv.read_byte_reg(REG_COUNT2) == 0
+
+        self.log("count either edge")
+        await tqv.write_word_reg(REG_CFG3, smp(CFG3_SMP_ANY, CFG3_SMP_CNT2))
+        await clock_in(0xFF)
+        assert await tqv.read_byte_reg(REG_COUNT2) == 16
+        assert await tqv.read_byte_reg(REG_COMM) == 0x5A                # no shift action
+
+        self.log("a 4-clock clock period")
+        await tqv.write_byte_reg(REG_COUNT2, 0)
+        await tqv.write_word_reg(REG_CFG3, smp(CFG3_SMP_RISE, CFG3_SMP_SHIFT | CFG3_SMP_CNT2))
+        await clock_in(0x96, setup=1, high=2, hold=1)                  # 4 clocks per bit
+        assert await tqv.read_byte_reg(REG_COMM) == 0x96
+        assert await tqv.read_byte_reg(REG_COUNT2) == 8
+
+        self.log("count1 reload and in_prev capture on the edge")
+        await tqv.write_word_reg(REG_PRELOAD, 0x1234)
+        await tqv.write_word_reg(REG_COUNT1, 5)
+        await tqv.write_word_reg(REG_CFG3, smp(CFG3_SMP_RISE, CFG3_SMP_TIMER | CFG3_SMP_LATCH))
+        assert await tqv.read_word_reg(REG_COUNT1) == 5
+        dut.ui_in[DATA].value = 1
+        await self.clocks(4)
+        assert int(sh0.in_prev.value) & 1 == 0                          # not captured yet
+        dut.ui_in[CLK].value = 1
+        await self.clocks(6)
+        dut.ui_in[CLK].value = 0
+        await self.clocks(4)
+        assert await tqv.read_word_reg(REG_COUNT1) == 0x1234
+        assert int(sh0.in_prev.value) & 1 == 1                          # in_prev[0] = ui_in[3] at the edge
+        dut.ui_in[DATA].value = 0
+        await self.clocks(6)
+        assert int(sh0.in_prev.value) & 1 == 1                          # holds until the next edge
+        assert await tqv.read_byte_reg(REG_COMM) == 0x96                # no shift action
+        assert (await flags()) & FLAG_SMP_PENDING
+        await tqv.write_word_reg(REG_CFG3, 0)                           # off: pending clears
+        await self.clocks(3)
+        assert not (await flags()) & FLAG_SMP_PENDING
+
+        self.log("the pending flag is consumed by an FSM shift (uart_tx)")
+        await bench.disable()
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        await bench.load_chroma(chroma_uart_tx, chroma_uart_tx_ctrlReg, chroma_uart_tx_pinmuxReg)
+        await tqv.write_word_reg(REG_PRELOAD, 14)                       # 16-clock bits
+        await tqv.write_word_reg(REG_CFG3, smp(CFG3_SMP_RISE, 0))       # edge detector only
+        dut.ui_in[CLK].value = 1
+        await self.clocks(4)
+        assert (await flags()) & FLAG_SMP_PENDING
+        await tqv.write_byte_reg(REG_FIFO, 0x0F)                        # the FSM shifts while it sends
+        await self.clocks(10 * 16 + 60)
+        assert not (await flags()) & FLAG_SMP_PENDING
+        dut.ui_in[CLK].value = 0
+        await tqv.write_word_reg(REG_CFG3, 0)
+        await tqv.write_word_reg(REG_CFG1, 0)
+        await bench.disable()
+        dut.ui_in[DATA].value = 0
+
+
+# =============================================================================
+# I2C master Chroma unit test
+# =============================================================================
+class I2cMasterTest(PrismTest):
+    ''' I2C controller through external open-drain buffers: uo_out[1] pulls
+        SCL low, uo_out[2] pulls SDA low, the lines come back on ui_in[1:0].
+        FIFO B holds the bytes to send (address first), K0 the read address,
+        COMPARE the read count, host_in[0] starts, the interrupt ends.  An
+        I2cSlave model resolves the bus and answers to one address: write,
+        read, write-then-repeated-START-read, and NAKs from an absent slave. '''
+    name = "i2c_master Chroma (external open-drain buffers)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        ADDR, HALF = 0x3C, 24
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        slave = self.start(I2cSlave(dut, ADDR))
+        await bench.load_chroma(chroma_i2c_master, chroma_i2c_master_ctrlReg, chroma_i2c_master_pinmuxReg)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)      # FIFO B: the host writes
+        await tqv.write_word_reg(REG_CFG2, 14)                              # input 16 = flag2 (read phase)
+        await tqv.write_word_reg(REG_PRELOAD, HALF - 1)                     # SCL phase = HALF clocks
+        await tqv.write_word_reg(REG_CONST, (ADDR << 1) | 1)                # K0 = the read address
+
+        async def transaction(tx, nread, read_data=(), clocks=6000):
+            ''' Push `tx` into FIFO B, ask for `nread` bytes, go, wait for the interrupt; the bytes read '''
+            slave.events.clear(); slave.rx.clear(); slave.scl_rises.clear()
+            slave.read_data = list(read_data)
+            for b in tx:
+                await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+            await tqv.write_byte_reg(REG_COMPARE, nread)
+            await tqv.write_word_reg(REG_HOST, 1)
+            for _ in range(clocks // 50):
+                if await bench.irq():
+                    break
+                await self.clocks(50)
+            assert await bench.irq(), "no completion interrupt"
+            assert await bench.curr_state() == 24                           # DONE
+            await tqv.write_word_reg(REG_HOST, 0)
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            await self.clocks(10)
+            assert await bench.curr_state() == 0 and not await bench.irq()
+            got = []
+            for _ in range((await tqv.read_word_reg(REG_FIFO_ST) >> 8) & 0x1F):
+                got.append(await tqv.read_byte_reg(REG_FIFO))
+            return got
+
+        self.log("write 3 bytes")
+        got = await transaction([ADDR << 1, 0x10, 0x20, 0x30], 0)
+        assert slave.events == [('start',), ('addr', ADDR << 1, True), ('write', 0x10, True),
+                                ('write', 0x20, True), ('write', 0x30, True), ('stop',)], slave.events
+        assert got == [] and await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 1 == 1
+        assert await tqv.read_byte_reg(REG_COUNT2) == 0
+        periods = [b - a for a, b in zip(slave.scl_rises, slave.scl_rises[1:])]
+        assert all(3 * HALF - 3 <= p <= 3 * HALF + 8 for p in periods[:7]), periods[:8]   # 3 phases per bit
+
+        self.log("read 3 bytes (K0 address, NAK on the last)")
+        got = await transaction([], 3, read_data=[0xA5, 0x5A, 0x0F])
+        assert slave.events == [('start',), ('addr', (ADDR << 1) | 1, True), ('read', 0xA5, True),
+                                ('read', 0x5A, True), ('read', 0x0F, False), ('stop',)], slave.events
+        assert got == [0xA5, 0x5A, 0x0F], got
+        assert await tqv.read_byte_reg(REG_COUNT2) == 3
+
+        self.log("write a register address, repeated START, read 2 bytes")
+        got = await transaction([ADDR << 1, 0x42], 2, read_data=[0x11, 0x22])
+        assert slave.events == [('start',), ('addr', ADDR << 1, True), ('write', 0x42, True), ('start',),
+                                ('addr', (ADDR << 1) | 1, True), ('read', 0x11, True), ('read', 0x22, False),
+                                ('stop',)], slave.events
+        assert got == [0x11, 0x22], got
+
+        self.log("no slave at the address: NAK, STOP, the unsent byte stays in FIFO B")
+        got = await transaction([(ADDR + 1) << 1, 0x99], 0)
+        assert slave.events == [('start',), ('addr', (ADDR + 1) << 1, False), ('stop',)], slave.events
+        assert got == []
+        st = await tqv.read_word_reg(REG_FIFO_ST + SHARD1)
+        assert (st >> 8) & 0x1F == 1, f"{st:#x}"
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+
+        self.log("read from an absent slave: NAK, nothing read")
+        await tqv.write_word_reg(REG_CONST, ((ADDR + 1) << 1) | 1)
+        got = await transaction([], 2, read_data=[0x77])
+        assert slave.events == [('start',), ('addr', ((ADDR + 1) << 1) | 1, False), ('stop',)], slave.events
+        assert got == [] and await tqv.read_byte_reg(REG_COUNT2) == 0
+
+        await bench.disable()
+        for reg, v in ((REG_CONST, 0), (REG_CFG2, 0), (REG_CFG0 + SHARD1, 0), (REG_FIFO_ST, 0), (REG_FIFO_ST + SHARD1, 0)):
+            await tqv.write_word_reg(reg, v)
+        await tqv.write_byte_reg(REG_COMPARE, 0)
+        await tqv.write_byte_reg(REG_HOST, 0)
+        dut.ui_in[0].value = 0
+        dut.ui_in[1].value = 0
 
 
 # =============================================================================

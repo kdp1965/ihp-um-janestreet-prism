@@ -10,7 +10,7 @@ from user_peripherals.prism.bench import PrismBench
 from user_peripherals.prism.prism_tests import (
     RegisterTest, StewIntegrityTest, EncoderTest, Ws2812Test, Gpio24Test,
     SpiSlaveTest, UartTxTest, FifoLoopTest, SramFifoTest, EdgeTest, UsbDeviceTest, EthernetTxTest, EthernetRxTest, EthernetLoopTest, FracturedTest,
-    TraceTest, Timer2Test, ConstTableTest)
+    TraceTest, Timer2Test, ConstTableTest, I2cMasterTest, SamplerTest)
 
 
 async def run(dut, test_class):
@@ -90,3 +90,11 @@ async def test_timer2(dut):
 @cocotb.test()
 async def test_const_table(dut):
     await run(dut, ConstTableTest)
+
+@cocotb.test()
+async def test_i2c_master(dut):
+    await run(dut, I2cMasterTest)
+
+@cocotb.test()
+async def test_sampler(dut):
+    await run(dut, SamplerTest)
