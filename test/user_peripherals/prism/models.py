@@ -292,3 +292,86 @@ class I2cSlave(Model):
                     self.drive_low = False
                     phase = 'rx_done'
             scl_prev, sda_prev = scl, sda
+
+
+class I2cMaster(Model):
+    ''' I2C controller for the i2c_slave chroma: drives SCL on ui_in[1] and
+        SDA on ui_in[0] as open-drain lines, resolving the slave's SDA
+        pull-low on uo_out[2] every clock.  send_start() / write_byte() /
+        read_byte() / send_stop() are awaited by the test; `half` is the SCL
+        half period in clocks and `hold` the SDA hold after SCL falls. '''
+
+    def __init__(self, dut, half=16, hold=3):
+        super().__init__(dut)
+        self.half, self.hold = half, hold
+        self.scl_low = False                     # the master pulling SCL low
+        self.sda_low = False                     # the master pulling SDA low
+        self.sda = 1                             # the resolved SDA level
+        dut.ui_in[0].value = 1
+        dut.ui_in[1].value = 1
+
+    async def run(self):
+        while True:
+            await RisingEdge(self.dut.clk)
+            uo = int(self.dut.uo_out.value)
+            self.sda = 0 if (self.sda_low or (uo >> 2) & 1) else 1
+            self.dut.ui_in[0].value = self.sda
+            self.dut.ui_in[1].value = 0 if self.scl_low else 1
+
+    async def send_start(self):
+        ''' START, or a repeated START when SCL is currently low '''
+        if self.scl_low:
+            self.sda_low = False
+            await self.clocks(self.half)
+            self.scl_low = False
+            await self.clocks(self.half)
+        self.sda_low = True                      # SDA falls while SCL is high
+        await self.clocks(self.half)
+        self.scl_low = True
+        await self.clocks(self.half)
+
+    async def write_byte(self, byte):
+        ''' 8 bits MSB first, then the slave's ACK (True) / NAK (False) '''
+        for i in range(8):
+            self.sda_low = not ((byte >> (7 - i)) & 1)
+            await self.clocks(self.half)
+            self.scl_low = False
+            await self.clocks(self.half)
+            self.scl_low = True
+            await self.clocks(self.hold)
+        self.sda_low = False                     # release for the ACK
+        await self.clocks(self.half)
+        self.scl_low = False
+        await self.clocks(self.half)
+        ack = (self.sda == 0)
+        self.scl_low = True
+        await self.clocks(self.hold)
+        return ack
+
+    async def read_byte(self, ack):
+        ''' 8 bits from the slave, sampled at the end of SCL high; then ACK (True) / NAK '''
+        self.sda_low = False
+        value = 0
+        for _ in range(8):
+            await self.clocks(self.half)
+            self.scl_low = False
+            await self.clocks(self.half)
+            value = (value << 1) | self.sda
+            self.scl_low = True
+            await self.clocks(self.hold)
+        self.sda_low = ack
+        await self.clocks(self.half)
+        self.scl_low = False
+        await self.clocks(self.half)
+        self.scl_low = True
+        await self.clocks(self.hold)
+        self.sda_low = False
+        return value
+
+    async def send_stop(self):
+        self.sda_low = True                      # SDA low while SCL low ...
+        await self.clocks(self.half)
+        self.scl_low = False                     # ... SCL up ...
+        await self.clocks(self.half)
+        self.sda_low = False                     # ... SDA up: STOP
+        await self.clocks(self.half)

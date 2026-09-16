@@ -43,8 +43,9 @@
 //                     Edge-clocked sampler: [16] enable, [21:17] the PRISM input whose edge clocks it,
 //                     [23:22] 0 rising / 1 falling / 2 either, and the actions on each edge with no state
 //                     transition: [24] shift, [25] count2 + 1, [26] capture the in_prev flops, [27] count1
-//                     clear / load; its sticky "edge pending" is slot code 15 too (cleared by the FSM's
-//                     OUT_SHIFT or OUT_LATCH) and FLAGS[11]
+//                     clear / load; [28] flag2 inverts the edge (rising <-> falling) so one FSM flag
+//                     switches a bidirectional protocol's sampling edge; its sticky "edge pending" is
+//                     slot code 15 too (cleared by the FSM's OUT_SHIFT or OUT_LATCH) and FLAGS[11]
 //     +0x40  PRELOAD2 [23:0] timer 2 period: a 24-bit down counter reloads from it and raises input 28 (default
 //                     slot value) for one clock every PRELOAD2 + 1 clocks; 0 = off (Ethernet link pulses).
 //                     [24] restart the count on entry into state [29:25] (next SI == it, current SI != it):
@@ -265,6 +266,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     localparam       CFG3_SMP_CNT2  = 25;   //       [25] count2 + 1 on the edge
     localparam       CFG3_SMP_LATCH = 26;   //       [26] capture the in_prev flops on the edge
     localparam       CFG3_SMP_TIMER = 27;   //       [27] count1 clear / load on the edge
+    localparam       CFG3_SMP_INV   = 28;   //       [28] flag2 swaps rising and falling
 
     localparam  FIFO_DEPTH  = 16;
     localparam  FIFO_AW     = 4;
@@ -535,12 +537,15 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire [31:0]               cfg3;
             wire [31:0]               preload2;
             wire                      preload2_en;
+            reg                       flag2;                     // FSM flag (OUT_LATCH + OUT_FLAG2)
             wire                      mrx_valid, mrx_value;      // Manchester bit recoverer
             // Edge-clocked sampler (CFG3[27:16]): hardware actions on the
             // selected edge of one PRISM input, with no state transition
             wire                      smp_en   = cfg3[CFG3_SMP_EN];
             wire                      smp_src  = in_s[cfg3[CFG3_SMP_SRC +: 5]];
-            wire  [1:0]               smp_pol  = cfg3[CFG3_SMP_EDGE +: 2];
+            wire  [1:0]               smp_cfg  = cfg3[CFG3_SMP_EDGE +: 2];
+            wire  [1:0]               smp_pol  = (smp_cfg == 2'd2) ? 2'd2 :           // either edge, or the
+                                                 {1'b0, smp_cfg[0] ^ (cfg3[CFG3_SMP_INV] & flag2)};   // flag-swapped one
             reg                       smp_prev;
             reg                       smp_pending;               // sticky: an edge the FSM has not consumed
             wire                      smp_rise = smp_src & ~smp_prev;
@@ -557,7 +562,6 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire [31:0]               crc_poly;
             wire [31:0]               crc_exp;
             wire                      cfg1_en, cfg2_en, const_en, crc_poly_en, crc_exp_en, cfg3_en;
-            reg                       flag2;
             // OUT_COMM_LOAD source: preload[7:0], or constant K[{out20, out18}]
             wire  [7:0]               k_sel = out_s[OUT_K_SEL1] ? (out_s[OUT_K_SEL0] ? consts[31:24] : consts[23:16])
                                                                 : (out_s[OUT_K_SEL0] ? consts[15:8]  : consts[7:0]);

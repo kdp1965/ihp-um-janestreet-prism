@@ -6,7 +6,7 @@ from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge
 
 from user_peripherals.prism.regs import *
 from user_peripherals.prism.bench import PrismTest
-from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, Ws2812Slave, I2cSlave
+from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, Ws2812Slave, I2cSlave, I2cMaster
 from user_peripherals.prism.encoder import Encoder
 from user_peripherals.prism import usb_model as usb
 from user_peripherals.prism import eth_model as eth
@@ -19,6 +19,7 @@ from user_peripherals.prism.chroma_fifo_loop import *
 from user_peripherals.prism.chroma_edge import *
 from user_peripherals.prism.chroma_const_tab import *
 from user_peripherals.prism.chroma_i2c_master import *
+from user_peripherals.prism.chroma_i2c_slave import *
 from user_peripherals.prism.chroma_usb_ls import *
 from user_peripherals.prism.chroma_eth_tx import *
 from user_peripherals.prism.chroma_eth_rx import *
@@ -629,6 +630,122 @@ class I2cMasterTest(PrismTest):
             await tqv.write_word_reg(reg, v)
         await tqv.write_byte_reg(REG_COMPARE, 0)
         await tqv.write_byte_reg(REG_HOST, 0)
+        dut.ui_in[0].value = 0
+        dut.ui_in[1].value = 0
+
+
+# =============================================================================
+# I2C slave Chroma unit test
+# =============================================================================
+class I2cSlaveTest(PrismTest):
+    ''' I2C target on the sampler: SCL rising edges shift SDA into comm and
+        count, flag2 swaps the sampler to falling edges for reads, the FSM
+        acts at byte boundaries (13 states).  An I2cMaster model drives the
+        bus: writes into FIFO A, reads from FIFO B (0xFF when empty), a NAK
+        for another address, a register write with a repeated-START read,
+        the interrupt at STOP / end of read, and a fast clock. '''
+    name = "i2c_slave Chroma (edge-clocked sampler)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        ADDR = 0x51
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        master = self.start(I2cMaster(dut, half=16))
+        await bench.load_chroma(chroma_i2c_slave, chroma_i2c_slave_ctrlReg, chroma_i2c_slave_pinmuxReg)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)      # FIFO B: the bytes to be read
+        await tqv.write_word_reg(REG_CFG2, (13 << 4) | (14 << 8) | (5 << 12))   # match, flag2, comm[0]
+        await tqv.write_word_reg(REG_CONST, (ADDR << 24) | 0xFF00)          # K3 = address, K1 = 0xFF, K0 = 0
+        await tqv.write_byte_reg(REG_COMPARE, 7)
+        await tqv.write_word_reg(REG_CFG3, CFG3_SMP_EN | CFG3_SMP_SRC(1) | CFG3_SMP_RISE |
+                                 CFG3_SMP_SHIFT | CFG3_SMP_CNT2 | CFG3_SMP_INV)
+        await self.clocks(20)
+
+        async def fifo_a():
+            got = []
+            for _ in range((await tqv.read_word_reg(REG_FIFO_ST) >> 8) & 0x1F):
+                got.append(await tqv.read_byte_reg(REG_FIFO))
+            return got
+
+        async def settle():
+            await self.clocks(30)
+            assert await bench.curr_state() == 0, await bench.curr_state()
+
+        self.log("write 3 bytes")
+        await master.send_start()
+        assert await master.write_byte(ADDR << 1)
+        for b in (0x10, 0x20, 0x30):
+            assert await master.write_byte(b)
+        await master.send_stop()
+        await settle()
+        assert await fifo_a() == [0x10, 0x20, 0x30]
+        assert await bench.irq()
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+
+        self.log("another address: NAK, nothing taken")
+        await master.send_start()
+        assert not await master.write_byte((ADDR + 1) << 1)
+        assert not await master.write_byte(0x99)
+        await master.send_stop()
+        await settle()
+        assert await fifo_a() == [] and not await bench.irq()
+
+        self.log("read 3 bytes from FIFO B")
+        for b in (0xA5, 0x5A, 0x0F):
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        await master.send_start()
+        assert await master.write_byte((ADDR << 1) | 1)
+        got = [await master.read_byte(True), await master.read_byte(True), await master.read_byte(False)]
+        await master.send_stop()
+        await settle()
+        assert got == [0xA5, 0x5A, 0x0F], [hex(v) for v in got]
+        assert await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 1 == 1
+        assert await bench.irq()
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+
+        self.log("read with FIFO B empty: 0xFF")
+        await master.send_start()
+        assert await master.write_byte((ADDR << 1) | 1)
+        got = [await master.read_byte(True), await master.read_byte(False)]
+        await master.send_stop()
+        await settle()
+        assert got == [0xFF, 0xFF], [hex(v) for v in got]
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+
+        self.log("register write, repeated START, read 2")
+        for b in (0x11, 0x22):
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        await master.send_start()
+        assert await master.write_byte(ADDR << 1)
+        assert await master.write_byte(0x42)
+        await master.send_start()                                              # repeated START
+        assert await master.write_byte((ADDR << 1) | 1)
+        got = [await master.read_byte(True), await master.read_byte(False)]
+        await master.send_stop()
+        await settle()
+        assert got == [0x11, 0x22], [hex(v) for v in got]
+        assert await fifo_a() == [0x42]
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+
+        self.log("fast clock: 8-clock half period")
+        master.half = 8
+        for b in (0xC3,):
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        await master.send_start()
+        assert await master.write_byte(ADDR << 1)
+        assert await master.write_byte(0x77)
+        assert await master.write_byte(0x88)
+        await master.send_start()
+        assert await master.write_byte((ADDR << 1) | 1)
+        got = [await master.read_byte(False)]
+        await master.send_stop()
+        await settle()
+        assert got == [0xC3] and await fifo_a() == [0x77, 0x88], [hex(v) for v in got]
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+
+        await bench.disable()
+        for reg, v in ((REG_CFG3, 0), (REG_CONST, 0), (REG_CFG2, 0), (REG_CFG0 + SHARD1, 0), (REG_FIFO_ST, 0), (REG_FIFO_ST + SHARD1, 0)):
+            await tqv.write_word_reg(reg, v)
+        await tqv.write_byte_reg(REG_COMPARE, 0)
         dut.ui_in[0].value = 0
         dut.ui_in[1].value = 0
 

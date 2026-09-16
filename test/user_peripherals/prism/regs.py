@@ -66,6 +66,7 @@ CFG3_SMP_SHIFT = 1 << 24  # actions on the edge: shift the shifter
 CFG3_SMP_CNT2  = 1 << 25  #   count2 + 1
 CFG3_SMP_LATCH = 1 << 26  #   capture the in_prev flops
 CFG3_SMP_TIMER = 1 << 27  #   count1 clear / load
+CFG3_SMP_INV   = 1 << 28  # flag2 swaps rising and falling (a bidirectional protocol's two edges)
 REG_PRELOAD2= 0x140       # timer 2 period (24 bits): input 28 ticks every PRELOAD2 + 1 clocks; 0 = off
 T2_RELOAD    = 1 << 24    # restart the count on entry into state T2_STATE(si): retriggerable timeout
 def T2_STATE(si): return (si & 0x1f) << 25

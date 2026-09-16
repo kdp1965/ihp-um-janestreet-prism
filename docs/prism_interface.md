@@ -190,7 +190,7 @@ registers only:
 | +0x30 | CRC expected |
 | +0x34 | CFG2: input slot selects for inputs 16-19 and 28-31 (4 bits each), section 4h |
 | +0x38 | CONST: K0..K3 (K3 also the comm match value), section 4h |
-| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load), section 4p |
+| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p |
 | +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
 | +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
 | +0x4C | CONST_TAB: the 16x8 latch FIFO as addressable constants, section 4n: [0] enable (OUT_COMM_LOAD loads the row at the 4-bit index; {OUT_K_SEL1, OUT_K_SEL0} = how the index moves on each load: 0 clear, 1 + 1, 2 + add_to_idx [10:8], 3 = idx_load [7:4], or + idx_load with [1]), [2] post (the row before the move; default after), [19:16] the index (a write sets it, reads back live) |
@@ -1071,6 +1071,10 @@ names one PRISM input (any of the 32, [21:17]) and an edge polarity
 datapath performs the chosen actions with no state transition: shift
 the shifter with its configured input ([24]), count2 + 1 ([25]),
 capture all four in_prev flops ([26]), count1 clear / load ([27]).
+With [28] the FSM's flag2 swaps rising and falling, so one flag turns a
+bidirectional protocol's sampling edge (an I2C target receives on SCL
+rising and must change its outgoing bit after SCL falling; SPI slaves
+likewise per mode).
 The actions OR into the FSM's own outputs (one shift if both ask in
 the same clock) and, like them, only act while the shard executes, so
 a debugger halt freezes the sampler too.  A sticky "edge pending" flag
@@ -1106,6 +1110,62 @@ RTL change): routing 0 in 30 passes plus a clean re-route, KLayout DRC
 hold +0.09 ns, 80 power ports legal, std-cell area 422.2k um2 (+3.4k
 over run 13, of which the sampler is a small part: this placement
 needed 243 hold buffers against run 13's 1202).
+
+## 4q. I2C slave chroma on the sampler (2026-09-16)
+
+`chromas/chroma_i2c_slave.v`, the sampler's first consumer: 13 states
+against 25 for the master, and none of them a bit loop.  SDA comes in on
+ui_in[0] (the shifter input), SCL on ui_in[1] (the sampler's clock), and
+one output, cond_out[0] on uo_out[2], pulls SDA low through the external
+open-drain buffer.  CFG3 = sampler on input 1, rising, shift + count2,
+flag2 swaps the edge; CFG2 puts comm == K3, flag2 and comm[0] on inputs
+17-19 (0x5ED0) with input 16 left as in_prev[0]; CONST holds the 7-bit
+address in K3, 0xFF in K1 and 0 in K0; COMPARE = 7; FIFO A (own, RX)
+receives what the master writes, FIFO B (shard 1's, TX) holds what it
+reads; the host interrupt fires at a STOP and when the master NAKs the
+last byte of a read.
+
+How the states divide the work.  IDLE tracks SDA through in_prev[0]
+with the tree-fire capture (a self-jump on every change) and takes SDA
+falling while SCL is high as START: comm <= K0, count2 clear, flag2 <=
+0.  ADDR_WAIT fires when count2 reaches 7 (COMPARE) and comm == K3: the
+seven address bits are compared before the R/W bit arrives, so one
+constant serves both directions; ADDR_RW takes the eighth bit and
+latches comm[0] into flag2 (read = 1), which from then on makes the
+sampler shift on SCL falling edges.  ACK1-3 hold SDA low through the
+ninth clock; at its falling edge a write clears comm and count2 and
+goes to the receive pair, a read pops FIFO B (or loads K1 = 0xFF).
+Receive is two states that alternate every clock through the auto-loop
+(A: SDA moved while SCL high, or eight edges in; B: re-capture SDA while
+SCL low), because a wait state has two trees and this one needs four
+conditions; RESYNC then tells a STOP (SDA high: interrupt, IDLE) from a
+repeated START (re-initialise, ADDR_WAIT).  "Eight bits in" is
+`count2_cmp & shift_term`, since shift_term alone is also true before
+the first shift.  Transmit is one wait state with the bit on cond_out
+(`1; if (shift_data) 0`), MACK1 reads the master's ACK at SCL high (NAK:
+flag2 <= 0, interrupt, IDLE) and MACK_ACK pops the next byte at SCL
+low, where the datapath's pop-over-shift priority discards the sampler's
+shift of that same clock.
+
+One compiler fix on the way (yosys-prism, `prism.cc`
+`parseLogicExpression`): a bit-level operand inside `&&` / `||` / `!`
+(`(sda ^ in_prev0) && scl`, `!(a | b)`, `x == 2'd1 || y`) used to assert
+with "unexpected node type"; it now reduces the operand to a boolean the
+way identifiers already were, and the slave's conditions are written in
+that natural form.  Checked by compiling the slave both ways and diffing
+the generated tables (identical), and by rebuilding every chroma
+(unchanged).
+
+Test: `test_i2c_slave` with the `I2cMaster` model in `models.py`
+(open-drain resolution every clock, `send_start` / `write_byte` /
+`read_byte` / `send_stop`): a 3-byte write, a NAK for another address, a
+3-byte read ending in NAK, 0xFF from an empty FIFO B, a register write
+with a repeated START and a 2-byte read, and the same at an 8-clock
+half period (4 MHz SCL at 64 MHz).  Harden run 16 (the edge-swap bit is
+the only RTL change since run 15): routing 0 in 19 passes, the fastest
+of any run, plus a clean re-route; KLayout DRC 0, LVS clean, antenna 0,
+80 power ports legal; timing and area in the memory notes and the run's
+metrics.
 
 ## 5. FIFO storage, item 9: SRAM spike result
 
