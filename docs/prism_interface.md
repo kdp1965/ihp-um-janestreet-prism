@@ -79,7 +79,7 @@ CFG0 (existing layout, extended):
 | bits | name | notes |
 |---|---|---|
 | 1:0 | shift_in_sel | which ui_in feeds the shifter |
-| 3:2 | shift_out_sel | which uo_out carries shift_data |
+| 2 | mshift_en | multi-bit comm shift: {out20, out18} + 1 bits per OUT_SHIFT from pins shift_in_sel .. + 3, section 4r (bits 5:3 spare) |
 | 5:4 | cond_out_sel | which uo_out carries cond_out[0] |
 | 6 | load4 | 8-bit comm load from preload (renamed in item 2 cleanup) |
 | 7 | latch_in_out | in[13:12] = latched outputs instead of latched inputs |
@@ -193,6 +193,7 @@ registers only:
 | +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p |
 | +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
 | +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
+| +0x50 | COMM_PINS: multi-bit shift lanes, section 4r: with CFG0[2] a uo_out pin whose pinmux code is 6 shows comm bit [3(k-1)+2:3(k-1)] for uo_out[k] |
 | +0x4C | CONST_TAB: the 16x8 latch FIFO as addressable constants, section 4n: [0] enable (OUT_COMM_LOAD loads the row at the 4-bit index; {OUT_K_SEL1, OUT_K_SEL0} = how the index moves on each load: 0 clear, 1 + 1, 2 + add_to_idx [10:8], 3 = idx_load [7:4], or + idx_load with [1]), [2] post (the row before the move; default after), [19:16] the index (a write sets it, reads back live) |
 | +0x48 | TRACE_CTRL: write [0] arm (flushes the SRAM FIFO), [1] stop; read [0] armed, [1] running, [2] done, [3] big, [4] active.  Entry (16 bits) = [4:0] SI, [10:5] LUT mux inputs, [11] tree 0 matched, [12] tree 1 taken, [13] executing; the traced SRAM's FIFO then serves the entries as bytes through +0x20 of the window that reads that SRAM (count = FIFO bytes / 2) |
 | +0x4C-0x7C | spare |
@@ -1022,7 +1023,16 @@ bus, and the line levels come back on ui_in pins:
 | pin_out[0] | uo_out[1] | SCL pull-low |
 | cond_out[0] | uo_out[2] | SDA pull-low (the data bit is `cond_out[0] = 1; if (shift_data) cond_out[0] = 0`) |
 | in[0] | ui_in[0] | SDA level, also the shifter's input (shift_in_sel = 0) |
-| in[1] | ui_in[1] | SCL level (unused so far: no clock stretching) |
+| in[2] | ui_in[2] | SCL level (unused so far: no clock stretching); not ui_in[1], see below |
+
+A board note that applies to both I2C chromas: TinyQV samples ui_in[1]
+at reset and, if it is high, switches on its debug register-data mode,
+which takes over uo_out[5:2] (project.v).  A pulled-up bus line on
+ui_in[1] would therefore hijack the PRISM's outputs at power-up, so SCL
+is read on ui_in[2].  (The unit tests found this the hard way: an I2C
+bus model still driving ui_in[1] high in the clock before the next
+test's reset put the CPU into that mode and the following test lost
+uo_out[2]; the bench now forces every ui_in bit low before a reset.)
 
 Host side, shard 0 unfractured so it owns both FIFOs (as the fifo_loop
 chroma does): FIFO B (shard 1's window, CFG0 fifo_dir = TX) holds the
@@ -1115,9 +1125,10 @@ needed 243 hold buffers against run 13's 1202).
 
 `chromas/chroma_i2c_slave.v`, the sampler's first consumer: 13 states
 against 25 for the master, and none of them a bit loop.  SDA comes in on
-ui_in[0] (the shifter input), SCL on ui_in[1] (the sampler's clock), and
-one output, cond_out[0] on uo_out[2], pulls SDA low through the external
-open-drain buffer.  CFG3 = sampler on input 1, rising, shift + count2,
+ui_in[0] (the shifter input), SCL on ui_in[2] (the sampler's clock; not
+ui_in[1], see the reset note in 4o), and one output, cond_out[0] on
+uo_out[2], pulls SDA low through the external open-drain buffer.  CFG3
+= sampler on input 2, rising, shift + count2,
 flag2 swaps the edge; CFG2 puts comm == K3, flag2 and comm[0] on inputs
 17-19 (0x5ED0) with input 16 left as in_prev[0]; CONST holds the 7-bit
 address in K3, 0xFF in K1 and 0 in K0; COMPARE = 7; FIFO A (own, RX)
@@ -1166,6 +1177,65 @@ the only RTL change since run 15): routing 0 in 19 passes, the fastest
 of any run, plus a clean re-route; KLayout DRC 0, LVS clean, antenna 0,
 80 power ports legal; timing and area in the memory notes and the run's
 metrics.
+
+## 4r. Multi-bit comm shift, PIO style (2026-09-16)
+
+CFG0[2] (a spare, packed as zero by every chroma so far) turns the comm
+shifter into a 1- to 4-bit-wide one: each OUT_SHIFT moves {OUT_K_SEL1,
+OUT_K_SEL0} + 1 bits, and since those two outputs are only read during
+OUT_COMM_LOAD (the K select, or the table's index mode) they are free in
+a shifting state.  Inputs come from the PRISM inputs shift_in_sel ..
+shift_in_sel + 3 (bit 0 keeps the single-bit source, so the recoverer's
+bit or cond_out[0] can still be it); MSB first the group enters below
+the byte with the higher pin as the higher bit, LSB first it enters at
+the top.  The shift count advances by the width, so shift_term still
+marks the byte boundary for widths of 1, 2 and 4, and a load that
+"counts one" (comm_load_one) counts the width instead, so a popped byte
+counts as its first group.  For outputs a second register, COMM_PINS at
++0x50, names a comm bit for every uo_out pin (3 bits per pin), and while
+CFG0[2] is set a pin whose pinmux code is 6 (the shifter bit) shows that
+comm bit instead of the serial one: two lanes on comm[7:6] play a byte
+as four pairs, four lanes on comm[7:4] as two nibbles, or from the low
+end with LSB first.  The sampler's shift action is width-aware too, so
+an external clock can sample four pins at once.  Not covered: the wide
+(count1) shifter and the bit-serial CRC, which sees one bit per shift.
+
+Cost: a 4-way mux on the comm shift path, a 3-bit adder on the shift
+count, a 21-bit latch register and an 8:1 mux per output pin.
+
+`chromas/chroma_pio.v` uses it both ways, and both start on a trigger:
+the edge of ui_in[0] (channel 0, a SPI chip select for instance) in the
+direction host_in[0] names, rising for 0, falling for 1, detected by
+the in_prev[0] edge capture in one 3-input tree, `(trig ^ in_prev0) &
+(trig ^ host0)`, with the other tree re-capturing on the opposite edge;
+no RTL was needed for it.  host_in[1] picks the mode.  As a 4-channel
+logic analyser the sampler shifts ui_in[3:0] on each edge of ui_in[4]
+with the state holding {out20, out18} = 3, and after two edges (COMPARE
+= 2) the FSM pushes the byte into FIFO A: samples are packed two per
+byte, first sample high (MSB first) or low (LSB first); the capture
+runs from the trigger until FIFO A is full (2 KB with the SRAM FIFO),
+then interrupts and re-arms.  As a 2-lane waveform generator it pops
+FIFO B from the trigger, shows comm[7] on uo_out[1] and comm[6] on
+uo_out[2] through COMM_PINS, and shifts two bits per count1 period;
+comm_load_one makes the pop count as the first pair so shift_term marks
+the last, the next pop follows with no idle pair, and an empty FIFO B
+interrupts and re-arms.  Five states.  `test_pio` checks that nothing
+is captured or played before the trigger, both packings, a 32-sample
+capture to full, all sixteen pairs of four bytes with their periods,
+both edge directions, and the interrupts.  SDK: `PRISM_CTRL_MSHIFT`,
+`PRISM_COMM_PIN(uo, bit)`, `prism_set_comm_pins()`.
+
+Harden run 17: the feature is the heaviest routing addition since the
+tracer - global-route wirelength +7% over run 16, Metal3 usage 84.9%
+against 80.3% with 72% more overflow, since every comm bit now fans out
+to all seven output-pin muxes in both shards - and detailed routing took
+48 passes to reach zero (5 violations stalled from pass 33 to 45), then
+a clean re-route.  KLayout DRC 0, LVS clean, antenna 0, typical setup
++0.75 ns / hold +0.28 ns, fast hold +0.10 ns, 80 power ports legal,
+std-cell area 436.6k um2 (+9k, 1005 cells).  If the routing margin is
+ever needed back, the lane mux is the place to trim: a 4-lane window
+(comm[7:4] or [3:0], one bit) with a 2-bit lane pick per pin would cut
+the comm fan-out from 7 x 8 to 4 x 2 + 7 x 4 mux inputs.
 
 ## 5. FIFO storage, item 9: SRAM spike result
 

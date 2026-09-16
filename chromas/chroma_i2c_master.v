@@ -15,7 +15,9 @@
 //   pin_out[0]      uo_out[1]     SCL pull-low (1 = drive SCL low)
 //   cond_out[0]     uo_out[2]     SDA pull-low (1 = drive SDA low)
 //   prism_in[0]     ui_in[0]      SDA level (the shifter's input)
-//   prism_in[1]     ui_in[1]      SCL level (unused so far: no stretching)
+//   prism_in[2]     ui_in[2]      SCL level (unused so far: no stretching).  Not ui_in[1]:
+//                                 TinyQV samples ui_in[1] at reset and a pulled-up bus
+//                                 line there would select its debug output mode
 //
 // Host side (shard 0, unfractured: it owns both FIFOs):
 //   - FIFO B (shard 1's, TX mode: the host writes) = the bytes to send,

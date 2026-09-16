@@ -15,7 +15,9 @@
 //   ============    ===========   ======================
 //   cond_out[0]     uo_out[2]     SDA pull-low (1 = drive SDA low)
 //   prism_in[0]     ui_in[0]      SDA level (the shifter's input)
-//   prism_in[1]     ui_in[1]      SCL level (the sampler's clock)
+//   prism_in[2]     ui_in[2]      SCL level (the sampler's clock).  Not ui_in[1]: TinyQV
+//                                 samples ui_in[1] at reset and a pulled-up line there
+//                                 would select its debug output mode (uo_out[5:2])
 //
 // Host side (shard 0, unfractured: it owns both FIFOs):
 //   - CONST K3 = the 7-bit address (K3[6:0]; the compare is done after the
@@ -23,8 +25,8 @@
 //     empty), K0 = 0x00 (clears comm); COMPARE = 7
 //   - CFG2: slot 1 = comm == K3 (code 13), slot 2 = flag2 (14), slot 3 =
 //     comm[0] (5): CFG2 = 0x5ED0; slot 0 stays in_prev[0] (SDA tracking)
-//   - CFG3 = sampler on input 1, rising, shift + count2, flag2 swaps the
-//     edge: PRISM_CFG3_SMP_EN | SRC(1) | RISE | SHIFT | CNT2 | INV
+//   - CFG3 = sampler on input 2, rising, shift + count2, flag2 swaps the
+//     edge: PRISM_CFG3_SMP_EN | SRC(2) | RISE | SHIFT | CNT2 | INV
 //   - FIFO A (own, RX) receives the bytes the master writes; FIFO B
 //     (shard 1's, TX mode) holds the bytes the master reads
 //   - the host interrupt fires at a STOP and when the master NAKs a read
@@ -119,7 +121,7 @@ module chroma_i2c_slave
 
    assign sda                  = in_data[0];      // SDA level
    assign shift_data           = in_data[7];      // comm MSB: the bit to send
-   assign scl                  = in_data[1];      // SCL level
+   assign scl                  = in_data[2];      // SCL level (ui_in[2])
    assign count2_cmp           = in_data[11];     // >= 7 SCL edges since the last clear
    assign shift_zero           = in_data[14];     // shift count at 0 (before the first or after the 8th)
    assign in_prev0             = in_data[16];     // SDA as last captured (tree-fire capture)

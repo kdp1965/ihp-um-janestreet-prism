@@ -72,6 +72,8 @@ T2_RELOAD    = 1 << 24    # restart the count on entry into state T2_STATE(si): 
 def T2_STATE(si): return (si & 0x1f) << 25
 T2_ONESHOT   = 1 << 30    # with T2_RELOAD: one tick per entry, then wait for the next entry
 REG_CTAB    = 0x14C       # constant table: the latch FIFO as addressable constants (CT_*); [19:16] = the index
+REG_COMM_PINS = 0x150     # multi-bit shift lanes: comm bit shown on uo_out[k] (pinmux code 6) = [3(k-1)+2:3(k-1)]
+def COMM_PIN(uo, bit): return (bit & 7) << (3 * (uo - 1))
 CT_EN        = 1 << 0     # OUT_COMM_LOAD loads comm from the table row at the index
 CT_LOAD_ADDS = 1 << 1     # index mode 3 ({K_SEL1, K_SEL0} = 3) adds idx_load instead of loading it
 CT_POST      = 1 << 2     # the byte loaded is the row before the index moves (default: after)
@@ -130,6 +132,8 @@ def trace_outputs(e, chroma):
 
 CFG_FIFO_DIR_TX = 1 << 23
 CFG_COMM_LOAD_K = 1 << 30   # OUT_COMM_LOAD loads K[{out20, out18}] from CONST
+CFG_MSHIFT_EN   = 1 << 2    # comm shifts {out20, out18} + 1 bits per OUT_SHIFT (PIO-like)
+CFG_SHIFT_DIR_LSB = 1 << 9  # shifter LSB first
 CFG_FIFO_SRAM   = 1 << 31   # this shard's FIFO is its SRAM FIFO
 FLAG_CRC_OK     = 1 << 10   # FLAGS: CRC value == CRC_EXPECTED
 FLAG_SMP_PENDING = 1 << 11  # FLAGS: sampler edge not yet consumed by the FSM (OUT_SHIFT / OUT_LATCH)

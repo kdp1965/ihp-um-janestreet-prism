@@ -20,6 +20,7 @@ from user_peripherals.prism.chroma_edge import *
 from user_peripherals.prism.chroma_const_tab import *
 from user_peripherals.prism.chroma_i2c_master import *
 from user_peripherals.prism.chroma_i2c_slave import *
+from user_peripherals.prism.chroma_pio import *
 from user_peripherals.prism.chroma_usb_ls import *
 from user_peripherals.prism.chroma_eth_tx import *
 from user_peripherals.prism.chroma_eth_rx import *
@@ -558,7 +559,7 @@ class I2cMasterTest(PrismTest):
         tqv, bench, dut = self.tqv, self.bench, self.dut
         ADDR, HALF = 0x3C, 24
         await tqv.write_byte_reg(REG_HOST, 0x00)
-        slave = self.start(I2cSlave(dut, ADDR))
+        slave = self.start(I2cSlave(dut, ADDR, scl_in=2))
         await bench.load_chroma(chroma_i2c_master, chroma_i2c_master_ctrlReg, chroma_i2c_master_pinmuxReg)
         await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)      # FIFO B: the host writes
         await tqv.write_word_reg(REG_CFG2, 14)                              # input 16 = flag2 (read phase)
@@ -650,13 +651,13 @@ class I2cSlaveTest(PrismTest):
         tqv, bench, dut = self.tqv, self.bench, self.dut
         ADDR = 0x51
         await tqv.write_byte_reg(REG_HOST, 0x00)
-        master = self.start(I2cMaster(dut, half=16))
+        master = self.start(I2cMaster(dut, half=16, scl_in=2))
         await bench.load_chroma(chroma_i2c_slave, chroma_i2c_slave_ctrlReg, chroma_i2c_slave_pinmuxReg)
         await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)      # FIFO B: the bytes to be read
         await tqv.write_word_reg(REG_CFG2, (13 << 4) | (14 << 8) | (5 << 12))   # match, flag2, comm[0]
         await tqv.write_word_reg(REG_CONST, (ADDR << 24) | 0xFF00)          # K3 = address, K1 = 0xFF, K0 = 0
         await tqv.write_byte_reg(REG_COMPARE, 7)
-        await tqv.write_word_reg(REG_CFG3, CFG3_SMP_EN | CFG3_SMP_SRC(1) | CFG3_SMP_RISE |
+        await tqv.write_word_reg(REG_CFG3, CFG3_SMP_EN | CFG3_SMP_SRC(2) | CFG3_SMP_RISE |       # SCL on ui_in[2]
                                  CFG3_SMP_SHIFT | CFG3_SMP_CNT2 | CFG3_SMP_INV)
         await self.clocks(20)
 
@@ -748,6 +749,139 @@ class I2cSlaveTest(PrismTest):
         await tqv.write_byte_reg(REG_COMPARE, 0)
         dut.ui_in[0].value = 0
         dut.ui_in[1].value = 0
+
+
+# =============================================================================
+# PIO-style multi-bit shift unit test
+# =============================================================================
+class PioTest(PrismTest):
+    ''' CFG0[2]: comm shifts {OUT_K_SEL1, OUT_K_SEL0} + 1 bits per shift from
+        pins shift_in_sel.. and COMM_PINS routes any comm bit to a uo_out pin
+        with pinmux code 6.  The pio chroma, armed on a rising (host_in[0] =
+        0) or falling edge of ui_in[0]: as a 4-channel logic analyser
+        (sampler-clocked, two samples per byte into FIFO A until it is full,
+        MSB and LSB first) and as a 2-lane waveform generator (FIFO B bytes
+        as four bit pairs per count1 period on uo_out[2:1] until empty). '''
+    name = "pio Chroma (multi-bit comm shift, edge trigger)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        LA, WG, RISE, FALL = 0, 2, 0, 1
+        for k in range(5):
+            dut.ui_in[k].value = 0
+        await tqv.write_byte_reg(REG_HOST, LA | RISE)
+        await bench.load_chroma(chroma_pio, chroma_pio_ctrlReg, chroma_pio_pinmuxReg)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)          # FIFO B: the waveform bytes
+        await tqv.write_word_reg(REG_FIFO_ST, 0)                              # both FIFOs empty to start
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+        await tqv.write_word_reg(REG_CFG3, CFG3_SMP_EN | CFG3_SMP_SRC(4) | CFG3_SMP_RISE | CFG3_SMP_SHIFT | CFG3_SMP_CNT2)
+        await tqv.write_byte_reg(REG_COMPARE, 2)
+        await tqv.write_word_reg(REG_COMM_PINS, COMM_PIN(1, 7) | COMM_PIN(2, 6))
+        assert await tqv.read_word_reg(REG_COMM_PINS) == COMM_PIN(1, 7) | COMM_PIN(2, 6)
+
+        async def sample(nibbles):
+            ''' One sample-clock pulse on ui_in[4] per nibble on ui_in[3:0] '''
+            for n in nibbles:
+                for k in range(4):
+                    dut.ui_in[k].value = (n >> k) & 1
+                await self.clocks(3)
+                dut.ui_in[4].value = 1
+                await self.clocks(3)
+                dut.ui_in[4].value = 0
+                await self.clocks(2)
+            await self.clocks(12)
+
+        async def trigger(level):
+            dut.ui_in[0].value = level
+            await self.clocks(8)
+
+        async def fifo_a():
+            got = []
+            for _ in range((await tqv.read_word_reg(REG_FIFO_ST) >> 8) & 0x1F):
+                got.append(await tqv.read_byte_reg(REG_FIFO))
+            return got
+
+        self.log("logic analyser: nothing before the rising trigger, then 32 samples fill FIFO A")
+        await self.clocks(10)
+        await sample([0x2, 0x4, 0x6])                                         # channel 0 low: no trigger
+        assert await bench.curr_state() == 0 and await fifo_a() == []
+        await trigger(1)                                                      # rising edge on ui_in[0]
+        assert await bench.curr_state() == 2                                  # LA_WAIT
+        nibbles = [(i * 7 + 3) & 0xF for i in range(32)]
+        await sample(nibbles)
+        st = await tqv.read_word_reg(REG_FIFO_ST)
+        assert await bench.irq() and await bench.curr_state() == 0, (await bench.curr_state(), hex(st), await bench.irq())   # full: interrupt, re-armed
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        assert await fifo_a() == [(nibbles[2 * i] << 4) | nibbles[2 * i + 1] for i in range(16)]
+
+        self.log("logic analyser, LSB first, falling trigger")
+        await tqv.write_word_reg(REG_CFG0, chroma_pio_ctrlReg | CFG_SHIFT_DIR_LSB)
+        await tqv.write_byte_reg(REG_HOST, LA | FALL)
+        await trigger(1)
+        await sample([0x3, 0xD])                                              # channel 0 high: no trigger
+        assert await bench.curr_state() == 0
+        await trigger(0)                                                      # falling edge
+        assert await bench.curr_state() == 2
+        await sample([0x3, 0xC, 0x7, 0x8])
+        assert await fifo_a() == [0xC3, 0x87]
+        await bench.disable()                                                 # re-arm (not full)
+        await tqv.write_word_reg(REG_CFG0, chroma_pio_ctrlReg)
+        await bench.enable()
+
+        self.log("waveform generator: falling trigger plays 4 bytes as 16 bit pairs, then interrupts")
+        PERIOD = 8
+        await tqv.write_word_reg(REG_PRELOAD, PERIOD - 1)
+        await tqv.write_byte_reg(REG_HOST, WG | FALL)
+        data = [0x1B, 0x6C, 0xE4, 0x93]                                       # consecutive pairs all differ
+        pairs = [(b >> (6 - 2 * i)) & 3 for b in data for i in range(4)]
+        runs = []                                                             # (lane value, clocks)
+        async def watch():
+            while True:
+                await FallingEdge(dut.clk)
+                uo = int(dut.uo_out.value)
+                v = ((uo >> 1) & 1) << 1 | ((uo >> 2) & 1)                    # lane 1 = bit 7, lane 0 = bit 6
+                if runs and runs[-1][0] == v:
+                    runs[-1][1] += 1
+                else:
+                    runs.append([v, 1])
+        await trigger(1)
+        w = cocotb.start_soon(watch())
+        for b in data:
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        await self.clocks(40)
+        assert len(runs) == 1 and await bench.curr_state() == 0               # nothing plays before the trigger
+        await trigger(0)                                                      # falling edge
+        await self.clocks(16 * (PERIOD + 2) + 60)
+        w.kill()
+        seq = [r[0] for r in runs]
+        i = seq.index(pairs[0])
+        assert seq[i:i + 16] == pairs, (runs[:24], pairs)
+        assert all(PERIOD - 1 <= r[1] <= PERIOD + 3 for r in runs[i + 1:i + 15]), runs[i:i + 16]
+        assert await tqv.read_word_reg(REG_FIFO_ST + SHARD1) & 1 == 1
+        assert await bench.irq() and await bench.curr_state() == 0            # played out: interrupt, re-armed
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+
+        self.log("waveform generator, rising trigger")
+        await tqv.write_byte_reg(REG_HOST, WG | RISE)
+        runs.clear()
+        w = cocotb.start_soon(watch())
+        await tqv.write_byte_reg(REG_FIFO + SHARD1, 0x6C)
+        await trigger(1)                                                      # rising edge
+        await self.clocks(4 * (PERIOD + 2) + 40)
+        w.kill()
+        seq = [r[0] for r in runs]
+        i = seq.index(1)
+        assert seq[i:i + 4] == [1, 2, 3, 0], runs[:8]
+        assert await bench.irq() and await bench.curr_state() == 0
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+
+        await bench.disable()
+        for reg, v in ((REG_CFG3, 0), (REG_COMM_PINS, 0), (REG_CFG0 + SHARD1, 0), (REG_FIFO_ST, 0), (REG_FIFO_ST + SHARD1, 0)):
+            await tqv.write_word_reg(reg, v)
+        await tqv.write_byte_reg(REG_COMPARE, 0)
+        await tqv.write_byte_reg(REG_HOST, 0)
+        for k in range(5):
+            dut.ui_in[k].value = 0
 
 
 # =============================================================================

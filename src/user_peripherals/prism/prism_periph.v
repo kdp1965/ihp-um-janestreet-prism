@@ -51,6 +51,8 @@
 //                     [24] restart the count on entry into state [29:25] (next SI == it, current SI != it):
 //                     a retriggerable timeout with no STEW bits; [30] one-shot: after its tick the timer
 //                     waits for the next entry instead of running on
+//     +0x50  COMM_PINS multi-bit comm shift lanes: with CFG0[2] a uo_out pin whose pinmux code is 6 shows comm bit
+//                     COMM_PINS[3k+2:3k] (k = uo_out pin - 1) instead of the shifter's serial bit
 //     +0x4C  CONST_TAB the 16x8 latch FIFO as an addressable constant table: [0] enable (OUT_COMM_LOAD loads comm
 //                     from the row at the 4-bit index instead of preload / K), {OUT_K_SEL1, OUT_K_SEL0} = how the
 //                     index moves on each load: 0 clear, 1 + 1, 2 + [10:8] add_to_idx, 3 = [7:4] idx_load
@@ -195,6 +197,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     localparam  OUT_K_SEL1            = 20;
 
     // CFG0 bits used here (the rest live in prism_datapath.v)
+    localparam  CFG_MSHIFT_EN         = 2;    // comm shifts {out20, out18} + 1 bits per OUT_SHIFT, from pins
+                                              // shift_in_sel .. shift_in_sel + 3 (PIO-like, 4n)
     localparam  CFG_LATCH_IN_OUT      = 7;
     localparam  CFG_SHIFT_WIDE        = 10;
     localparam  CFG_LATCH_EN          = 13;
@@ -240,6 +244,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     localparam [6:0] SH_TRACE_CFG  = 7'h44; // trace: configuration
     localparam [6:0] SH_TRACE_CTRL = 7'h48; //        arm / stop, status
     localparam [6:0] SH_CTAB    = 7'h4C;    // constant table: the latch FIFO as addressable constants
+    localparam [6:0] SH_COMM_PINS = 7'h50;  // multi-bit shift: comm bit per uo_out pin with pinmux code 6
     localparam       CT_EN        = 0;      // CONST_TAB bits
     localparam       CT_LOAD_ADDS = 1;      // index mode 3 adds idx_load instead of loading it
     localparam       CT_POST      = 2;      // load the row before the index moves
@@ -302,6 +307,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     wire [32*SHARDS-1:0] preload2_v;
     wire [32*SHARDS-1:0] const_v;
     wire [32*SHARDS-1:0] ctab_v;
+    wire [32*SHARDS-1:0] comm_pins_v;
     wire [32*SHARDS-1:0] fifo_st_v;
     wire [8*SHARDS-1:0]  fifo_head_v;
     wire [8*SHARDS-1:0]  comm_v;            // comm register per shard (FIFO push data)
@@ -576,6 +582,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             // whatever the outputs say, so the host and the debugger see it.
             wire [CTAB_W-1:0]         ctab;
             wire                      ctab_en;
+            wire [20:0]               comm_pins;                // COMM_PINS: comm bit per output pin (code 6)
+            wire                      comm_pins_en;
             wire                      ctab_wr  = prism_wr && win && shard_off == SH_CTAB;
             reg   [3:0]               const_idx;
             wire  [1:0]               idx_mode = {out_s[OUT_K_SEL1], out_s[OUT_K_SEL0]};
@@ -678,6 +686,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 .crc_byte         ( crc_byte                           ),
                 .comm_load_data   ( comm_load_data                     ),
                 .shift_in         ( shift_in_bit                       ),
+                .shift_in_hi      ( {pin_in[{1'b0, cfg0[1:0]} + 3'd3], pin_in[{1'b0, cfg0[1:0]} + 3'd2],
+                                     pin_in[{1'b0, cfg0[1:0]} + 3'd1]} ),
+                .shift_n1         ( {out_s[OUT_K_SEL1], out_s[OUT_K_SEL0]} ),
                 .cfg              ( cfg0                               ),
                 .preload          ( preload                            ),
                 .compare          ( compare                            ),
@@ -872,19 +883,21 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign in_s[27]    = own_b & fifo_flag(1'b1, cfg1[31:30], fifo_b_fl[0], fifo_b_fl[1], fifo_b_fl[2], fifo_b_fl[3]);
 
             // Output pins: uo_out[k+1] source select PINMUX[3k+2:3k]
-            //   0-3 pin_out[3:0], 4 cond_out[0], 5 cond_out[1], 6 shift_data,
+            //   0-3 pin_out[3:0], 4 cond_out[0], 5 cond_out[1], 6 shift_data
+            //   (comm bit COMM_PINS[3k+2:3k] in multi-bit shift mode),
             //   7 = this shard does not drive the pin
             genvar k;
             for (k = 0; k < 7; k = k + 1)
             begin : GEN_PINMUX
                 wire [2:0] sel = pinmux[3*k+2 : 3*k];
+                wire       shift_lane = cfg0[CFG_MSHIFT_EN] ? comm[comm_pins[3*k+2 : 3*k]] : shift_data;
                 assign pin_src_v[7*s+k]   = sel == 3'd0 ? pin_out[0] :
                                             sel == 3'd1 ? pin_out[1] :
                                             sel == 3'd2 ? pin_out[2] :
                                             sel == 3'd3 ? pin_out[3] :
                                             sel == 3'd4 ? cond_s[0]  :
                                             sel == 3'd5 ? cond_s[1]  :
-                                            sel == 3'd6 ? shift_data : 1'b0;
+                                            sel == 3'd6 ? shift_lane : 1'b0;
                 assign pin_claim_v[7*s+k] = sel != 3'd7;
             end
 
@@ -1063,6 +1076,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign crc_poly_en = win && shard_off == SH_CRC_POLY;
             assign crc_exp_en  = win && shard_off == SH_CRC_EXP;
             assign ctab_en     = win && shard_off == SH_CTAB;
+            assign comm_pins_en = win && shard_off == SH_COMM_PINS;
 
 `ifndef SYNTH_FPGA
             prism_latch_reg #( .WIDTH ( 32 ) ) cfg1_reg
@@ -1129,6 +1143,14 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 .data_in    ( latch_data[TRC_CFG_W-1:0] ),
                 .data_out   ( trace_cfg                )
             );
+            prism_latch_reg #( .WIDTH ( 21 ) ) comm_pins_reg
+            (
+                .rst_n      ( rst_n             ),
+                .enable     ( comm_pins_en      ),
+                .wr         ( latch_wr          ),
+                .data_in    ( latch_data[20:0]  ),
+                .data_out   ( comm_pins         )
+            );
             prism_latch_reg #( .WIDTH ( CTAB_W ) ) ctab_reg
             (
                 .rst_n      ( rst_n                  ),
@@ -1168,6 +1190,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             reg [31:0] cfg1_r, crc_poly_r, crc_exp_r, cfg2_r, const_r, cfg3_r, preload2_r;
             reg [TRC_CFG_W-1:0] trace_cfg_r;
             reg [CTAB_W-1:0] ctab_r;
+            reg [20:0] comm_pins_r;
             always @(posedge clk or negedge rst_n)
             begin
                 if (~rst_n)
@@ -1184,6 +1207,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                     preload2_r <= 32'h0;
                     trace_cfg_r <= 0;
                     ctab_r     <= 0;
+                    comm_pins_r <= 0;
                 end
                 else
                 begin
@@ -1199,6 +1223,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                     if (preload2_en & prism_wr) preload2_r <= data_in;
                     if (trace_cfg_en & prism_wr) trace_cfg_r <= data_in[TRC_CFG_W-1:0];
                     if (ctab_en & prism_wr)     ctab_r     <= data_in[CTAB_W-1:0];
+                    if (comm_pins_en & prism_wr) comm_pins_r <= data_in[20:0];
                 end
             end
             assign cfg0     = cfg0_r;
@@ -1213,6 +1238,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign preload2 = preload2_r;
             assign trace_cfg = trace_cfg_r;
             assign ctab      = ctab_r;
+            assign comm_pins = comm_pins_r;
 `endif
 
             // Export for the read mux and cross-shard use
@@ -1230,6 +1256,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign preload2_v[32*s +: 32] = preload2;
             assign const_v   [32*s +: 32] = consts;
             assign ctab_v    [32*s +: 32] = {12'h0, const_idx, 5'h0, ctab};
+            assign comm_pins_v[32*s +: 32] = {11'h0, comm_pins};
             assign fifo_st_v [32*s +: 32] = {10'h0, fifo_count, 4'h0, fifo_af, fifo_ae, fifo_full, fifo_empty};
             assign fifo_head_v[8*s +: 8]  = fifo_head;
             assign comm_v     [8*s +: 8]  = comm;
@@ -1481,6 +1508,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 SH_CONST:   reg_word = const_v  [32*shard_sel +: 32];
                 SH_TRACE_CTRL: reg_word = trace_st_v  [32*shard_sel +: 32];
                 SH_CTAB:    reg_word = ctab_v   [32*shard_sel +: 32];
+                SH_COMM_PINS: reg_word = comm_pins_v[32*shard_sel +: 32];
                 default:    reg_word = 32'h0;
             endcase
         end

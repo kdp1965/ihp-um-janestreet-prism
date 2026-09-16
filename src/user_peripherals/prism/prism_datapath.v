@@ -41,6 +41,8 @@ module prism_datapath
     input  wire  [7:0] crc_byte,          // next CRC byte for the 8-bit shifter
     input  wire  [7:0] comm_load_data,    // OUT_COMM_LOAD value (preload[7:0] or a constant)
     input  wire        shift_in,          // serial input bit (selected pin)
+    input  wire  [3:1] shift_in_hi,       // the next three pins up, for multi-bit comm shifts
+    input  wire  [1:0] shift_n1,          // {OUT_K_SEL1, OUT_K_SEL0}: bits per comm shift - 1 (CFG_MSHIFT_EN)
 
     // configuration (CFG0 bits, see prism_periph.v / docs/prism_interface.md)
     input  wire [31:0] cfg,
@@ -82,6 +84,7 @@ module prism_datapath
     localparam CFG_WRAP_PRELOAD   = 15;   // count-up rolls over at preload instead of the maximum
     localparam CFG_SHIFT_LOAD_ONE = 16;   // wide load sets shift_count to 1
     localparam CFG_COMM_LOAD_ONE  = 17;   // comm load sets comm_count to 1
+    localparam CFG_MSHIFT_EN      = 2;    // comm shifts shift_n1 + 1 bits at a time (PIO-like)
 
     wire clr_not_load   = cfg[CFG_CLR_NOT_LOAD];
     wire shift_en       = cfg[CFG_SHIFT_EN];
@@ -93,6 +96,22 @@ module prism_datapath
     wire wrap_preload   = cfg[CFG_WRAP_PRELOAD];
     wire shift_load_one = cfg[CFG_SHIFT_LOAD_ONE];
     wire comm_load_one  = cfg[CFG_COMM_LOAD_ONE];
+    // Multi-bit comm shift: nbits pins enter (MSB first: the higher pin the
+    // higher bit, below the byte; LSB first: at the top) and the shift count
+    // advances by nbits; a load that "counts one" counts nbits instead
+    wire [2:0] nbits    = cfg[CFG_MSHIFT_EN] ? {1'b0, shift_n1} + 3'd1 : 3'd1;
+    wire [2:0] load_cnt = comm_load_one ? nbits : 3'd0;
+    wire [3:0] sin      = {shift_in_hi, shift_in};
+    reg  [7:0] comm_shifted;
+    always @(*)
+    begin
+        case (nbits)
+            3'd2:    comm_shifted = shift_dir ? {sin[1:0], comm[7:2]} : {comm[5:0], sin[1:0]};
+            3'd3:    comm_shifted = shift_dir ? {sin[2:0], comm[7:3]} : {comm[4:0], sin[2:0]};
+            3'd4:    comm_shifted = shift_dir ? {sin[3:0], comm[7:4]} : {comm[3:0], sin[3:0]};
+            default: comm_shifted = shift_dir ? {sin[0],   comm[7:1]} : {comm[6:0], sin[0]};
+        endcase
+    end
 
     wire [31:0] mask        = count32 ? 32'hFFFF_FFFF : 32'h00FF_FFFF;
     wire [31:0] preload_m   = preload & mask;
@@ -184,24 +203,24 @@ module prism_datapath
             if (o_comm_load)
             begin
                 comm       <= comm_load_data;
-                comm_count <= comm_load_one ? 3'd1 : 3'd0;
+                comm_count <= load_cnt;
             end
             else if (o_fifo_pop)
             begin
                 // TX FIFO: next byte to send
                 comm       <= fifo_data;
-                comm_count <= comm_load_one ? 3'd1 : 3'd0;
+                comm_count <= load_cnt;
             end
             else if (o_load_crc && !shift_wide)
             begin
                 // Transmit the checksum: load the 8-bit shifter from the CRC
                 comm       <= crc_byte;
-                comm_count <= comm_load_one ? 3'd1 : 3'd0;
+                comm_count <= load_cnt;
             end
             else if (shift_comm_en)
             begin
-                comm       <= shift_dir ? {shift_in, comm[7:1]} : {comm[6:0], shift_in};
-                comm_count <= comm_count + 3'd1;
+                comm       <= comm_shifted;
+                comm_count <= comm_count + nbits;
             end
         end
     end

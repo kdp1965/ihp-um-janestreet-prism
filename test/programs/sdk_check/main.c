@@ -181,6 +181,12 @@ int main(void)
         prism_fifo_flush();
     }
 
+    /* ---- 1c3. multi-bit shift lanes: the COMM_PINS register takes the fields */
+    prism_set_comm_pins(PRISM_COMM_PIN(1, 7) | PRISM_COMM_PIN(2, 6) | PRISM_COMM_PIN(7, 3));
+    v = prism_read32(prism_shard_reg(PRISM_SH_COMM_PINS));
+    check("comm pins", v == (PRISM_COMM_PIN(1, 7) | PRISM_COMM_PIN(2, 6) | PRISM_COMM_PIN(7, 3)), v);
+    prism_set_comm_pins(0);
+
     /* ---- 1d. timer 2 as a retriggerable one-shot: the register takes the fields */
     prism_set_timer2_retrigger(1000, UART_TX_STATE_DATA, true);
     v = prism_read32(prism_shard_reg(PRISM_SH_PRELOAD2));

@@ -211,16 +211,17 @@ class I2cSlave(Model):
         ('stop',), ('addr', byte, acked), ('write', byte, acked),
         ('read', byte, master_acked). '''
 
-    def __init__(self, dut, address):
+    def __init__(self, dut, address, scl_in=1, sda_in=0):
         super().__init__(dut)
         self.addr = address
+        self.scl_in, self.sda_in = scl_in, sda_in   # ui_in pins carrying the line levels
         self.read_data = []
         self.rx = []
         self.events = []
         self.scl_rises = []                      # clock index of each SCL rising edge
         self.drive_low = False                   # the slave pulling SDA low
-        dut.ui_in[0].value = 1
-        dut.ui_in[1].value = 1
+        dut.ui_in[sda_in].value = 1
+        dut.ui_in[scl_in].value = 1
 
     async def run(self):
         scl_prev, sda_prev = 1, 1
@@ -234,8 +235,8 @@ class I2cSlave(Model):
             uo = int(self.dut.uo_out.value)
             scl = 0 if (uo >> 1) & 1 else 1
             sda = 0 if ((uo >> 2) & 1 or self.drive_low) else 1
-            self.dut.ui_in[1].value = scl
-            self.dut.ui_in[0].value = sda
+            self.dut.ui_in[self.scl_in].value = scl
+            self.dut.ui_in[self.sda_in].value = sda
             if scl and scl_prev:                              # SDA moves while SCL high
                 if sda_prev and not sda:                      # START (or repeated START)
                     self.events.append(('start',))
@@ -301,22 +302,23 @@ class I2cMaster(Model):
         read_byte() / send_stop() are awaited by the test; `half` is the SCL
         half period in clocks and `hold` the SDA hold after SCL falls. '''
 
-    def __init__(self, dut, half=16, hold=3):
+    def __init__(self, dut, half=16, hold=3, scl_in=1, sda_in=0):
         super().__init__(dut)
         self.half, self.hold = half, hold
+        self.scl_in, self.sda_in = scl_in, sda_in   # ui_in pins carrying the line levels
         self.scl_low = False                     # the master pulling SCL low
         self.sda_low = False                     # the master pulling SDA low
         self.sda = 1                             # the resolved SDA level
-        dut.ui_in[0].value = 1
-        dut.ui_in[1].value = 1
+        dut.ui_in[sda_in].value = 1
+        dut.ui_in[scl_in].value = 1
 
     async def run(self):
         while True:
             await RisingEdge(self.dut.clk)
             uo = int(self.dut.uo_out.value)
             self.sda = 0 if (self.sda_low or (uo >> 2) & 1) else 1
-            self.dut.ui_in[0].value = self.sda
-            self.dut.ui_in[1].value = 0 if self.scl_low else 1
+            self.dut.ui_in[self.sda_in].value = self.sda
+            self.dut.ui_in[self.scl_in].value = 0 if self.scl_low else 1
 
     async def send_start(self):
         ''' START, or a repeated START when SCL is currently low '''

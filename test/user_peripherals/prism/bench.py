@@ -38,6 +38,8 @@ class PrismBench:
         cocotb.start_soon(Clock(self.dut.clk, 16, units="ns").start())
         if os.environ.get("PRISM_TRACE", "0") == "1":
             cocotb.start_soon(self.trace())
+        for k in range(8):                       # a stray model drive on ui_in[1] at reset would put
+            self.dut.ui_in[k].value = 0          # TinyQV into debug mode (uo_out[5:2] hijacked)
         await self.tqv.reset()
 
     async def clocks(self, n):
