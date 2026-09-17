@@ -36,6 +36,8 @@
   "FP_PDN_VWIDTH": 2.1,
   "RUN_CTS": 1,
   "FP_PDN_MULTILAYER": 0,
+  "//": "pdn_cfg.tcl is LibreLane's PDN config without the per-macro grid, which has no shapes with this single-layer PDN and makes an unpatched pdngen fail (PDN-0233); the macros get their power from Project.ExtendPowerStripes",
+  "PDN_CFG": "dir::pdn_cfg.tcl",
   "MAGIC_DEF_LABELS": 0,
   "MAGIC_WRITE_LEF_PINONLY": 1,
   "FP_MACRO_HORIZONTAL_HALO": 2.0,
