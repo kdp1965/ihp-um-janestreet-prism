@@ -30,6 +30,38 @@ class ExtendPowerStripes(OdbpyStep):
         return os.path.join(HERE, "odb_stripes.py")
 
 
+# --- one antenna diode on every signal input pin of the IHP SRAMs (their LEF
+# has no antenna data, so the rule-based repair cannot see those nets), then a
+# detailed placement to legalise them.  Inserted before the first global
+# routing (meta.substituting_steps "+OpenROAD.ResizerTimingPostCTS") so that
+# single routing pass covers the diodes; the antenna repair later works
+# incrementally on those routes and needs no extra global-routing pass.
+from typing import List  # noqa: E402
+
+from librelane.steps.step import CompositeStep  # noqa: E402
+from librelane.steps.openroad import DetailedPlacement  # noqa: E402
+
+
+@Step.factory.register()
+class SramPinDiodePlacement(OdbpyStep):
+    id = "Project.SramPinDiodePlacement"
+    name = "Diodes on SRAM Input Pins"
+
+    def get_script_path(self):
+        return os.path.join(HERE, "odb_sram_diodes.py")
+
+    def get_command(self) -> List[str]:
+        cell, pin = self.config["DIODE_CELL"].split("/")
+        return super().get_command() + ["--diode-cell", cell, "--diode-pin", pin, "--macro-prefix", "RM_IHPSG13"]
+
+
+@Step.factory.register()
+class DiodesOnSramPins(CompositeStep):
+    id = "Project.DiodesOnSramPins"
+    name = "Diodes on SRAM Pins"
+    Steps = [SramPinDiodePlacement, DetailedPlacement]
+
+
 # --- netgen writes the IHP SRAM's power pin names (VDD!, VSS!, VDDARRAY!) into
 # its LVS JSON with a stray backslash ("\VDD!"), which is not a valid JSON
 # escape, and librelane.steps.netgen.LVS then dies in json.loads before the

@@ -12,6 +12,10 @@ PYTHON    ?= python3.12
 TT_PY     := PATH=$(CURDIR)/.venv-tt/bin:$$PATH .venv-tt/bin/python
 ifeq ($(IN_NIX_SHELL),)
 RUN = nix-shell $(NIX_SHELL) --run
+# Local sign-off uses the full CMOS5L KLayout deck from the IHP dev branch
+# (tools/drc_deck.py adds -c KLAYOUT_DRC_RUNSET=... when it is installed);
+# src/config.json itself points at the PDK's own deck so the CI can resolve it.
+DRC_DECK = $$(python3 tools/drc_deck.py)
 else
 RUN = sh -c
 endif
@@ -63,3 +67,40 @@ shell:
 
 clean:
 	rm -rf runs
+
+# Where is the detailed router and what is it stuck on (the newest DRC
+# report; config.json writes one every 4 iterations), and stop a run that
+# is clearly not going to converge: the flow then fails at that step and
+# the report on disk is the one to read.
+drt-status:
+	python3 tools/drt_status.py runs/wokwi
+
+harden-stop:
+	python3 tools/drt_status.py runs/wokwi --stop
+
+# Placement seed sweep: PL_TARGET_DENSITY_PCT is the seed (the placer is
+# deterministic but chaotic).  Each candidate runs only to global routing
+# (~40 min); seed-report ranks them by Metal3 overflow; seed-finish resumes
+# the winner from the step after global routing and renames it to runs/wokwi.
+SEEDS      ?= 53 54 56 57
+SEED       ?=
+ACCEPT     ?= 85
+DRT_ITERS  ?= 4
+ACCEPT_BIN ?= 300
+PARALLEL   ?= 3
+seed-sweep: config
+	$(RUN) "PATH=\$$PATH:$(CURDIR)/.venv-tt/bin python3 tools/seed_sweep.py run --accept=$(ACCEPT) --drt=$(DRT_ITERS) --accept-bin=$(ACCEPT_BIN) --parallel=$(PARALLEL) --finish $(SEEDS)"
+
+seed-report:
+	python3 tools/seed_sweep.py report
+
+seed-finish: config
+	$(RUN) "PATH=\$$PATH:$(CURDIR)/.venv-tt/bin python3 tools/seed_sweep.py finish $(SEED)"
+
+# Tiny Tapeout precheck on a finished run's GDS (what the GDS action runs
+# in CI): layers, pins against the 8x4 template, boundary, KLayout checks.
+# The tool reads info.yaml from the GDS's directory and its pin check
+# resolves the template relative to tt/precheck, hence the copy and the cd.
+precheck:
+	cp info.yaml $(RUN_DIR)/final/gds/info.yaml
+	$(RUN) "cd tt/precheck && PDK_ROOT=$$PDK_ROOT PDK=ihp-sg13cmos5l ../../.venv-tt/bin/python precheck.py --gds ../../$(RUN_DIR)/final/gds/tt_um_pettit_js_prism.gds --tech ihp-sg13cmos5l"
