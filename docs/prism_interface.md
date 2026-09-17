@@ -1686,6 +1686,36 @@ vacuous (0 rules executed).  The dev deck (with the sg13g2 rule files it
 includes by relative path) is now installed on bowser, every wrapper there
 passes the override, and the exp_pins GDS is being re-checked with it.
 
+### 4z.5 The CI's power grid: no per-macro pdngen grid (2026-09-17)
+
+With the deck path fixed, the GitHub action failed at
+OpenROAD.GeneratePDN with PDN-0233 "Failed to generate full power grid".
+Cause: LibreLane's default pdn_cfg.tcl defines a pdngen grid for every
+macro instance, and with this tile's single-layer Metal4 PDN those grids
+end up with no shapes or vias (PDN-0232 for each of the eight CFGMEMs),
+which an unpatched OpenROAD turns into PDN-0233.  The development
+machines never saw it because their OpenROAD carried a patch that skips
+that check (disable_check.patch in the local LibreLane flake).
+
+Fix: src/pdn_cfg.tcl, LibreLane's file (identical in 3.0.0rc1 and 3.0.2)
+without the macro grid, selected by PDN_CFG.  The macros were never
+powered by that grid anyway; Project.ExtendPowerStripes does it.  Checked
+locally: Metal1 rails and Metal4 stripes identical to run wokwi_m2d53,
+plus 480 additional rail-to-stripe via stacks in the rows beside the
+macros (x 548-1678, y 94-616) that the old macro grid's halo had kept
+out; all outside the macros; power-grid connectivity check passes.
+Checked in the CI's own LibreLane 3.0.0rc1 Docker image on bowser
+(/scratch/kpettit/ihp, run_ci_image.sh): the old config reproduces
+PDN-0233, the new one passes the step; the same image is being run on
+through the custom steps to global routing to shake out any other
+3.0.0rc1 difference.
+
+Also on 2026-09-17: the GRT layer-budget experiment (exp_m4a, seed 55,
+Metal4-pin macros, GRT_LAYER_ADJUSTMENTS 0,0.15,0,0,0) came out worse,
+9611 violations / hottest bin 582 after pass 4 against 4796 / 362 for
+the same macros without it.  The placer's routability mode uses the same
+adjustments, so the placement moved too; either way, not a lever.
+
 **Runs are not reproducible across machines.**  Same Yosys 0.62 (same git
 sha, both built with clang 21.1.2 by nix), identical 3165 flops and latches,
 but ABC maps the combinational logic differently on Apple silicon and x86-64
