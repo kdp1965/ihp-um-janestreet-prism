@@ -252,7 +252,7 @@ module prism
    localparam [W_ADDR-1:0] REG_COND_MASK1  = 'h50;
 
    wire                       prism_rst_n;
-   reg                        cfg_fractured;
+   (* keep *) reg             cfg_fractured;   // keep: base.sdc names this net for its multicycle path
    wire                       fractured;
 
    // Signal declarations

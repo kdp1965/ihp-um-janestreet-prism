@@ -377,3 +377,154 @@ class I2cMaster(Model):
         await self.clocks(self.half)
         self.sda_low = False                     # ... SDA up: STOP
         await self.clocks(self.half)
+
+
+class QspiSlave(Model):
+    ''' SPI target (mode 0) for the spi_master chroma behind external
+        tri-state lane buffers: SCLK on uo_out[1], CS_N on uo_out[2], OE on
+        uo_out[3] (1 = the master drives IO0..IO3 from uo_out[7:4]); the
+        model resolves the four IO levels every clock and drives them back
+        into ui_in[4:1].  In single mode the slave drives IO1 (MISO) with
+        `tx` bits, MSB first, advancing on SCLK falling edges, and samples
+        IO0 (MOSI) on rising edges; in quad mode it samples IO0..IO3 on
+        rising edges while OE is high and drives all four lanes with `tx`
+        nibbles while OE is low.  Received bytes go to `rx`; `events`
+        records the CS edges; `sclks` counts rising edges per frame. '''
+
+    def __init__(self, dut, quad=False):
+        super().__init__(dut)
+        self.quad = quad
+        self.tx = []
+        self.rx = []
+        self.events = []
+        self.sclks = 0
+        self.oe_low_edges = 0
+        for k in range(1, 5):
+            dut.ui_in[k].value = 1
+
+    def _load(self):
+        self.cur = self.tx.pop(0) if self.tx else 0xFF
+        self.units = 2 if self.quad else 8
+
+    def prime(self):
+        ''' Present the first unit of the (new) `tx` data: done at CS low, and by the
+            test after reloading `tx` mid-frame (a real slave has its own byte timing) '''
+        self.units = 0
+        self.out = self._unit() if self.quad else (self._unit() << 1) | 0xD
+
+    def _unit(self):
+        ''' The next output unit (bit or nibble) of the current byte, MSB first '''
+        if self.units == 0:
+            self._load()
+        self.units -= 1
+        return (self.cur >> (4 * self.units)) & 0xF if self.quad else (self.cur >> self.units) & 1
+
+    async def run(self):
+        cs_prev, sclk_prev, oe_prev = 1, 0, 0
+        shreg, nbits = 0, 0
+        self.out = 0xF
+        while True:
+            await RisingEdge(self.dut.clk)
+            uo = int(self.dut.uo_out.value)
+            sclk, cs_n, oe, lanes = (uo >> 1) & 1, (uo >> 2) & 1, (uo >> 3) & 1, (uo >> 4) & 0xF
+            if cs_prev and not cs_n:                             # CS falls: new frame
+                self.events.append('cs_low')
+                shreg, nbits, self.sclks = 0, 0, 0
+                self.prime()                                     # first unit ready
+            elif not cs_prev and cs_n:
+                self.events.append('cs_high')
+            if not cs_n:
+                if sclk and not sclk_prev:                       # rising: sample the master
+                    self.sclks += 1
+                    if self.quad:
+                        if oe:
+                            shreg = ((shreg << 4) | lanes) & 0xFF; nbits += 4
+                    else:
+                        shreg = ((shreg << 1) | (lanes & 1)) & 0xFF; nbits += 1
+                    if nbits >= 8:
+                        self.rx.append(shreg); shreg, nbits = 0, 0
+                elif not sclk and sclk_prev:                     # falling: present the next unit
+                    if self.quad:
+                        if not oe_prev:                          # a read-phase edge (not the one OE drops on)
+                            self.out = self._unit()
+                    else:
+                        self.out = (self._unit() << 1) | 0xD
+            # the IO levels the master reads back
+            if self.quad:
+                io = lanes if oe else self.out
+            else:
+                io = ((lanes & 1) if oe else 1) | (self.out & 0x2) | 0xC   # IO0 from the master, IO1 = MISO, IO2/3 pulled up
+            for k in range(4):
+                self.dut.ui_in[k + 1].value = (io >> k) & 1
+            cs_prev, sclk_prev, oe_prev = cs_n, sclk, oe
+
+
+class OneWireSlave(Model):
+    ''' 1-Wire device (DS18B20-like) for the onewire chroma: the master
+        pulls DQ low through uo_out[1] (1 = low), the model resolves the
+        line with its own pull-low and drives ui_in[0].  Times are in
+        `unit` clocks, the master's count1 unit.  A master low of at least
+        `reset_min` units is a reset: `present` devices answer with a
+        presence pulse (low from `pres_delay` for `pres_len` units after
+        the release).  Every other master falling edge starts a slot: if
+        the device has bits to send it drives 0-bits low for `rd_hold`
+        units; otherwise it samples the line `sample` units after the edge
+        (LSB first, bytes into `rx`), and a received command found in
+        `responses` queues that reply. '''
+
+    def __init__(self, dut, unit=8, present=True):
+        super().__init__(dut)
+        self.unit = unit
+        self.present = present
+        self.rx = []
+        self.resets = 0
+        self.responses = {}                      # command byte -> list of reply bytes
+        self.tx_bits = []                        # bits queued to send, LSB first
+        self.reset_min, self.pres_delay, self.pres_len = 40, 4, 16
+        self.sample, self.rd_hold = 5, 4
+        self.drive_low = False
+        dut.ui_in[0].value = 1
+
+    async def run(self):
+        u = self.unit
+        low_prev, low_run, t = 0, 0, 0
+        shreg, nbits = 0, 0
+        pres_at = sample_at = hold_until = None
+        while True:
+            await RisingEdge(self.dut.clk)
+            t += 1
+            m_low = (int(self.dut.uo_out.value) >> 1) & 1
+            line = 0 if (m_low or self.drive_low) else 1
+            self.dut.ui_in[0].value = line
+            if m_low:
+                low_run += 1
+                if low_run == 1 and low_prev == 0:                       # master falling edge
+                    if self.tx_bits:                                     # a read slot: drive 0 bits
+                        bit = self.tx_bits.pop(0)
+                        if bit == 0:
+                            self.drive_low, hold_until = True, t + self.rd_hold * u
+                        sample_at = None
+                    else:
+                        sample_at = t + self.sample * u                  # a write slot
+            else:
+                if low_prev and low_run >= self.reset_min * u:           # reset released
+                    self.resets += 1
+                    shreg, nbits, sample_at = 0, 0, None
+                    self.tx_bits = []
+                    if self.present:
+                        pres_at = t + self.pres_delay * u
+                low_run = 0
+            low_prev = m_low
+            if pres_at is not None and t >= pres_at:
+                self.drive_low, hold_until, pres_at = True, t + self.pres_len * u, None
+            if hold_until is not None and t >= hold_until:
+                self.drive_low, hold_until = False, None
+            if sample_at is not None and t >= sample_at:
+                sample_at = None
+                shreg = (shreg >> 1) | (line << 7); nbits += 1
+                if nbits == 8:
+                    self.rx.append(shreg)
+                    if shreg in self.responses:
+                        for b in self.responses[shreg]:
+                            self.tx_bits += [(b >> i) & 1 for i in range(8)]
+                    shreg, nbits = 0, 0

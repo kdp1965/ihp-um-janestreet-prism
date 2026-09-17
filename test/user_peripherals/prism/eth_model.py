@@ -91,8 +91,9 @@ class EthEncoder:
        the preamble, SFD, payload and FCS, Manchester coded at `bit` clocks
        per bit, then TP_IDL (high for two bit times) and idle low.  `stretch`
        > 0 inserts one extra clock every `stretch` half bits, a line that is
-       slower than the device clock by 1 / (2 * stretch); `phase` delays the
-       start by that many clocks."""
+       slower than the device clock by 1 / (2 * stretch).  `bit_clocks` may
+       be fractional (5 = 2.5 clocks per half bit, a 10 Mb/s line at 50 MHz):
+       the half bits then alternate lengths to keep the average."""
 
     def __init__(self, dut, bit_clocks, rxd=3, stretch=0):
         self.dut = dut
@@ -100,6 +101,7 @@ class EthEncoder:
         self.rxd = rxd
         self.stretch = stretch
         self._n = 0
+        self._acc = 0.0
 
     def _drive(self, level):
         v = int(self.dut.ui_in.value)
@@ -108,7 +110,9 @@ class EthEncoder:
 
     async def _half(self, level):
         self._drive(level)
-        n = self.bit // 2
+        self._acc += self.bit / 2
+        n = int(self._acc)
+        self._acc -= n
         self._n += 1
         if self.stretch and self._n % self.stretch == 0:
             n += 1
@@ -129,9 +133,9 @@ class EthEncoder:
                 await self._half(bit)
         for _ in range(4):                    # TP_IDL: two bit times high
             await self._half(1)
-        await self.idle(self.bit * 4)
+        await self.idle(int(self.bit * 4))
 
     async def link_pulse(self):
         await self._half(1)
         await self._half(1)
-        await self.idle(self.bit * 4)
+        await self.idle(int(self.bit * 4))

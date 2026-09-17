@@ -39,7 +39,9 @@
 //     +0x38  CONST    constants K0 [7:0] .. K3 [31:24]; OUT_COMM_LOAD source with CFG0[30] (select = {out20, out18}),
 //                     K3 also the comm match value
 //     +0x3C  CFG3     Manchester bit recoverer (prism_mrx.v): [2:0] receive pin (PRISM input 0-6), [3] enable,
-//                     [7:4] clocks per half bit, [8] shifter input = the recovered bit (slot code 15 = bit valid).
+//                     [7:4] clocks per half bit, [8] shifter input = the recovered bit (slot code 15 = bit valid),
+//                     [9] double-edge sampling: the pin is sampled on both clock edges and [7:4] counts half
+//                     clocks per half bit (6 at 64 MHz, 5 at 50 MHz).
 //                     Edge-clocked sampler: [16] enable, [21:17] the PRISM input whose edge clocks it,
 //                     [23:22] 0 rising / 1 falling / 2 either, and the actions on each edge with no state
 //                     transition: [24] shift, [25] count2 + 1, [26] capture the in_prev flops, [27] count1
@@ -51,8 +53,9 @@
 //                     [24] restart the count on entry into state [29:25] (next SI == it, current SI != it):
 //                     a retriggerable timeout with no STEW bits; [30] one-shot: after its tick the timer
 //                     waits for the next entry instead of running on
-//     +0x50  COMM_PINS multi-bit comm shift lanes: with CFG0[2] a uo_out pin whose pinmux code is 6 shows comm bit
-//                     COMM_PINS[3k+2:3k] (k = uo_out pin - 1) instead of the shifter's serial bit
+//     +0x50  COMM_PINS multi-bit comm shift lanes: with CFG0[2] a uo_out pin whose pinmux code is 6 shows a bit of
+//                     the 4-bit window comm[base+3:base], base = COMM_PINS[2:0] (0-4), lane = COMM_PINS[2k+5:2k+4]
+//                     (k = uo_out pin - 1) instead of the shifter's serial bit
 //     +0x4C  CONST_TAB the 16x8 latch FIFO as an addressable constant table: [0] enable (OUT_COMM_LOAD loads comm
 //                     from the row at the 4-bit index instead of preload / K), {OUT_K_SEL1, OUT_K_SEL0} = how the
 //                     index moves on each load: 0 clear, 1 + 1, 2 + [10:8] add_to_idx, 3 = [7:4] idx_load
@@ -264,6 +267,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     localparam       SI_W     = 5;          // state index width (DEPTH 32)
     localparam       CFG3_MRX_EN    = 3;    // CFG3: [2:0] pin, [3] enable, [7:4] clocks per half bit
     localparam       CFG3_SHIFT_MRX = 8;    //       [8] shifter input = recovered bit
+    localparam       CFG3_MRX_DDR   = 9;    //       [9] double-edge sampling (hb in half clocks)
     localparam       CFG3_SMP_EN    = 16;   // edge-clocked sampler: [16] enable
     localparam       CFG3_SMP_SRC   = 17;   //       [21:17] clock input (PRISM input 0-31)
     localparam       CFG3_SMP_EDGE  = 22;   //       [23:22] 0 rising, 1 falling, 2 either
@@ -545,6 +549,13 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             wire                      preload2_en;
             reg                       flag2;                     // FSM flag (OUT_LATCH + OUT_FLAG2)
             wire                      mrx_valid, mrx_value;      // Manchester bit recoverer
+            // Double-edge sampling for the recoverer (CFG3[9]): the raw pin is
+            // also sampled on the falling clock edge; each sample gets its own
+            // two-flop synchroniser so their order into the recoverer is fixed
+            wire                      mrx_ddr  = cfg3[CFG3_MRX_DDR];
+            wire                      mrx_pin  = ui_in_raw[cfg3[2:0]];
+            reg                       mrx_n;                     // falling-edge sample
+            reg   [1:0]               mrx_h_s, mrx_p_s;          // synchronised falling / rising samples
             // Edge-clocked sampler (CFG3[27:16]): hardware actions on the
             // selected edge of one PRISM input, with no state transition
             wire                      smp_en   = cfg3[CFG3_SMP_EN];
@@ -582,7 +593,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             // whatever the outputs say, so the host and the debugger see it.
             wire [CTAB_W-1:0]         ctab;
             wire                      ctab_en;
-            wire [20:0]               comm_pins;                // COMM_PINS: comm bit per output pin (code 6)
+            wire [17:0]               comm_pins;                // COMM_PINS: window base + lane per output pin (code 6)
             wire                      comm_pins_en;
             wire                      ctab_wr  = prism_wr && win && shard_off == SH_CTAB;
             reg   [3:0]               const_idx;
@@ -839,12 +850,34 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
 
             // Manchester bit recoverer: its bit valid is slot code 15, its bit
             // the shifter input with CFG3[8]; consumed by the FSM's shift
+            always @(negedge clk or negedge rst_n)
+            begin
+                if (!rst_n)
+                    mrx_n <= 1'b0;
+                else
+                    mrx_n <= mrx_pin;
+            end
+            always @(posedge clk or negedge rst_n)
+            begin
+                if (!rst_n)
+                begin
+                    mrx_h_s <= 2'b00;
+                    mrx_p_s <= 2'b00;
+                end
+                else
+                begin
+                    mrx_h_s <= {mrx_h_s[0], mrx_n};
+                    mrx_p_s <= {mrx_p_s[0], mrx_pin};
+                end
+            end
             prism_mrx i_mrx
             (
                 .clk     ( clk                    ),
                 .rst_n   ( rst_n                  ),
                 .enable  ( cfg3[CFG3_MRX_EN]      ),
-                .line    ( in_s[cfg3[2:0]]        ),
+                .ddr     ( mrx_ddr                ),
+                .line    ( mrx_ddr ? mrx_p_s[1] : in_s[cfg3[2:0]] ),
+                .line_h  ( mrx_h_s[1]             ),
                 .hb      ( cfg3[7:4]              ),
                 .consume ( out_s[OUT_SHIFT]       ),
                 .valid   ( mrx_valid              ),
@@ -884,13 +917,21 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
 
             // Output pins: uo_out[k+1] source select PINMUX[3k+2:3k]
             //   0-3 pin_out[3:0], 4 cond_out[0], 5 cond_out[1], 6 shift_data
-            //   (comm bit COMM_PINS[3k+2:3k] in multi-bit shift mode),
+            //   (a lane of the comm window in multi-bit shift mode: the 4-bit
+            //   window comm[base+3:base] is shared by the seven pins, each
+            //   picking one of its lanes, so a comm bit feeds at most four
+            //   window muxes instead of seven 8:1 pin muxes),
             //   7 = this shard does not drive the pin
+            wire [2:0] comm_base = comm_pins[2:0];
+            wire [3:0] comm_win  = comm_base == 3'd0 ? comm[3:0] :
+                                   comm_base == 3'd1 ? comm[4:1] :
+                                   comm_base == 3'd2 ? comm[5:2] :
+                                   comm_base == 3'd3 ? comm[6:3] : comm[7:4];
             genvar k;
             for (k = 0; k < 7; k = k + 1)
             begin : GEN_PINMUX
                 wire [2:0] sel = pinmux[3*k+2 : 3*k];
-                wire       shift_lane = cfg0[CFG_MSHIFT_EN] ? comm[comm_pins[3*k+2 : 3*k]] : shift_data;
+                wire       shift_lane = cfg0[CFG_MSHIFT_EN] ? comm_win[comm_pins[2*k+5 : 2*k+4]] : shift_data;
                 assign pin_src_v[7*s+k]   = sel == 3'd0 ? pin_out[0] :
                                             sel == 3'd1 ? pin_out[1] :
                                             sel == 3'd2 ? pin_out[2] :
@@ -1143,12 +1184,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 .data_in    ( latch_data[TRC_CFG_W-1:0] ),
                 .data_out   ( trace_cfg                )
             );
-            prism_latch_reg #( .WIDTH ( 21 ) ) comm_pins_reg
+            prism_latch_reg #( .WIDTH ( 18 ) ) comm_pins_reg
             (
                 .rst_n      ( rst_n             ),
                 .enable     ( comm_pins_en      ),
                 .wr         ( latch_wr          ),
-                .data_in    ( latch_data[20:0]  ),
+                .data_in    ( latch_data[17:0]  ),
                 .data_out   ( comm_pins         )
             );
             prism_latch_reg #( .WIDTH ( CTAB_W ) ) ctab_reg
@@ -1190,7 +1231,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             reg [31:0] cfg1_r, crc_poly_r, crc_exp_r, cfg2_r, const_r, cfg3_r, preload2_r;
             reg [TRC_CFG_W-1:0] trace_cfg_r;
             reg [CTAB_W-1:0] ctab_r;
-            reg [20:0] comm_pins_r;
+            reg [17:0] comm_pins_r;
             always @(posedge clk or negedge rst_n)
             begin
                 if (~rst_n)
@@ -1223,7 +1264,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                     if (preload2_en & prism_wr) preload2_r <= data_in;
                     if (trace_cfg_en & prism_wr) trace_cfg_r <= data_in[TRC_CFG_W-1:0];
                     if (ctab_en & prism_wr)     ctab_r     <= data_in[CTAB_W-1:0];
-                    if (comm_pins_en & prism_wr) comm_pins_r <= data_in[20:0];
+                    if (comm_pins_en & prism_wr) comm_pins_r <= data_in[17:0];
                 end
             end
             assign cfg0     = cfg0_r;
@@ -1256,7 +1297,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
             assign preload2_v[32*s +: 32] = preload2;
             assign const_v   [32*s +: 32] = consts;
             assign ctab_v    [32*s +: 32] = {12'h0, const_idx, 5'h0, ctab};
-            assign comm_pins_v[32*s +: 32] = {11'h0, comm_pins};
+            assign comm_pins_v[32*s +: 32] = {14'h0, comm_pins};
             assign fifo_st_v [32*s +: 32] = {10'h0, fifo_count, 4'h0, fifo_af, fifo_ae, fifo_full, fifo_empty};
             assign fifo_head_v[8*s +: 8]  = fifo_head;
             assign comm_v     [8*s +: 8]  = comm;

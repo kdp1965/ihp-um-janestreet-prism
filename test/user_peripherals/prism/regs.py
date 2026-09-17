@@ -24,7 +24,7 @@ REG_DBG_CTRL   = (0x004, 0x008)   # per shard
 REG_DBG_STATUS = 0x00C            # shard 0 in [12:0], shard 1 in [25:13]
 REG_STEW0      = 0x010            # 4 words: STEW of shard 0's current state
 REG_INT_STATUS = 0x024
-REG_IN_DATA    = 0x03C            # shard 0 input vector (live)
+REG_IN_DATA    = 0x03C            # shard 0 input vector
 REG_FRAC_CFG   = 0x040
 REG_OUT_MASK0  = 0x044
 REG_COND_MASK0 = 0x048
@@ -56,7 +56,8 @@ REG_CRC_EXP = 0x130
 REG_CFG2    = 0x134       # input slot selects (4 bits each: inputs 16-19, 28-31)
 REG_CONST   = 0x138       # constants K3..K0 (K3 = comm match value)
 REG_CFG3    = 0x13C       # [2:0] Manchester receive pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit
-                          # [27:16] edge-clocked sampler (CFG3_SMP_*)
+                          # [9] double-edge sampling (hb = half clocks per half bit), [27:16] edge-clocked sampler (CFG3_SMP_*)
+CFG3_MRX_DDR   = 1 << 9   # recoverer samples the pin on both clock edges
 CFG3_SMP_EN    = 1 << 16  # sampler enable
 def CFG3_SMP_SRC(n): return (n & 0x1f) << 17   # the PRISM input whose edge clocks it
 CFG3_SMP_RISE  = 0 << 22
@@ -72,8 +73,16 @@ T2_RELOAD    = 1 << 24    # restart the count on entry into state T2_STATE(si): 
 def T2_STATE(si): return (si & 0x1f) << 25
 T2_ONESHOT   = 1 << 30    # with T2_RELOAD: one tick per entry, then wait for the next entry
 REG_CTAB    = 0x14C       # constant table: the latch FIFO as addressable constants (CT_*); [19:16] = the index
-REG_COMM_PINS = 0x150     # multi-bit shift lanes: comm bit shown on uo_out[k] (pinmux code 6) = [3(k-1)+2:3(k-1)]
-def COMM_PIN(uo, bit): return (bit & 7) << (3 * (uo - 1))
+REG_COMM_PINS = 0x150     # multi-bit shift lanes: [2:0] window base (comm[base+3:base]), [2k+5:2k+4] lane of uo_out[k+1] (pinmux code 6); was one comm bit per pin [3(k-1)]
+def COMM_PINS(*pairs):
+    '''(uo_out pin, comm bit) pairs -> COMM_PINS: the bits must fit one 4-bit window'''
+    bits = [b for _, b in pairs]
+    base = min(4, min(bits)) if bits else 0                 # windows start at 0..4
+    assert all(base <= b <= base + 3 for b in bits), "comm bits must fit a 4-bit window"
+    v = base
+    for uo, b in pairs:
+        v |= (b - base) << (4 + 2 * (uo - 1))
+    return v
 CT_EN        = 1 << 0     # OUT_COMM_LOAD loads comm from the table row at the index
 CT_LOAD_ADDS = 1 << 1     # index mode 3 ({K_SEL1, K_SEL0} = 3) adds idx_load instead of loading it
 CT_POST      = 1 << 2     # the byte loaded is the row before the index moves (default: after)

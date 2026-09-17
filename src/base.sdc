@@ -40,6 +40,9 @@ set_false_path -setup -from [get_ports {ui_in[*]}]
 # The fracture configuration bit only changes while the PRISM is disabled;
 # it fans out to the bank-select and output masking logic, so give it two
 # cycles rather than let it dominate the state -> SIT -> state loop.
+# The net name survives synthesis only because prism.v marks the register
+# (* keep *); without it Yosys keeps the alias one level up
+# (i_peripherals.i_prism.fractured) and STA drops both lines with STA-0361.
 set_multicycle_path -setup 2 -through [get_nets {i_peripherals.i_prism.i_prism.cfg_fractured}]
 set_multicycle_path -hold 1 -through [get_nets {i_peripherals.i_prism.i_prism.cfg_fractured}]
 

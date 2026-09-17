@@ -182,9 +182,9 @@ int main(void)
     }
 
     /* ---- 1c3. multi-bit shift lanes: the COMM_PINS register takes the fields */
-    prism_set_comm_pins(PRISM_COMM_PIN(1, 7) | PRISM_COMM_PIN(2, 6) | PRISM_COMM_PIN(7, 3));
+    prism_set_comm_pins(PRISM_COMM_BASE(4) | PRISM_COMM_LANE(1, 3) | PRISM_COMM_LANE(2, 2) | PRISM_COMM_LANE(7, 0));
     v = prism_read32(prism_shard_reg(PRISM_SH_COMM_PINS));
-    check("comm pins", v == (PRISM_COMM_PIN(1, 7) | PRISM_COMM_PIN(2, 6) | PRISM_COMM_PIN(7, 3)), v);
+    check("comm pins", v == (PRISM_COMM_BASE(4) | PRISM_COMM_LANE(1, 3) | PRISM_COMM_LANE(2, 2) | PRISM_COMM_LANE(7, 0)), v);
     prism_set_comm_pins(0);
 
     /* ---- 1d. timer 2 as a retriggerable one-shot: the register takes the fields */

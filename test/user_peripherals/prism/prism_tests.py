@@ -6,7 +6,7 @@ from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge
 
 from user_peripherals.prism.regs import *
 from user_peripherals.prism.bench import PrismTest
-from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, Ws2812Slave, I2cSlave, I2cMaster
+from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, Ws2812Slave, I2cSlave, I2cMaster, QspiSlave, OneWireSlave
 from user_peripherals.prism.encoder import Encoder
 from user_peripherals.prism import usb_model as usb
 from user_peripherals.prism import eth_model as eth
@@ -21,6 +21,8 @@ from user_peripherals.prism.chroma_const_tab import *
 from user_peripherals.prism.chroma_i2c_master import *
 from user_peripherals.prism.chroma_i2c_slave import *
 from user_peripherals.prism.chroma_pio import *
+from user_peripherals.prism.chroma_spi_master import *
+from user_peripherals.prism.chroma_onewire import *
 from user_peripherals.prism.chroma_usb_ls import *
 from user_peripherals.prism.chroma_eth_tx import *
 from user_peripherals.prism.chroma_eth_rx import *
@@ -776,8 +778,8 @@ class PioTest(PrismTest):
         await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
         await tqv.write_word_reg(REG_CFG3, CFG3_SMP_EN | CFG3_SMP_SRC(4) | CFG3_SMP_RISE | CFG3_SMP_SHIFT | CFG3_SMP_CNT2)
         await tqv.write_byte_reg(REG_COMPARE, 2)
-        await tqv.write_word_reg(REG_COMM_PINS, COMM_PIN(1, 7) | COMM_PIN(2, 6))
-        assert await tqv.read_word_reg(REG_COMM_PINS) == COMM_PIN(1, 7) | COMM_PIN(2, 6)
+        await tqv.write_word_reg(REG_COMM_PINS, COMM_PINS((1, 7), (2, 6)))
+        assert await tqv.read_word_reg(REG_COMM_PINS) == COMM_PINS((1, 7), (2, 6))
 
         async def sample(nibbles):
             ''' One sample-clock pulse on ui_in[4] per nibble on ui_in[3:0] '''
@@ -882,6 +884,206 @@ class PioTest(PrismTest):
         await tqv.write_byte_reg(REG_HOST, 0)
         for k in range(5):
             dut.ui_in[k].value = 0
+
+
+# =============================================================================
+# SPI master (single / quad) Chroma unit test
+# =============================================================================
+class SpiMasterTest(PrismTest):
+    ''' Mode-0 SPI controller on the multi-bit shift: single lane (full
+        duplex, 8 SCLKs per byte) and quad (half duplex, 2 SCLKs per byte),
+        host_in[1] choosing the width per byte, FIFO B sent, FIFO A
+        received, COMPARE bytes read after the send with the K0 / K3 dummy,
+        host_in[0] framing CS.  A QspiSlave model resolves the lanes behind
+        the external buffers. '''
+    name = "spi_master Chroma (single / quad lanes)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        FRAME, QUAD = 1, 2
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        slave = self.start(QspiSlave(dut))
+        await bench.load_chroma(chroma_spi_master, chroma_spi_master_ctrlReg, chroma_spi_master_pinmuxReg)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)          # FIFO B: the bytes to send
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+        await tqv.write_word_reg(REG_CONST, 0xA5000000 | 0xFF)                # K3 = quad dummy, K0 = 0xFF
+        HALF = 4
+        await tqv.write_word_reg(REG_PRELOAD, HALF - 1)
+
+        async def single_mode():
+            await tqv.write_word_reg(REG_CFG0, (chroma_spi_master_ctrlReg & ~3) | 2)   # MISO = IO1 on ui_in[2]
+            await tqv.write_word_reg(REG_COMM_PINS, COMM_PINS((4, 7)))                  # IO0 = comm[7]
+            slave.quad = False
+
+        async def quad_mode():
+            await tqv.write_word_reg(REG_CFG0, (chroma_spi_master_ctrlReg & ~3) | 1)   # IO0..3 on ui_in[4:1]
+            await tqv.write_word_reg(REG_COMM_PINS, COMM_PINS((4, 4), (5, 5), (6, 6), (7, 7)))
+            slave.quad = True
+
+        async def fifo_a():
+            got = []
+            for _ in range((await tqv.read_word_reg(REG_FIFO_ST) >> 8) & 0x1F):
+                got.append(await tqv.read_byte_reg(REG_FIFO))
+            return got
+
+        async def frame(tx, nread, width, clocks):
+            ''' One CS frame: push `tx`, ask for `nread` more bytes, run, end; the bytes received '''
+            slave.rx.clear(); slave.events.clear()
+            for b in tx:
+                await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+            await tqv.write_byte_reg(REG_COMPARE, nread)
+            await tqv.write_byte_reg(REG_HOST, FRAME | width)
+            await self.clocks(clocks)
+            assert await bench.curr_state() == 4, await bench.curr_state()    # NEXT2: waiting for the host
+            await tqv.write_byte_reg(REG_HOST, width)                         # end the frame
+            await self.clocks(HALF * 2 + 20)
+            assert await bench.irq() and await bench.curr_state() == 0
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            assert slave.events == ['cs_low', 'cs_high'], slave.events
+            return await fifo_a()
+
+        self.log("single lane, full duplex: 4 bytes out, 4 back")
+        await single_mode()
+        slave.tx = [0xEF, 0x40, 0x18, 0xC2]
+        got = await frame([0x9F, 0x00, 0x00, 0x00], 0, 0, 4 * 8 * 2 * HALF + 200)
+        assert slave.rx == [0x9F, 0x00, 0x00, 0x00], [hex(v) for v in slave.rx]
+        assert got == [0xEF, 0x40, 0x18, 0xC2], [hex(v) for v in got]
+        assert slave.sclks == 32, slave.sclks
+
+        self.log("single lane: a command byte, then 3 bytes read with the 0xFF dummy")
+        slave.tx = [0x00, 0x11, 0x22, 0x33]
+        got = await frame([0x05], 3, 0, 4 * 8 * 2 * HALF + 200)
+        assert slave.rx == [0x05, 0xFF, 0xFF, 0xFF], [hex(v) for v in slave.rx]
+        assert got == [0x00, 0x11, 0x22, 0x33], [hex(v) for v in got]
+        assert await tqv.read_byte_reg(REG_COUNT2) == 3
+
+        self.log("quad: 2 bytes out on four lanes (nothing kept), 3 bytes read")
+        await quad_mode()
+        slave.tx = [0x5A, 0xC3, 0x0F]
+        got = await frame([0xA5, 0x3C], 3, QUAD, 5 * 2 * 2 * HALF + 200)
+        assert slave.rx == [0xA5, 0x3C], [hex(v) for v in slave.rx]
+        assert got == [0x5A, 0xC3, 0x0F], [hex(v) for v in got]
+        assert slave.sclks == 10, slave.sclks                                  # 2 SCLKs per byte
+
+        self.log("mixed frame: single-lane command, then quad data")
+        await single_mode()
+        slave.rx.clear(); slave.events.clear()
+        slave.tx = [0xFF] * 8
+        for b in (0x6B,):
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        await tqv.write_byte_reg(REG_COMPARE, 0)
+        await tqv.write_byte_reg(REG_HOST, FRAME)                              # single width
+        await self.clocks(8 * 2 * HALF + 60)
+        assert await bench.curr_state() == 4 and slave.rx == [0x6B]
+        await quad_mode()                                                      # switch width mid-frame ...
+        await tqv.write_byte_reg(REG_HOST, FRAME | QUAD)                       # ... before pushing: a byte
+        slave.tx = [0x12, 0x34]                                                # goes out as soon as it lands
+        slave.prime()
+        for b in (0x00, 0x10):                                                 # a 2-byte "address"
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        await tqv.write_byte_reg(REG_COMPARE, 2)                               # the read count after the pushes:
+                                                                               # with FIFO B empty it would read at once
+        await self.clocks(4 * 2 * 2 * HALF + 100)
+        assert await bench.curr_state() == 4
+        await tqv.write_byte_reg(REG_HOST, QUAD)
+        await self.clocks(HALF * 2 + 20)
+        assert await bench.irq() and await bench.curr_state() == 0
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        assert slave.rx == [0x6B, 0x00, 0x10], [hex(v) for v in slave.rx]
+        assert await fifo_a() == [0xFF, 0x12, 0x34]                            # the command's full-duplex byte, then the read
+        assert slave.events == ['cs_low', 'cs_high']
+
+        await bench.disable()
+        for reg, v in ((REG_COMM_PINS, 0), (REG_CONST, 0), (REG_CFG0 + SHARD1, 0), (REG_FIFO_ST, 0), (REG_FIFO_ST + SHARD1, 0)):
+            await tqv.write_word_reg(reg, v)
+        await tqv.write_byte_reg(REG_COMPARE, 0)
+        await tqv.write_byte_reg(REG_HOST, 0)
+        for k in range(1, 5):
+            dut.ui_in[k].value = 0
+
+
+# =============================================================================
+# 1-Wire master Chroma unit test
+# =============================================================================
+class OneWireTest(PrismTest):
+    ''' 1-Wire controller: reset and presence (timer 2 restarted on entry
+        into RESET_LOW, presence latched into FLAGS[7]), bytes written from
+        FIFO B LSB first with 1 / 12-unit low slots, bytes read into FIFO A
+        while host_in[1] is set (DQ sampled 2 units into the slot), a device
+        that is absent.  A OneWireSlave model plays a DS18B20-like device. '''
+    name = "onewire Chroma (1-Wire master)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        U = 8                                                                 # clocks per unit
+        ROM = [0x28, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0xC7]
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        slave = self.start(OneWireSlave(dut, unit=U))
+        slave.responses = {0x33: ROM}
+        await bench.load_chroma(chroma_onewire, chroma_onewire_ctrlReg, chroma_onewire_pinmuxReg)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)          # FIFO B: bytes to write
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+        await tqv.write_word_reg(REG_PRELOAD, U - 1)                          # count1 unit
+        await tqv.write_byte_reg(REG_COMPARE, 12)                             # 12 units = a slot
+        await tqv.write_word_reg(REG_PRELOAD2, (96 * U - 1) | T2_RELOAD | T2_STATE(1))   # 96-unit reset, restarted in RESET_LOW
+        await tqv.write_word_reg(REG_CONST, 0)                                # K0 = 0
+        SLOT = 14 * U
+
+        async def fifo_a():
+            got = []
+            for _ in range((await tqv.read_word_reg(REG_FIFO_ST) >> 8) & 0x1F):
+                got.append(await tqv.read_byte_reg(REG_FIFO))
+            return got
+
+        self.log("reset and presence")
+        await tqv.write_byte_reg(REG_HOST, 0x01)                              # session
+        await self.clocks(2 * 96 * U + 100)
+        assert await bench.irq() and await bench.curr_state() in (4, 5)
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        assert (await tqv.read_word_reg(REG_FLAGS)) & (1 << 7), hex(await tqv.read_word_reg(REG_FLAGS))   # presence
+        assert slave.resets == 1
+
+        self.log("write 4 bytes")
+        data = [0xCC, 0x4E, 0x12, 0x34]
+        for b in data:
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        await self.clocks(4 * 8 * SLOT + 200)
+        assert slave.rx == data, [hex(v) for v in slave.rx]
+        assert await bench.curr_state() in (4, 5)
+
+        self.log("READ ROM: a command byte, then 8 bytes read while host_in[1] is set")
+        slave.rx.clear()
+        await tqv.write_byte_reg(REG_FIFO + SHARD1, 0x33)
+        await tqv.write_byte_reg(REG_HOST, 0x03)                              # read after the write
+        for _ in range(200):
+            if (await tqv.read_word_reg(REG_FIFO_ST) >> 8) & 0x1F >= 8:
+                break
+            await self.clocks(SLOT)
+        await tqv.write_byte_reg(REG_HOST, 0x01)                              # stop reading
+        await self.clocks(9 * SLOT)
+        got = await fifo_a()
+        assert got[:8] == ROM and slave.rx[0] == 0x33, ([hex(v) for v in got], slave.rx)
+        assert all(v == 0xFF for v in got[8:] + slave.rx[1:])                 # slots after the ROM: 1s both ways
+
+        self.log("end of session, then a session with no device")
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        await self.clocks(20)
+        assert await bench.curr_state() == 0
+        slave.present = False
+        await tqv.write_byte_reg(REG_HOST, 0x01)
+        await self.clocks(2 * 96 * U + 100)
+        assert await bench.irq() and slave.resets == 2
+        assert not (await tqv.read_word_reg(REG_FLAGS)) & (1 << 7)
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+
+        await bench.disable()
+        for reg, v in ((REG_PRELOAD2, 0), (REG_CFG0 + SHARD1, 0), (REG_FIFO_ST, 0), (REG_FIFO_ST + SHARD1, 0), (REG_PRELOAD, 0)):
+            await tqv.write_word_reg(reg, v)
+        await tqv.write_byte_reg(REG_COMPARE, 0)
+        dut.ui_in[0].value = 0
 
 
 # =============================================================================
@@ -1520,7 +1722,9 @@ class EthernetRxTest(PrismTest):
         the eth_rx chroma assembling bytes into the SRAM FIFO, the host
         checking the bytes and the CRC32 residue.  A link pulse first (no
         frame), a 64-byte frame, a 300-byte frame from a line 8% slower than
-        the clock, a frame with a bad FCS. '''
+        the clock, a frame with a bad FCS.  Then double-edge sampling
+        (CFG3[9], half clocks per half bit): a 12% slow frame at 64 MHz, and
+        a 50 MHz clock (2.5 clocks per half bit, hb = 5) with a slow line. '''
     name = "ethernet rx"
 
     async def run(self):
@@ -1540,8 +1744,8 @@ class EthernetRxTest(PrismTest):
         enc = eth.EthEncoder(self.dut, BIT, rxd=PIN)
         await enc.idle(BIT * 4)
 
-        async def receive(payload, fcs=None, stretch=0):
-            e = eth.EthEncoder(self.dut, BIT, rxd=PIN, stretch=stretch)
+        async def receive(payload, fcs=None, stretch=0, bit=BIT):
+            e = eth.EthEncoder(self.dut, bit, rxd=PIN, stretch=stretch)
             await e.frame(payload, fcs=fcs)
             await self.clocks(BIT * 4)
             assert await bench.irq(), "no end-of-frame interrupt"
@@ -1577,6 +1781,21 @@ class EthernetRxTest(PrismTest):
         bad[1] ^= 0x10
         flags, crc = await receive(payload, fcs=bad)
         assert not (flags & FLAG_CRC_OK), f"crc_ok set on a bad FCS, CRC = {crc:#x}"
+
+        self.log("double-edge sampling: 6 half clocks per half bit, 300-byte frame 12% slow")
+        await tqv.write_word_reg(REG_CFG3, PIN | (1 << 3) | (BIT << 4) | (1 << 8) | CFG3_MRX_DDR)
+        payload = [(i * 13 + 5) & 0xFF for i in range(300)]
+        flags, crc = await receive(payload, stretch=4)
+        assert flags & FLAG_CRC_OK, f"crc_ok clear, CRC = {crc:#x}"
+
+        self.log("double-edge sampling at a 50 MHz clock: 2.5 clocks per half bit, hb = 5, line 8% slow")
+        await tqv.write_word_reg(REG_CFG3, PIN | (1 << 3) | (5 << 4) | (1 << 8) | CFG3_MRX_DDR)
+        await tqv.write_word_reg(REG_PRELOAD, 10)                             # idle: two 5-clock bit times
+        payload = [(i * 3 + 7) & 0xFF for i in range(200)]
+        flags, crc = await receive(payload, bit=5.4)                          # 2.7 clocks per half bit: 2, 3, 3, ...
+        assert flags & FLAG_CRC_OK, f"crc_ok clear, CRC = {crc:#x}"
+        flags, crc = await receive(payload[:60], bit=5)
+        assert flags & FLAG_CRC_OK, f"crc_ok clear, CRC = {crc:#x}"
         await bench.disable()
 
 
