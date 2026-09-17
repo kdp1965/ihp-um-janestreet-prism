@@ -190,10 +190,10 @@ registers only:
 | +0x30 | CRC expected |
 | +0x34 | CFG2: input slot selects for inputs 16-19 and 28-31 (4 bits each), section 4h |
 | +0x38 | CONST: K0..K3 (K3 also the comm match value), section 4h |
-| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p |
+| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p |
 | +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
 | +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
-| +0x50 | COMM_PINS: multi-bit shift lanes, section 4r: with CFG0[2] a uo_out pin whose pinmux code is 6 shows comm bit [3(k-1)+2:3(k-1)] for uo_out[k] |
+| +0x50 | COMM_PINS: multi-bit shift lanes, section 4r: [2:0] window base b (comm[b+3:b], b = 0-4), [2k+5:2k+4] the window lane uo_out[k+1] shows when its pinmux code is 6 and CFG0[2] is set |
 | +0x4C | CONST_TAB: the 16x8 latch FIFO as addressable constants, section 4n: [0] enable (OUT_COMM_LOAD loads the row at the 4-bit index; {OUT_K_SEL1, OUT_K_SEL0} = how the index moves on each load: 0 clear, 1 + 1, 2 + add_to_idx [10:8], 3 = idx_load [7:4], or + idx_load with [1]), [2] post (the row before the move; default after), [19:16] the index (a write sets it, reads back live) |
 | +0x48 | TRACE_CTRL: write [0] arm (flushes the SRAM FIFO), [1] stop; read [0] armed, [1] running, [2] done, [3] big, [4] active.  Entry (16 bits) = [4:0] SI, [10:5] LUT mux inputs, [11] tree 0 matched, [12] tree 1 taken, [13] executing; the traced SRAM's FIFO then serves the entries as bytes through +0x20 of the window that reads that SRAM (count = FIFO bytes / 2) |
 | +0x4C-0x7C | spare |
@@ -780,6 +780,41 @@ PRISM with the two SRAM FIFOs.  Still to do: the FPGA / board level
 filtering (software or the CONST table), and the 16 ms link pulses (a
 second timer, finding 3 of 4j).
 
+### 4k.1 Double-edge sampling (2026-09-17)
+
+CFG3[9] samples the receive pin on both clock edges: a falling-edge flop
+on the raw pin, then a two-flop synchroniser for each of the two samples
+so their order into the recoverer is fixed whatever CFG0's input sync
+setting, and `prism_mrx` processes the two samples of a clock one after
+the other with the blanking interval counted in half clocks.  [7:4] then
+holds half clocks per half bit: 6 at 64 MHz, 5 at 50 MHz.  Nothing
+downstream changes; bits still reach the FSM one per bit time.  The gain
+is edge resolution, 7.8 ns instead of 15.6 ns at 64 MHz, which doubles
+the tight side of the recoverer's margin (the bit-boundary edge has to
+fall inside the blanking window, the next mid-bit edge outside it):
+
+| Sampling                                  | Boundary-edge margin | Mid-bit-edge margin |
+|-------------------------------------------|----------------------|---------------------|
+| 64 MHz single edge, hb = 3                | 12.5 ns              | 22 ns               |
+| 64 MHz both edges, hb = 6                 | 20 ns                | 22 ns               |
+| 50 MHz single edge, hb = 2                | 10 ns                | 20 ns               |
+| 50 MHz both edges, hb = 5                 | 20 ns                | 20 ns               |
+
+The 50 MHz rows are the reason beyond margin: if silicon timing forces
+a slower tile clock, 10BASE-T receive keeps working with real margin.
+Cost: five flops per shard and one falling-edge flop on the clock (the
+TinyQV top already has one for its reset synchroniser).  Tested in
+`test_ethernet_rx`: a 300-byte frame from a line 12% slow at 6 half
+clocks per half bit, then a 50 MHz clock emulated by 2.5 clocks per
+half bit (the encoder alternates 2 and 3) with an 8% slow line.
+
+A 125 MHz sampling clock from an all-digital PLL locked to a PHY's
+25 MHz reference would give the same resolution; it was evaluated the
+same day and kept as a separate experiment (a hand-placed ring
+oscillator macro built like the DFFRAM / CFGMEM flow), since the ring
+of the sky130 design it would start from is sized for that library and
+its output could only clock a sampler, never the FSM.
+
 ## 4l. The second timer: PRELOAD2 (2026-09-14)
 
 A free-running 24-bit timer per shard (`PRELOAD2` at +0x40): it reloads
@@ -1192,9 +1227,11 @@ the top.  The shift count advances by the width, so shift_term still
 marks the byte boundary for widths of 1, 2 and 4, and a load that
 "counts one" (comm_load_one) counts the width instead, so a popped byte
 counts as its first group.  For outputs a second register, COMM_PINS at
-+0x50, names a comm bit for every uo_out pin (3 bits per pin), and while
-CFG0[2] is set a pin whose pinmux code is 6 (the shifter bit) shows that
-comm bit instead of the serial one: two lanes on comm[7:6] play a byte
++0x50, names a 4-bit window of comm ([2:0] = its base, comm[base+3:base])
+and a lane of that window for every uo_out pin (2 bits per pin), and
+while CFG0[2] is set a pin whose pinmux code is 6 (the shifter bit) shows
+that lane instead of the serial one (the window replaced seven 8:1 muxes
+of any comm bit on 2026-09-17, section 4x.1): two lanes on comm[7:6] play a byte
 as four pairs, four lanes on comm[7:4] as two nibbles, or from the low
 end with LSB first.  The sampler's shift action is width-aware too, so
 an external clock can sample four pins at once.  Not covered: the wide
@@ -1236,6 +1273,451 @@ std-cell area 436.6k um2 (+9k, 1005 cells).  If the routing margin is
 ever needed back, the lane mux is the place to trim: a 4-lane window
 (comm[7:4] or [3:0], one bit) with a 2-bit lane pick per pin would cut
 the comm fan-out from 7 x 8 to 4 x 2 + 7 x 4 mux inputs.
+
+## 4s. SPI master chroma, single or quad lane (2026-09-17)
+
+`chromas/chroma_spi_master.v`: a mode-0 SPI controller on the multi-bit
+shift for a board with external tri-state buffers on the four IO lanes.
+Pins: SCLK on uo_out[1] (pin_out[0]), CS_N on uo_out[2] (cond_out[0],
+idle high), OE on uo_out[3] (pin_out[1]: 1 = the buffers drive IO0..IO3
+from the comm lanes on uo_out[7:4] through COMM_PINS), and the lane
+levels back on ui_in[4:1] (IO1 is MISO in single mode).  The width is a
+per-state constant on {OUT_K_SEL1, OUT_K_SEL0}, so the chroma has one
+pair of clock states per width for sending and one for reading, and
+host_in[1] picks single (0) or quad (1) for every byte, so a flash-style
+frame - single-lane command, quad address and data - is one CS frame
+with the host switching the width between bytes.  Single mode is full
+duplex (every byte sent brings one back into FIFO A), quad is half
+duplex (only the read phase is kept).
+
+Host protocol: FIFO B (shard 1's window, TX) holds the bytes to send,
+COMPARE the number of bytes to read once FIFO B drains (the byte sent
+meanwhile is K0 in single mode, 0xFF for a flash, and K3 in quad mode
+where the lanes are released; count2 counts them), host_in[0] asserts
+CS and runs the frame and clearing it ends the frame with a CS hold and
+the host interrupt.  Per width the host also sets CFG0 shift_in_sel (2
+= MISO on ui_in[2] for single, 1 = IO0..IO3 on ui_in[4:1] for quad) and
+COMM_PINS (single: uo_out[4] <- comm[7]; quad: uo_out[4+k] <- comm[4+k]).
+PRELOAD is half the SCLK period minus one, 0 giving 32 MHz at 64 MHz.
+Two ordering rules follow from the FSM acting the moment it can: set the
+width before pushing a byte (a byte goes out as soon as it lands in FIFO
+B), and set COMPARE after the pushes (or before asserting the frame),
+since with FIFO B empty a non-zero COMPARE starts the read phase at once.
+
+The byte boundary comes from comm_load_one: a pop or K load counts the
+first bit or nibble, so shift_term marks the last unit of a byte in
+both widths and the shift that completes it is taken on the transition
+into BYTE_END, where comm holds the byte received.  Sixteen states
+(IDLE, START, NEXT_A/B, NEXT2, RX_D, TX_LOW/HIGH x 2 widths, RX_LOW/HIGH
+x 2 widths, BYTE_END, END), every wait state entered by an explicit
+jump.  The K-load overlap of section 4r shows up here on purpose: the
+quad dummy byte is K3 because its K index is also the width.
+
+Test: `test_spi_master` with the `QspiSlave` model in `models.py`
+(resolves the four IO levels every clock from OE and its own drive;
+single mode drives MISO on every falling edge, quad mode drives all
+four lanes on read-phase falling edges only, i.e. edges where OE was
+already low): a 4-byte full-duplex single frame (32 SCLKs), a command
+plus three 0xFF-dummy reads, a quad frame of two bytes out and three
+in (10 SCLKs), and a mixed frame of a single-lane command followed by a
+quad address and read.
+
+## 4t. 1-Wire master chroma (2026-09-17)
+
+`chromas/chroma_onewire.v`: a Dallas / Maxim 1-Wire controller through
+one external open-drain buffer: cond_out[0] on uo_out[1] pulls DQ low
+(1 = low) and the line level comes back on ui_in[0], the shifter input.
+Bits go LSB first (SHIFT_DIR = 1).  1-Wire needs five different
+durations at standard speed and the chroma gets them from two timers:
+count1 is one unit u of 5.5 us (PRELOAD 351 at 64 MHz) and count2 counts
+units against COMPARE = 12, so 12u = 66 us is the write-0 low, the slot
+length and the presence sample point, single units come from state
+sequencing (write-1 low 1u, read low 1u then the DQ sample by the shift
+at 2u = 11 us), and timer 2 makes the 480 us reset: PRELOAD2 = 480 us
+with restart on entry into RESET_LOW (T2_RELOAD | T2_STATE(1), not
+one-shot), so its first tick ends the reset low and its second tick,
+480 us after the release, ends the presence window with the host
+interrupt.  Presence is a data-dependent cond_out[1] (1 when DQ is low)
+stored by OUT_LATCH at the 66 us sample, so the host reads it in
+FLAGS[7] (latched_in[1]) after the interrupt.
+
+Host protocol: host_in[0] = 1 opens a session (reset, presence,
+interrupt), then bytes pushed into FIFO B (shard 1's window, TX) are
+written as they arrive; while host_in[1] is set and FIFO B is empty,
+bytes are read into FIFO A (own, RX) until host_in[1] drops, so the host
+writes the command, sets host_in[1], polls FIFO A's count and clears
+host_in[1] when it has what it wants (a slot or two more may be read;
+they return 0xFF from an idle device); host_in[0] = 0 ends the session.
+CONST K0 = 0 seeds comm for a read byte (comm_load_k with comm_load_one,
+so the K load counts the first bit and shift_term marks bit 7 before
+its sample, the transition that takes the byte into RD_LAST and then
+FIFO A).  For writes the byte boundary is the same shift_term checked
+after the slot in BIT_END.  Sixteen states: IDLE, RESET_LOW, PRES_WAIT,
+PRES_END, the LOOP_A / LOOP_B ping-pong (A: pop -> write, host_in[1] ->
+read, INC to B; B: !host_in[0] -> IDLE, no-match back to A), BIT_DISP,
+W1_LOW, W0_LOW, W_REC, W_REST, BIT_END, RD_LOW, RD_REL, RD_REST,
+RD_LAST.  No RTL change.
+
+Test: `test_onewire` with the `OneWireSlave` model in `models.py`
+(a DS18B20-like device: a master low of 40+ units is a reset answered
+with a presence pulse, every other master falling edge starts a slot
+that is a write slot sampled 5 units in, or a read slot where the
+device holds 0 bits low for 4 units while it has reply bits queued by a
+received command byte found in its `responses` table).  Phases at 8
+clocks per unit: reset + presence flag, four bytes written, READ ROM
+(0x33) followed by the 8-byte ROM read into FIFO A, and a session with
+the device absent (presence flag 0).
+
+## 4u. Registered debug readback (2026-09-17)
+
+Harden run 18 (the double-edge sampling RTL) routed and passed DRC and
+LVS but failed the setup checker by 21 ps at the typical corner on one
+path: shard 0's comm[7] through three fanout buffers with 0.9 ns slews,
+the comm == K3 comparator, the input slot mux, a 17-load select and the
+register readback mux tree into TinyQV's read-data flop, 14.63 ns.  Run
+17's worst path (+0.75 ns) was the same family, the state register into
+the readback tree.  The debugger's live words are the only register reads
+with deep logic in front of them: REG_IN_DATA (the slot muxes and
+comparators), REG_OUT_DATA and REG_STEW0 (the STEW read), REG_STATUS
+(next_si, the jump logic) and REG_DECISION (the LUT inputs and results).
+
+REG_IN_DATA, REG_OUT_DATA, REG_STATUS and REG_DECISION are now
+registered copies in `prism.v`, one clock old, which the host cannot
+tell: a CPU read takes several clocks, and while halted nothing moves.
+95 flops.  The path family is gone rather than re-rolled by the next
+placement, and the fanout tree on comm[7], which the resizer built with
+17 loads per buffer against the max-fanout constraint of 8, is no longer
+on a critical path.
+
+Run 19 registered the STEW word too (128 more flops) and stalled in
+detailed routing at about 430 violations from iteration 23 to 55, with
+the shorts at the west ends of the two middle right CFGMEM macros' pin
+rows.  The cause was placement: 112 of the 223 new flops landed in the
+region just west of the right macro column, through which every net to
+those macros' pins passes, and its utilisation went from 41% in runs 17
+and 18 to 48%.  The STEW register, 51 of those flops and not the path
+that failed, was dropped again for run 20; its read path had 0.75 ns of
+margin in run 17.
+
+**Reverted (2026-09-17).**  The registered readback never produced a
+converging placement on the Mac (runs 19-21) and the register-off draw of
+2026-09-16 was the best seed-55 sample, so prism.v is back to the
+combinational readback of run 18.  The one-clock-old note in regs.py went
+with it.
+
+## 4v. Watching and stopping a detailed route (2026-09-17)
+
+Run 19 sat between 430 and 480 violations from iteration 23 to the
+iteration limit, three minutes an iteration, with nothing to read until
+the router gave up: TritonRoute only writes its DRC report at the end.
+The flow now asks for one every four iterations (`DRT_SAVE_DRC_REPORT_ITERS`
+in `src/config.json`, OpenROAD's `-drc_report_iter_step`), and
+`tools/drt_status.py <run>` (or `make drt-status`) prints the violation
+count per iteration from the step log, the counts by layer and type from
+the newest report, the densest 30 um bins of the tile with their layers,
+and the nets that appear most, which is what decides whether the cluster
+is a pin-access pocket, a channel, or a diode crowd.  `--stop` (`make
+harden-stop`) then kills that step's openroad process, so a run that is
+not going to make it ends now with the report on disk instead of two
+hours later.  The tool also reads a finished run's final report.
+
+## 4w. Placement seed sweep (2026-09-17)
+
+Runs 17 to 20 carried nearly the same netlist and their global-routing
+Metal3 usage ranged from 77% to 89%, with the routing tail going from 38
+iterations to a stall.  The placer is deterministic but chaotic: a few
+hundred cells of change tip it into a different local minimum.  Rather
+than suffer that, exploit it.  `make seed-sweep SEEDS="53 54 56 57"`
+runs the flow once per target density only up to global routing (about
+40 minutes each, `tools/seed_sweep.py`), `make seed-report` ranks every
+`runs/seed_*` (and `runs/wokwi`) by the step-40 Metal3 overflow, and
+`make seed-finish SEED=54` resumes the winner from CheckAntennas and
+renames it to `runs/wokwi`.  The sweep stops early: the first seed that
+passes is finished at once and the remaining seeds are skipped; if none
+qualifies the best one is finished at the end.
+
+Global-routing usage turned out not to be the gate.  Runs 20 and 21
+(seed 55, 77% and 82% Metal3) both stalled in the same 30 um bin east of
+the left CFGMEM column, at 633 and 984 violations there by iteration 4,
+while a four-iteration replay of run 17's routing showed the same bin as
+its hottest too, at 230, and run 17 converged.  So each seed now also
+routes `DRT_ITERS` (4) iterations with a report every two, its score is
+the hottest 30 um bin of that report, and it passes when that bin is at
+or under `ACCEPT_BIN` (300) and Metal3 usage at or under `ACCEPT` (85%,
+run 17's level).  Seeds run `PARALLEL` (2) at a time with the router
+threads shared, about forty minutes a pair, and the winner resumes from
+the routing step at the full iteration count.  Step 40 is the comparable number: the
+second global-routing pass in the log is the re-route after diode
+insertion.  At step 40 the runs so far read 84.9% / 9,235 (17), 88.1% /
+12,402 (18), 84.5% / 9,298 (19) and 77.0% / 5,984 (20).
+
+## 4x. Heuristic antenna diodes off (2026-09-17)
+
+Run 20 had the best global routing of the series (Metal3 77%) and still
+stalled in detailed routing, in one 90 x 90 um pocket at the east end of
+the left CFGMEM column's pin rows: 477 cells at 55% utilisation where
+runs 17 and 19 had 36-38%, and 198 of them antenna diodes on the loads
+of the fanout trees and WROW lines there.  The heuristic inserter
+(`RUN_HEURISTIC_DIODE_INSERTION`, 200 um threshold) was putting about
+12,500 diodes in the tile, a third of all cells and 15% of the
+standard-cell area, while the rule-based repair that follows it found
+only five or six real violations and run 17's final antenna check
+passed.  The heuristic step is now off; `RUN_ANTENNA_REPAIR` (OpenROAD's
+repair in the global-routing loop) and the detailed router's antenna
+passes stay.  The final antenna check is the guard: if it reports
+violations the rule-based repair alone is not enough and the threshold
+comes back at a higher value.
+
+### 4x.1 The comm window mux, and diodes on the SRAM pins (2026-09-17)
+
+The stuck routing pocket of runs 20 and 21 was fan-out: every comm bit
+drove about 22 gates, seven of them the COMM_PINS lane muxes, one 8:1
+per uo_out pin, and their fanout-buffer trees exhausted the Metal2 pin
+access in one corner.  COMM_PINS is now a 4-bit window plus a lane per
+pin: [2:0] the window base (comm[base+3:base], base 0-4), [2k+5:2k+4]
+the lane for uo_out[k+1].  Four 5:1 window muxes are shared by the seven
+pins, each of which picks one of the four lanes, so a comm bit feeds at
+most four muxes instead of seven.  Every use so far fits a window: the
+quad lanes are comm[7:4], the single MOSI comm[7] is window 4 lane 3,
+the PIO pairs are comm[7:6], LSB-first lanes are window 0.  SDK:
+PRISM_COMM_BASE(b) | PRISM_COMM_LANE(uo, lane); test helper
+COMM_PINS((uo, bit), ...) derives the window from the bits and asserts
+they fit.
+
+Two flow changes went in with it.  Every standard cell is now padded by
+one site per side in detailed placement (the exclusion list keeps only
+the macros), which is the pin-access remedy the heuristic diodes had
+been getting alone.  And because the IHP SRAM LEF carries no antenna
+data, so the rule-based check cannot see its input nets, a project step
+(`Project.DiodesOnSramPins`, before the first global routing) puts one diode on
+every SRAM signal input pin, 156 per macro, and legalises them with a
+detailed-placement pass.  It runs just before the first global routing
+(after the post-CTS timing repair), so that one routing pass covers the
+diodes and, unlike the port-diode step, it needs no global-routing pass
+of its own; the antenna repair later re-routes only the nets it touches.
+
+## 4y. Running the Tiny Tapeout precheck locally (2026-09-17)
+
+Nothing in the harden had ever run the precheck; the GDS action would
+have been its first look at the tile.  `make precheck RUN_DIR=runs/<run>`
+runs it on a finished run's GDS the way the action does: layers, pins
+against the 8x4 template, boundary, power pins, the KLayout DRC and its
+zero-area and pin-label checks.  Two details of the tool: it reads
+info.yaml from the GDS's directory (the target copies it there) and it
+resolves its scripts and the template relative to `tt/precheck`, so it
+must run from that directory, otherwise the pin, zero-area and pin-label
+checks fail on missing files rather than on the layout.
+
+The first real finding was the layer check: the tile carries DigiBnd
+(16/0) and SRAM.drawing (25/0) from the IHP SRAM GDS, and our fork of
+tt-support-tools (branch cmos-8x4) did not whitelist them.  Upstream main
+whitelists them by name, but only in the sg13g2 list, and the cmos5l lyp
+has no names for those layers, so our fork now lists them numerically,
+which the check accepts.  The same two tuples are what the cmos5l branch
+upstream needs.
+
+## 4z. Macro metal, pin moves, and where to harden (2026-09-17)
+
+Three questions came up while the placement lottery kept stalling at the
+CFGMEM gap mouths; the measured answers are recorded here.
+
+**Can the tile route on Metal1 inside the macros?**  No, and not because of
+the macro: the PDK's LibreLane config sets RT_MIN_LAYER to Metal2, so neither
+the tile nor the macro's own build ever lays signal wire on Metal1 (the
+macro's routed DEF has 0 um of Metal1 signal wire; Metal1 is cell-internal
+shapes and pins).  What the abstract LEF exposes is a separate matter:
+Magic's abstract writes one bounding-box obstruction per layer, and
+DFFRAM.WriteAbstractLEF rewrites only the layers listed in
+LEF_ROUTE_THROUGH_LAYERS (Metal3 until now) to the drawn geometry.  So the
+LEF said "all Metal2 taken" while the macro's own router uses 25% of its
+Metal2 tracks (14.8 of 60 mm) and 25% of Metal3 (16.8 of 68.6 mm).
+
+**Re-pinned macros.**  The eight Do0 pins nearest the tile-facing side face
+(and EN0/A0/BYP on the LEFT variant) moved from the south face to that side
+face, next to WE0/WROW (DFFRAM.librelane models/*/pin_order.cfg).  Both
+macros rebuild clean.  Two draws of seed 55 with the same config:
+
+| re-pinned macros, seed 55 | passes 0..4 | pass-4 violations | hottest 30 um bin |
+|---|---|---|---|
+| Mac (run exp_pins) | 48632 30873 28067 15300 11562 | 11562 | 613 |
+| bowser (run exp_pins) | 39205 23321 21040 7548 4376 | 4376 | 341 |
+| reference run 20, old macros, Mac | 42219 24786 22513 8814 5682 | 5682 | 668 |
+
+Opposite verdicts from one config: the spread between machines (below) is
+the lottery, not the pins.  Not adopted; the products are uncommitted.
+
+**Readback registers off** (run exp_noreg, Mac, seed 55, old macros,
+PRISM_NO_REG_READBACK): 39170 21336 18993 5390 3751, hottest bin 541, the
+best Mac draw of seed 55 and the hot spot moved to the right mouth.  One
+sample; suggestive that the registers of 4u cost more than they gave.
+
+**Metal2 route-through** (run exp_m2, bowser): tech.yml of the cmos5l
+platform in DFFRAM.librelane now lists [Metal2, Metal3]; the rebuilt macros
+carry about 10,900 Metal2 obstruction rectangles covering 17-18% of the
+macro, DRC and LVS clean.  Global routing on bowser: Metal2 76.8% and Metal3
+81.6% against 75.7% / 80.5% for the Metal3-only LEF of the same draw.
+Detailed routing on bowser, same draw as the bowser exp_pins row above:
+passes 39092 22103 20302 5858 3625, hottest bin 350 (x 1320-1350, y 480-510)
+against 4376 / 341 with the Metal3-only LEF.  17% fewer violations at pass 4,
+the same hot bin, and the violations still sit in the two mouths (x 800-900
+and 1300-1400), not inside the macros.  The Metal2 LEF perturbs the placement
+(25794 vs 25759 cells after the post-CTS repair), so part of the difference
+is draw noise; the sign is favourable and the change costs nothing (macros
+DRC and LVS clean), but one sample does not settle it.  Products staged in
+the session scratchpad and in bowser's ihp-um-janestreet-prism_m2 copy only;
+the design repo's macros/ still holds the re-pinned Metal3-only build.
+
+**First converged tile with the re-pinned macros (bowser, 2026-09-16 night).**
+The bowser exp_pins draw (seed 55, four-pass score 4376 / 341) was resumed
+with `--from OpenROAD.DetailedRouting -c DRT_THREADS=32`: the router
+converged to zero in under 64 passes (86 min wall; reports 2879, 1665, 546,
+395, 26, 15, 10, 8, 5, 5, 5 at passes 4..52, then clean), two antenna
+repair rounds re-routed clean, KLayout DRC 0, LVS 0, antenna 0, precheck
+passed on bowser.  Post-route STA: setup +0.52 ns typ / +1.25 fast /
+-7.07 slow (as always), hold +0.29 / +0.11 / +0.60, no hold violations.
+Two lessons on the way (the first corrected on 2026-09-17): the resume did
+not restart routing, it continued it.  `--from OpenROAD.DetailedRouting`
+takes the newest completed state of the run, and step 46 had finished
+cleanly with its 4-pass route, so step 47 started from that routed database
+(its first count was 4390, the end of the 4-pass run was 4376) with the
+router's pass schedule restarted.  The thread count is irrelevant to the
+result: on the Mac a 24-thread and a 16-thread route of the same input gave
+identical counts pass for pass.  What matters is that a restarted schedule
+on an already routed design keeps improving where a single long run
+freezes; LibreLane also pins the router's ordering seed (`-or_seed 42`).
+The recipe is therefore: route with DRT_OPT_ITERS capped so the step ends
+cleanly (a killed step leaves no database), then resume from
+DetailedRouting again to continue; and bowser's PDK copy needed the sibling ihp-sg13g2
+libs.tech tree because the cmos5l KLayout DRC deck includes sg13g2 rule
+files by relative path.  Products copied to runs/bowser_exp_pins/final on
+the Mac (gds, lef, def, nl, pnl, odb, metrics).  Not the baseline yet: the
+macro re-pin is still a single-draw result.
+
+### 4z.1 The fracture multicycle path was never applied (2026-09-17)
+
+Every STA step logged `[WARNING STA-0361] net
+'i_peripherals.i_prism.i_prism.cfg_fractured' not found` (32 times a run),
+so the two `set_multicycle_path -through` lines of base.sdc were dropped in
+every run so far.  Cause: cfg_fractured is a flop whose output is aliased
+by `fractured = (FRACTURABLE != 0) && cfg_fractured` with FRACTURABLE = 1,
+and after flattening Yosys keeps the alias one level up,
+`i_peripherals.i_prism.fractured`.  Verified with the flow's Yosys on a
+scratch copy: a `(* keep *)` on the register makes
+`i_peripherals.i_prism.i_prism.cfg_fractured` the surviving name, so the SDC
+applies unchanged; prism.v carries that attribute now (first run to use it
+is the one after wokwi_m2d53).  It never cost timing: in run 18 the
+tightest path through the net had +6.05 ns (typ) / +4.80 ns (fast) of slack
+timed as single-cycle, far from the worst path.
+
+### 4z.2 Data pins on Metal4 (2026-09-17)
+
+The tile has one horizontal routing layer (Metal3; Metal1 is below
+RT_MIN_LAYER) and two vertical ones, and global routing loads them Metal3
+87%, Metal2 82%, Metal4 40%.  The detailed router's stuck violations are
+Metal2 in the gap mouths, where every net reaching a macro's south-face pin
+needs a vertical Metal2 track.  The user's idea: put the data pins on
+Metal4, the under-used vertical layer, keeping clear of the power stripes
+that share it.
+
+Implementation (DFFRAM.librelane): step `DFFRAM.PinsToLayer`
+(scripts/odbpy/pins_to_layer.py) runs right after GeneratePDN and moves
+the bottom-edge shapes of the pins matching PINS_TO_LAYER_REGEX from
+IO_PIN_V_LAYER to Metal4, shifting any that would sit within 0.3 um of a
+Metal4 stripe or another pin to the nearest free track.  `dffram.py
+--pins-to-metal4 '^Do0\['` (make targets cfgmem16_cmos5l_m4 /
+left_cmos5l_m4) also raises the macro's RT_MAX_LAYER to Metal4 with a 90%
+GRT capacity cut on that layer, and adds Metal4 to the route-through
+layers so the pin-access stubs become obstructions.  Only the 24 Do0 pins
+still on the south face move (Di0 stays on Metal2, so Metal4 is not
+loaded by both groups); 4-5 per macro were shifted off stripes.  Both
+macros build clean; the abstract has 39 Metal4 pins and ~70 tiny Metal4
+obstructions (0% coverage).
+
+A/B on bowser, same netlist (reverted readback, keep attribute, Metal2
+route-through macros), seed 55, four passes, 8 threads:
+
+| bowser, seed 55 | passes 0..4 | pass-4 violations | hottest 30 um bin |
+|---|---|---|---|
+| exp_ref, Do0 pins on Metal2 | 43536 27568 24261 11534 7564 | 7564 | 680 (left mouth) |
+| exp_m4, Do0 pins on Metal4 | 40257 24406 22134 8012 4796 | 4796 | 362 (right mouth) |
+
+37% fewer violations at pass 4 and the hot bin nearly halved, the largest
+single-change gain measured so far; global-route usage is unchanged
+(Metal4 39%).  One draw, but a same-seed one.  Next: continue exp_m4 to
+convergence on bowser; if it converges, try Di0 on Metal4 as well, and
+adopt the macros for the Mac runs.
+
+### 4z.3 Run wokwi_m2d53: a clean Mac tile again (2026-09-17)
+
+Config: readback registers reverted (run 18 RTL), re-pinned macros with
+Metal2+Metal3 route-through, PL_TARGET_DENSITY_PCT 53, single seed, no
+sweep, DRT_THREADS 24.  Global route Metal2 81.6% / Metal3 87.3% / Metal4
+40.4%, 19828 cells after synthesis.  The first full route froze at eight
+Metal2 violations in the right mouth from pass 36 on; the fix was the
+continuation recipe: a second route capped at 32 passes (13 violations,
+database saved by the router before its antenna rounds), then a resume from
+that routed database with the pass schedule reset (state file pointing at
+drt-run-0/*.odb), which reached zero on its 40th pass.  Two antenna
+rounds clean, KLayout DRC 0, LVS 0, antenna 0, precheck passed.  STA:
+setup +0.49 ns typ / +1.13 fast / -7.34 slow, hold +0.29 / +0.09 / +0.62,
+no hold violations.  2.26 mm of signal wire at 63% utilisation.  Products
+in runs/wokwi_m2d53/final.  The fractured multicycle path is still dropped
+in this run (synthesised before the keep attribute of 4z.1); timing
+margins above do not depend on it.
+
+### 4z.4 The DRC deck path, and a vacuous DRC on bowser (2026-09-17)
+
+The CI failed on `KLAYOUT_DRC_RUNSET` pointing at an absolute Mac path.  The
+override exists because Tiny Tapeout's pinned ihp-sg13cmos5l snapshot ships a
+trimmed KLayout deck that executes no rules, while the IHP-Open-PDK dev
+branch's vendored copy is the full deck (333 rules on this tile).  Now:
+src/config.json (and the col2/band variants) say
+`pdk_dir::libs.tech/klayout/tech/drc/ihp-sg13cmos5l.drc`, which resolves
+anywhere; local entry points (flow.py, tools/seed_sweep.py, the Makefile's
+DRC_DECK) add `-c KLAYOUT_DRC_RUNSET=<dev deck>` through tools/drc_deck.py
+whenever $PDK_ROOT/ihp-open-pdk-dev/... (or LIBRELANE_DRC_DECK) exists.  Ad
+hoc command lines: `python -m librelane $(python3 tools/drc_deck.py) ...`.
+In the CI the PDK's own (trimmed) deck is used, as Tiny Tapeout intends; the
+real DRC is the local one plus the precheck.
+
+Consequence discovered on the way: bowser's runs had been using its copy of
+the snapshot deck, so the "KLayout DRC 0" of the bowser exp_pins tile was
+vacuous (0 rules executed).  The dev deck (with the sg13g2 rule files it
+includes by relative path) is now installed on bowser, every wrapper there
+passes the override, and the exp_pins GDS is being re-checked with it.
+
+**Runs are not reproducible across machines.**  Same Yosys 0.62 (same git
+sha, both built with clang 21.1.2 by nix), identical 3165 flops and latches,
+but ABC maps the combinational logic differently on Apple silicon and x86-64
+Linux (20222 vs 20112 cells): libc qsort ordering of equal keys, last-bit
+libm differences and FMA contraction change ABC's tie-breaks, and the placer
+diverges from there.  Within a machine the flow is deterministic.  Compare
+runs only within one machine, and finish a converging run where it started.
+
+**Where the submission GDS is built.**  The gds workflow runs
+kdp1965/tt-gds-action@ihp-cmos5l-fix on ubuntu-24.04 with
+`pip install librelane==3.0.0rc1` (the action's default) and hardens with
+`--dockerized`, i.e. the LibreLane 3.0.0rc1 Docker image on x86-64 Linux.
+A seed that converges on the Mac says nothing about that environment.
+bowser (48 cores, Docker 29, user in the docker group) can run the same
+image, and nix-built x86-64 binaries are deterministic across machines, so a
+sweep there in the CI image should predict CI exactly.  To do before relying
+on it: one run of the current flow (substituting steps, DiodesOnSramPins,
+ExtendPowerStripes) under the unpatched 3.0.0rc1 image, and a check that the
+detailed router gives the same answer at the runner's 4 threads.
+
+**bowser notes.**  Work dir /prj/kpettit/other/ihp (NFS from "peach", 7.6 TB
+free; the root disk with /scratch is 98% full).  Toolchain from the same
+patched LibreLane checkout via nix (the first build attempt had been killed
+by a stray pkill; the full rebuild takes about 25 minutes on 48 cores).  The
+PDK copy needs real files where the cmos5l tree symlinks into ihp-sg13g2
+(libs.ref/sg13cmos5l_sram, libs.tech/librelane/IHP_rcx_patterns.rules).  The
+merged config carries the Mac's absolute KLAYOUT_DRC_RUNSET path;
+/prj/kpettit/other/ihp/run_exp.sh rewrites it and launches a seed run
+(`REPO=... run_exp.sh TAG SEED DRT_ITERS THREADS`).  Global routing is
+single-threaded, so the machine's value is parallel seeds, not a faster
+single run (detailed routing: 18.8 min at 16 threads there vs 20.3 min at 8
+threads on the Mac for a harder draw).
 
 ## 5. FIFO storage, item 9: SRAM spike result
 
