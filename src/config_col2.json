@@ -267,7 +267,7 @@
   "FP_PDN_VSPACING": 3.52,
   "FP_PDN_VOFFSET": 6.15,
   "RUN_MAGIC_DRC": 0,
-  "KLAYOUT_DRC_RUNSET": "/Users/Ken2/projects/fossi/ihp-open-pdk-dev/ihp-sg13cmos5l/libs.tech/klayout/tech/drc/ihp-sg13cmos5l.drc",
+  "KLAYOUT_DRC_RUNSET": "pdk_dir::libs.tech/klayout/tech/drc/ihp-sg13cmos5l.drc",
   "//layout": "Two columns on the 44.96 um grid (regenerated CFGMEM rails at 11.44/17.06 + 44.96k, tile VOFFSET 6.15 so the SRAM flush left at 3.36 has its columns on the stripes): LEFT16 at -2.41 + 44.96*12 = 537.11 (117 um corridor to the SRAM; 31 um failed, 81 um routed), IHP16 at -2.41 + 44.96*30 = 1346.39 (channel 478 um). Magic DRC off (no notion of the SRAM bit cells), KLayout deck on, 2 um halo for NW.b at the SRAM edge.",
   "ERROR_ON_ILLEGAL_OVERLAPS": 0,
   "//illegal_overlap": "Magic extracts the SRAM from its LEF abstract, whose Metal4 OBS includes a keep-out bar at the VDD!/VDDARRAY! column break (LEF y 39-45); the GDS has no metal there, so a VPWR stripe across it only bridges the two supply pins the PDN ties together anyway. 22 such spots, all on VDD columns; KLayout DRC (precheck deck) and LVS are clean, so this check is waived.",

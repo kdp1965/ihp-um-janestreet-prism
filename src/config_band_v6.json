@@ -260,7 +260,7 @@
   "FP_PDN_VOFFSET": 6.15,
   "//pdn_offset": "VOFFSET 6.15 puts the first VPWR stripe at 9.03 = SRAM at x 3.36 (flush to the core edge, no sliver channel) + its first VDD column 5.67; rails then need macros at x = -2.41 + 44.96k",
   "RUN_MAGIC_DRC": 0,
-  "KLAYOUT_DRC_RUNSET": "/Users/Ken2/projects/fossi/ihp-open-pdk-dev/ihp-sg13cmos5l/libs.tech/klayout/tech/drc/ihp-sg13cmos5l.drc",
+  "KLAYOUT_DRC_RUNSET": "pdk_dir::libs.tech/klayout/tech/drc/ihp-sg13cmos5l.drc",
   "//drc": "Magic has no notion of the IHP SRAM bit cells (2.2M false violations inside the macro); the TT precheck for ihp-sg13cmos5l runs only the KLayout PDK deck, so that is the local signoff too (dev-branch deck: the pinned PDK copy has broken includes)",
   "//rows": "Upper row 619.92 N (pins face the gap); lower row 510.30 N (pins face down) for columns A-C, FS (pins into the gap) for column D whose lower macro sits above the SRAM: with it facing down (v4) the hi chain to column C dived through the SRAM (357 shorts, all inside the SRAM footprint, nothing else left); a 60 um gap (v5) cost 10% more wire",
   "//halo": "KLayout NW.b (n-well spacing 1.24 um): cells abutting the SRAM at the 0.48 um halo violate it along its long edges; 2 um keeps them off",

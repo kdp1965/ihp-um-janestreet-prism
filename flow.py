@@ -39,12 +39,22 @@ def main():
     # root (plain relative paths such as macros/...), run dir runs/<tag>.
     os.chdir(HERE)
     tag = sys.argv[1] if len(sys.argv) > 1 else "wokwi"
+    # The full CMOS5L KLayout deck for local sign-off, when it is installed
+    # here (tools/drc_deck.py); the config's own deck otherwise.
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    try:
+        from drc_deck import override
+    except ImportError:
+        def override():
+            return []
+
     flow = ProjectFlow(
         os.path.join(HERE, "src", "config_merged.json"),
         design_dir=os.path.join(HERE, "src"),
         pdk_root=os.environ["PDK_ROOT"],
         pdk="ihp-sg13cmos5l",
         scl="sg13cmos5l_stdcell",
+        config_override_strings=override(),
     )
     flow.start(tag=tag, _force_run_dir=os.path.join(HERE, "runs", tag))
 
