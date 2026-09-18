@@ -1799,6 +1799,24 @@ koA's sign-off otherwise: KLayout DRC 0 with the full 333-rule deck, LVS
 passed.  The Mac's same-recipe run (wokwi_ko53) plateaued at 377 around
 pass 40.
 
+**koA, second pass (2026-09-18 00:19).**  Re-routed from the same placement
+with the blockages stripped before routing and six antenna rounds allowed:
+the route replayed exactly (zero at pass 44), five antenna rounds each
+re-routed to zero, antenna 0 nets / 0 pins, KLayout DRC 0 (333 rules), LVS
+0, hold clean, setup +0.15 ns typ / +1.25 fast / -7.47 slow, 2.29 mm of
+signal wire at 63.3% utilisation, precheck passed.  One start, no
+intervention inside the flow.  Products copied to the Mac at
+runs/bowser_koA/final.
+
+The GitHub action on the same commit (802b62f) synthesised the same
+netlist as bowser (x86-64 ABC gives 20034 cells whatever the LibreLane
+version) but its detailed route had not converged when the job hit the
+6-hour limit: the runner has 4 cores and its LibreLane 3.0.0rc1 carries a
+different OpenROAD than our 3.0.2 nix build, so it is a different router
+on the same placement.  Pinning the action to a LibreLane whose OpenROAD
+matches ours would let the runner replay bowser's route rather than draw
+its own.
+
 **Runs are not reproducible across machines.**  Same Yosys 0.62 (same git
 sha, both built with clang 21.1.2 by nix), identical 3165 flops and latches,
 but ABC maps the combinational logic differently on Apple silicon and x86-64
