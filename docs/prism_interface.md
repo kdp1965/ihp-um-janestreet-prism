@@ -1716,6 +1716,89 @@ Metal4-pin macros, GRT_LAYER_ADJUSTMENTS 0,0.15,0,0,0) came out worse,
 the same macros without it.  The placer's routability mode uses the same
 adjustments, so the placement moved too; either way, not a lever.
 
+### 4z.6 All data pins on Metal4, and placement keep-outs at the mouths (2026-09-17)
+
+**Di0 as well as Do0 on Metal4** (DFFRAM `make cfgmem16_cmos5l_m4
+M4_PINS='^D[io]0\['`, and left): 56 bottom-edge pins per macro moved,
+7-8 shifted off the power columns, all sign-off checks clean; the
+abstract has 71 Metal4 pins (56 data + 15 power) and about 100 Metal4
+stubs.  Run wokwi_dio53 (Mac, density 53) with them: global route Metal2
+70.5% / Metal3 75.9% / Metal4 39.2%, the lowest Metal2 and Metal3 of any
+run, but detailed routing 43962 30685 28812 14308 10753 9140 7578 6496
+5967 5402 4030 3437 2899 and slowing; stopped.  The pass-8 report was
+still two thirds Metal2 and still in the left mouth (x 840-930, y
+120-300): taking the pin drops off Metal2 did not free the strip.
+
+**Why: the mouths are full of logic.**  Cell utilisation of the placed
+design: 52.8% in the hot mouth bins, 46.8% over the strip beside the left
+column edge, 58.0% beside the right one, the same as the strip centre
+(53.0%) and the target density, while the inside of the right column's
+gap sat at 19.9%.  The placer packs the mouths to full density and every
+net into the macro pin rows then has to cross those cells' Metal2 tracks.
+
+**Keep-outs.**  Project.MouthKeepouts (odb_keepouts.py, inserted after
+Odb.ManualMacroPlacement) derives, from the macro instances, one strip per
+gap between consecutive macros of a column on the column's tile-facing
+side: MOUTH_KEEPOUT_WIDTH (60 um) outward from the edge, the gap plus
+MOUTH_KEEPOUT_MARGIN (20 um) into each macro, as a soft placement
+blockage capped at MOUTH_KEEPOUT_MAX_DENSITY (0.25; 0 = hard).  Six
+strips on this floorplan (x 868-928 and 1286-1346; y 71-277, 324-387,
+434-640).  Effect at detailed placement: the hot mouth bins fall from
+52.8% to 2.3% and the right mouth from 58.0% to 3.6%; the cells move
+inward (right gap interior 19.9% -> 38.0%) and the tile still places at
+density 53.  Run wokwi_ko53 (Mac, density 53, Metal4-pin macros) is the
+first with them.
+
+**Keep-out geometry sweep (bowser, same netlist, density 53, four passes).**
+
+| keep-out | passes 0..4 | pass-4 violations | hottest bin |
+|---|---|---|---|
+| none (exp_m4d53) | 6788 at pass 4 | 6788 | |
+| outside only, 60 um, cap 0.25 (koA) | 39030 22886 21394 6716 3555 | 3555 | 219 |
+| + 45 um inward (koC) | 39311 22599 21395 8633 6004 | 6004 | 453 |
+| + 90 um inward (koB) | 43034 28196 25644 10994 8092 | 8092 | 604 |
+| + 90 um inward, cap 0.40 (koD) | 44922 27355 24811 9564 7191 | 7191 | 628 |
+
+The strip outside the column edge halves the pass-4 count and gives the
+lowest hot bin measured on this tile; reaching inward over the gap makes
+every measure worse (the displaced logic lengthens the wires and raises
+tile-wide congestion; on the Mac the 90 um variant's global route hit
+Metal3 90.7% and its first detailed-routing pass had not finished after 90
+minutes).  MOUTH_KEEPOUT_INWARD stays 0.  koA is being routed to
+completion on bowser; the Mac reruns the outside-only configuration at
+density 53 to completion (it had been stopped at pass 9 while still
+descending).
+
+### 4z.7 koA: the first single-start clean route, and two flow defects it exposed (2026-09-17)
+
+bowser run koA (outside-only keep-outs, all data pins on Metal4, density
+53) routed to zero in one uninterrupted start: 39030 22886 21394 6716
+3555 ... 170 84 24 12 2 1 1 0, clean at about pass 44, 52 minutes at 24
+threads, followed by three antenna-repair rounds that each re-routed to
+zero.  Then two defects:
+
+1. **DEF blockage syntax.**  The keep-outs had been created as soft
+   blockages with a density cap, which OpenROAD writes to DEF as
+   `PLACEMENT + SOFT + PARTIAL 0.25`; the DEF standard allows one of the
+   two, and the RC-extraction step, which re-reads the DEF, failed with
+   DEFPARS-6543.  Fixed in odb_keepouts.py: density cap only (`+ PARTIAL`),
+   with the same placement effect (hot mouth bins 0.7% and 2.2%).  koA was
+   salvaged by stripping the blockages from the routed database and DEF
+   (bowser strip_blockages.py) and resuming from OpenROAD.RCX.
+2. **Antenna repair rounds.**  After the three post-route repair rounds
+   (DRT_ANTENNA_REPAIR_ITERS default 3) two resizer buffer nets, net2077
+   and net3089, still exceed the Metal3 cumulative-area ratio (265 and 419
+   against 200).  The config now asks for 6 rounds; a continuation from
+   the routed state to add rounds is not possible with the Metal4-pin
+   macros (DRT-1231 pin access, as before), so koA is being re-routed
+   from scratch with the new setting (deterministic, so the same route
+   plus more rounds).
+
+koA's sign-off otherwise: KLayout DRC 0 with the full 333-rule deck, LVS
+0, hold clean, setup +0.15 ns typ / +1.25 fast / -7.47 slow, precheck
+passed.  The Mac's same-recipe run (wokwi_ko53) plateaued at 377 around
+pass 40.
+
 **Runs are not reproducible across machines.**  Same Yosys 0.62 (same git
 sha, both built with clang 21.1.2 by nix), identical 3165 flops and latches,
 but ABC maps the combinational logic differently on Apple silicon and x86-64

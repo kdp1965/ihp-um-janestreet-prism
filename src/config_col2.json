@@ -2,6 +2,7 @@
   "meta": {
     "flow": "Classic",
     "substituting_steps": {
+      "+Odb.ManualMacroPlacement": "Project.MouthKeepouts",
       "+OpenROAD.GeneratePDN": "Project.ExtendPowerStripes",
       "+OpenROAD.ResizerTimingPostCTS": "Project.DiodesOnSramPins"
     }
@@ -22,6 +23,8 @@
   "RUN_HEURISTIC_DIODE_INSERTION": 0,
   "RUN_ANTENNA_REPAIR": 1,
   "HEURISTIC_ANTENNA_THRESHOLD": 200,
+  "//": "Post-route antenna repair rounds: the default 3 left two Metal3 nets over ratio 200 on run koA (see docs 4z.7)",
+  "DRT_ANTENNA_REPAIR_ITERS": 6,
   "CLOCK_PORT": "clk",
   "RUN_KLAYOUT_XOR": 0,
   "RUN_KLAYOUT_DRC": 1,
@@ -43,6 +46,11 @@
   "FP_PDN_MULTILAYER": 0,
   "//": "pdn_cfg.tcl is LibreLane's PDN config without the per-macro grid, which has no shapes with this single-layer PDN and makes an unpatched pdngen fail (PDN-0233); the macros get their power from Project.ExtendPowerStripes",
   "PDN_CFG": "dir::pdn_cfg.tcl",
+  "//": "Placement keep-outs (soft, density cap) in the rows outside each CFGMEM column's tile-facing edge at the pair gaps: every stalled route died there (see docs 4z.6)",
+  "MOUTH_KEEPOUT_WIDTH": 60,
+  "MOUTH_KEEPOUT_MARGIN": 20,
+  "MOUTH_KEEPOUT_MAX_DENSITY": 0.25,
+  "MOUTH_KEEPOUT_INWARD": 0,
   "MAGIC_DEF_LABELS": 0,
   "MAGIC_WRITE_LEF_PINONLY": 1,
   "FP_MACRO_HORIZONTAL_HALO": 2.0,

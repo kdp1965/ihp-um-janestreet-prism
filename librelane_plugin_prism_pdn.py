@@ -42,6 +42,43 @@ from librelane.steps.step import CompositeStep  # noqa: E402
 from librelane.steps.openroad import DetailedPlacement  # noqa: E402
 
 
+# --- placement keep-outs at the CFGMEM mouths (odb_keepouts.py): the rows just
+# outside each column's tile-facing edge, at the height of the gap between the
+# two macros of a pair, capped to a low cell density (or blocked) before global
+# placement, so the nets crossing into the macro pin rows find free Metal2
+# tracks there.  Inserted after the macro placement
+# (meta.substituting_steps "+Odb.ManualMacroPlacement").
+from decimal import Decimal  # noqa: E402
+
+from librelane.config import Variable  # noqa: E402
+
+
+@Step.factory.register()
+class MouthKeepouts(OdbpyStep):
+    id = "Project.MouthKeepouts"
+    name = "Placement Keep-outs at the Macro Mouths"
+
+    config_vars = [
+        Variable("MOUTH_KEEPOUT_WIDTH", Decimal, "Keep-out width outward from a CFGMEM column's tile-facing edge.", units="µm", default=60),
+        Variable("MOUTH_KEEPOUT_MARGIN", Decimal, "How far the keep-out extends into each macro's height beyond the gap.", units="µm", default=20),
+        Variable("MOUTH_KEEPOUT_MAX_DENSITY", Decimal, "Cell density cap of the soft blockage; 0 makes it a hard blockage.", default=Decimal("0.25")),
+        Variable("MOUTH_KEEPOUT_MACRO_PREFIX", str, "Master-name prefix of the macros forming the columns.", default="CFGMEM"),
+        Variable("MOUTH_KEEPOUT_INWARD", Decimal, "Extension of the keep-out inward from the column edge, over the gap between the two macros.", units="µm", default=0),
+    ]
+
+    def get_script_path(self):
+        return os.path.join(HERE, "odb_keepouts.py")
+
+    def get_command(self) -> List[str]:
+        return super().get_command() + [
+            "--macro-prefix", self.config["MOUTH_KEEPOUT_MACRO_PREFIX"],
+            "--width", str(self.config["MOUTH_KEEPOUT_WIDTH"]),
+            "--margin", str(self.config["MOUTH_KEEPOUT_MARGIN"]),
+            "--max-density", str(self.config["MOUTH_KEEPOUT_MAX_DENSITY"]),
+            "--inward", str(self.config["MOUTH_KEEPOUT_INWARD"]),
+        ]
+
+
 @Step.factory.register()
 class SramPinDiodePlacement(OdbpyStep):
     id = "Project.SramPinDiodePlacement"
