@@ -1817,6 +1817,26 @@ on the same placement.  Pinning the action to a LibreLane whose OpenROAD
 matches ours would let the runner replay bowser's route rather than draw
 its own.
 
+**Predicting the runner (2026-09-18).**  The published LibreLane 3.0.2 image
+on x86-64 is deterministic, so what the GitHub runner will do can be run
+ahead of time on bowser (Docker, /scratch/kpettit/ihp/run_ci_image.sh with
+IMAGE=ghcr.io/librelane/librelane:3.0.2).  The koA recipe at density 53 in
+that image is a neighbour of koA, not a replay (our nix OpenROAD has newer
+flake inputs): 40889 24425 22454 7919 5128 at four passes against koA's
+3555, then 2644, 1004, 669, 295, 153, 71, 45, 20, 12 and a frozen knot of
+11 Metal2 shorts from pass 44 on at x 1350-1360, y 558-571, just inward of
+the right column's keep-out.  Correction found while committing: the repo's config still said density
+55 (every converging local run had used a -c override of 53), so the
+action pinned to 3.0.2 actually drew at 55, the worst of the sweep below;
+it will not close either way.  The remedy that follows from determinism: sweep
+the placement density in the image on bowser (four passes each), route
+the best draw to completion there, and commit that density; the runner
+then replays a route already known to converge.
+
+Sweep in the image, four passes each: 51 -> 3987, 52 -> 3721, 53 -> 5128,
+54 -> 5416, 55 -> 8298.  Density 52 is committed (828b833) while its full
+route is verified in the image on bowser.
+
 **Runs are not reproducible across machines.**  Same Yosys 0.62 (same git
 sha, both built with clang 21.1.2 by nix), identical 3165 flops and latches,
 but ABC maps the combinational logic differently on Apple silicon and x86-64
