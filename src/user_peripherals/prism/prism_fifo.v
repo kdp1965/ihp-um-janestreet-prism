@@ -13,7 +13,9 @@
 // almost-empty and almost-full levels feed the PRISM inputs and the status
 // register.  Contents survive PRISM enable / disable (the host may fill a TX
 // FIFO before starting the FSM); only reset and flush clear it.  The storage
-// is latch rows (see below), written one clock after the push.
+// is latch rows (see below), written two clocks after the push; `count`
+// counts the byte on that clock, so a reader that waits for the count always
+// finds it.
 //
 // Constant-table mode (tab_en, CONST_TAB in prism_periph.v): the head is
 // row tab_idx instead of the read pointer's row, so the 16 rows serve as
@@ -49,11 +51,17 @@ module prism_fifo
 
     reg  [AW-1:0] rd_ptr;
     reg  [AW-1:0] wr_ptr;
+    reg  [AW:0]   wcount;                       // bytes written or on their way
+    reg           push_d;                       // push whose row write lands this clock
 
+    // The reader's flags follow `count`, which counts a byte only once its row
+    // write has landed (a push takes two clocks, see the storage below); the
+    // writer's flags follow `wcount`, which counts it as soon as it is pushed,
+    // so a full FIFO can never be overrun by the byte still on its way.
     assign empty        = (count == 0);
-    assign full         = count[AW];
+    assign full         = wcount[AW];
     assign almost_empty = count <= {1'b0, ae_level};
-    assign almost_full  = count >= ({1'b1, {AW{1'b0}}} - {1'b0, af_level});
+    assign almost_full  = wcount >= ({1'b1, {AW{1'b0}}} - {1'b0, af_level});
 
     wire do_push = push & ~full;
     wire do_pop  = pop  & ~empty;
@@ -65,20 +73,33 @@ module prism_fifo
             rd_ptr <= {AW{1'b0}};
             wr_ptr <= {AW{1'b0}};
             count  <= {(AW+1){1'b0}};
+            wcount <= {(AW+1){1'b0}};
+            push_d <= 1'b0;
         end
         else if (flush)
         begin
             rd_ptr <= {AW{1'b0}};
             wr_ptr <= {AW{1'b0}};
             count  <= {(AW+1){1'b0}};
+            wcount <= {(AW+1){1'b0}};
+            push_d <= 1'b0;
         end
         else
         begin
+            push_d <= do_push;
             if (do_push)
                 wr_ptr <= wr_ptr + 1'b1;
             if (do_pop)
                 rd_ptr <= rd_ptr + 1'b1;
+            // writer's view: the push counts at once (wr_ptr has moved on)
             case ({do_push, do_pop})
+                2'b10:   wcount <= wcount + 1'b1;
+                2'b01:   wcount <= wcount - 1'b1;
+                default: wcount <= wcount;
+            endcase
+            // reader's view: the push counts one clock later, the clock the
+            // row's gate opens and the byte appears on the head mux
+            case ({push_d, do_pop})
                 2'b10:   count <= count + 1'b1;
                 2'b01:   count <= count - 1'b1;
                 default: count <= count;
@@ -88,32 +109,50 @@ module prism_fifo
 
     // Storage: latch rows (prism_latch_reg, 8 latches each) in two banks,
     // even rows and odd rows, each bank with its own registered write data,
-    // row and one-clock strobe.  A push loads the bank of the row it goes
-    // to; the row's gate is open during the following clock while that
-    // bank's data bus holds still, and since consecutive pushes hit rows of
-    // opposite parity the bus of a bank never moves while one of its gates
-    // is open or closing (the next push to the same bank is two clocks
-    // later).  The latch is transparent while written, so the head is
-    // available the clock after the push as with flops.  Reset: the row
-    // gates open with rst_n low and the data registers reset to 0.
+    // row and one-clock strobe.  A push loads the bank of the row it goes to;
+    // the strobe is then delayed one more clock (wst_p1) and drives the `wr`
+    // input of the row's latch register, so the gate is the AND of a stable
+    // row decode and a registered strobe and cannot be glitched open while
+    // the bank's data bus moves.  The write lands on the second clock after
+    // the push and the gate is open for that whole clock.
+    //
+    // The bus of a bank must hold still while one of its gates is open and
+    // closing, which bounds the push rate: two pushes to the same bank must
+    // be at least three clocks apart.  Consecutive pushes alternate banks, so
+    // a back-to-back pair is fine, but three pushes on three consecutive
+    // clocks would move a bank's bus on the edge that closes its gate.
+    // Nothing pushes that fast (the FSM's OUT_FIFO_WR_RD and the host's
+    // register write are both slower), and a push every other clock leaves
+    // two clocks of margin.
+    //
+    // The latch is transparent while written, so the head is available on the
+    // clock the write lands, which is the clock `count` counts it.  Reset:
+    // the row gates open with rst_n low and the data registers reset to 0.
     // Against 8 flops plus 8 write muxes per row this is about a third less
     // area and far fewer cells in the shard's densest area.
     reg  [7:0]    wq   [0:1];                  // next write data per bank
     reg  [AW-2:0] wrow [0:1];                  // its row within the bank
     reg  [1:0]    wst;                         // one-clock write strobe per bank
+    reg  [1:0]    wst_p1;                      // that strobe one clock later: the row gate
     wire [7:0]    mem_w [0:DEPTH-1];
 
     always @(posedge clk or negedge rst_n)
     begin
         if (!rst_n)
         begin
-            wq[0] <= 8'h0; wq[1] <= 8'h0;
-            wrow[0] <= {(AW-1){1'b0}}; wrow[1] <= {(AW-1){1'b0}};
-            wst   <= 2'b00;
+            wq[0]   <= 8'h0;
+            wq[1]   <= 8'h0;
+            wrow[0] <= {(AW-1){1'b0}};
+            wrow[1] <= {(AW-1){1'b0}};
+            wst     <= 2'b00;
+            wst_p1  <= 2'b00;
         end
         else
         begin
-            wst <= 2'b00;
+            wst       <= 2'b00;
+            wst_p1[0] <= wst[0]; 
+            wst_p1[1] <= wst[1]; 
+
             if (do_push)
             begin
                 wq[wr_ptr[0]]   <= push_data;
@@ -129,12 +168,12 @@ module prism_fifo
         begin : ROW
             localparam B  = r % 2;
             localparam RR = r / 2;
-            wire gate = wst[B] & (wrow[B] == RR);
+            wire gate = wrow[B] == RR;
             prism_latch_reg #( .WIDTH ( 8 ) ) i_row
             (
                 .rst_n    ( rst_n     ),
                 .enable   ( gate      ),
-                .wr       ( 1'b1      ),
+                .wr       ( wst_p1[B] ),
                 .data_in  ( wq[B]     ),
                 .data_out ( mem_w[r]  )
             );
