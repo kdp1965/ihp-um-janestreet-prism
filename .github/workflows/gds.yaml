@@ -15,16 +15,24 @@ jobs:
 
       - name: Read top module name
         id: top_module
-        with:
-          cmd: echo TOP_MODULE=`yq '.project.top_module' info.yaml` > $GITHUB_OUTPUT
+        run: echo "TOP_MODULE=$(yq '.project.top_module' info.yaml)" >> "$GITHUB_OUTPUT"
 
+      # Publish the locally hardened views in local_build/ instead of running
+      # LibreLane on the runner.  The cmos5l branch of the action is the one to
+      # use: it writes tt_submission/pdk.json, which the precheck and gate level
+      # jobs below read (PDK = ihp-sg13cmos5l makes both skip ciel and run
+      # install_sg13cmos5l.sh), and it converts the GDS to OASIS.  tools-repo /
+      # tools-ref are the 8x4 cmos5l tree the action renders the preview with.
       - name: Create and publish the GDS artifact
-        uses: TinyTapeout/tt-gds-action/custom_gds@tt07
+        uses: TinyTapeout/tt-gds-action/custom_gds@ihp-cmos5l
         with:
+          pdk: ihp-sg13cmos5l
           top_module: ${{ steps.top_module.outputs.TOP_MODULE }}
           gds_path: local_build/gds/${{ steps.top_module.outputs.TOP_MODULE }}.gds
           lef_path: local_build/lef/${{ steps.top_module.outputs.TOP_MODULE }}.lef
           verilog_path: local_build/pnl/${{ steps.top_module.outputs.TOP_MODULE }}.pnl.v
+          tools-repo: kdp1965/tt-support-tools
+          tools-ref: cmos-8x4
 
   precheck:
     needs: gds
