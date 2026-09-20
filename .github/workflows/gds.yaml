@@ -13,22 +13,18 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build GDS
-        # Fork of TinyTapeout/tt-gds-action@ihp-cmos5l with the PDK install
-        # fixed for the IHP-Open-PDK dev branch that now vendors ihp-sg13cmos5l
-        uses: kdp1965/tt-gds-action@ihp-cmos5l-fix
+      - name: Read top module name
+        id: top_module
         with:
-          pdk: ihp-sg13cmos5l
-          # Same LibreLane (and OpenROAD) as the local nix flow: the action's
-          # default 3.0.0rc1 routes differently and did not converge in 6 h
-          # on the same placement; 3.0.2's image is built from the same nix
-          # derivations as the development shells, so the runner replays
-          # the route found on the 48-core box (docs 4z.7).
-          librelane-version: 3.0.2
-          # htfab/tt-support-tools@cmos has no 8x4 template for CMOS5L; this
-          # branch is that tree plus tt_8x4/ (see tt_8x4/README.md)
-          tools-repo: kdp1965/tt-support-tools
-          tools-ref: cmos-8x4
+          cmd: echo TOP_MODULE=`yq '.project.top_module' info.yaml` > $GITHUB_OUTPUT
+
+      - name: Create and publish the GDS artifact
+        uses: TinyTapeout/tt-gds-action/custom_gds@tt07
+        with:
+          top_module: ${{ steps.top_module.outputs.TOP_MODULE }}
+          gds_path: local_build/gds/${{ steps.top_module.outputs.TOP_MODULE }}.gds
+          lef_path: local_build/lef/${{ steps.top_module.outputs.TOP_MODULE }}.lef
+          verilog_path: local_build/pnl/${{ steps.top_module.outputs.TOP_MODULE }}.pnl.v
 
   precheck:
     needs: gds

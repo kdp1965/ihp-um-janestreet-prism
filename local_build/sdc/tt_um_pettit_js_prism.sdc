@@ -102,7 +102,8 @@ set_multicycle_path -hold\
            [get_nets {i_peripherals.cfgmem_addr[3]}]\
            [get_nets {i_peripherals.cfgmem_addr_sel}]\
            [get_nets {i_peripherals.cfgmem_byp_hi}]\
-           [get_nets {i_peripherals.cfgmem_byp_lo}]] 1
+           [get_nets {i_peripherals.cfgmem_byp_lo}]\
+           [get_nets {i_peripherals.i_prism.i_prism.cfg_fractured}]] 1
 set_multicycle_path -setup\
     -through [list [get_nets {i_peripherals.cfgmem_addr[0]}]\
            [get_nets {i_peripherals.cfgmem_addr[1]}]\
@@ -110,7 +111,8 @@ set_multicycle_path -setup\
            [get_nets {i_peripherals.cfgmem_addr[3]}]\
            [get_nets {i_peripherals.cfgmem_addr_sel}]\
            [get_nets {i_peripherals.cfgmem_byp_hi}]\
-           [get_nets {i_peripherals.cfgmem_byp_lo}]] 2
+           [get_nets {i_peripherals.cfgmem_byp_lo}]\
+           [get_nets {i_peripherals.i_prism.i_prism.cfg_fractured}]] 2
 set_false_path -setup\
     -from [list [get_ports {ui_in[0]}]\
            [get_ports {ui_in[1]}]\
