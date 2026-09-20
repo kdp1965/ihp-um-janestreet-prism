@@ -40,7 +40,7 @@ module tb_qspi ();
   wire uart_rx = ui_in_base[7];
   assign ui_in = {uart_rx, ui_in_base[6:3], spi_miso, ui_in_base[1:0]};
 
-`ifdef GL_TEST
+`ifdef USE_POWER_PINS
   wire VPWR = 1'b1;
   wire VGND = 1'b0;
 `endif
@@ -49,7 +49,7 @@ module tb_qspi ();
   tt_um_pettit_js_prism user_project (
 
       // Include power ports for the Gate Level test:
-`ifdef GL_TEST
+`ifdef USE_POWER_PINS
       .VPWR(VPWR),
       .VGND(VGND),
 `endif
