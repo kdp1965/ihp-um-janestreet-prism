@@ -30,7 +30,9 @@ jobs:
           top_module: ${{ steps.top_module.outputs.TOP_MODULE }}
           gds_path: local_build/gds/${{ steps.top_module.outputs.TOP_MODULE }}.gds
           lef_path: local_build/lef/${{ steps.top_module.outputs.TOP_MODULE }}.lef
-          verilog_path: local_build/pnl/${{ steps.top_module.outputs.TOP_MODULE }}.pnl.v
+          # the unpowered netlist: the gate level job simulates this against
+          # the PDK cell models, which carry no supply ports on CMOS5L
+          verilog_path: local_build/nl/${{ steps.top_module.outputs.TOP_MODULE }}.nl.v
           tools-repo: kdp1965/tt-support-tools
           tools-ref: cmos-8x4
 
