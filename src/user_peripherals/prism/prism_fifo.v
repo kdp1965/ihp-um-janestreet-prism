@@ -108,29 +108,31 @@ module prism_fifo
     end
 
     // Storage: latch rows (prism_latch_reg, 8 latches each) in two banks,
-    // even rows and odd rows, each bank with its own registered write data,
-    // row and one-clock strobe.  A push loads the bank of the row it goes to;
+    // even rows and odd rows, sharing one registered write data bus and with
+    // a row register and a one-clock strobe each.  A push loads that bus and
+    // the bank of the row it goes to;
     // the strobe is then delayed one more clock (wst_p1) and drives the `wr`
     // input of the row's latch register, so the gate is the AND of a stable
     // row decode and a registered strobe and cannot be glitched open while
     // the bank's data bus moves.  The write lands on the second clock after
     // the push and the gate is open for that whole clock.
     //
-    // The bus of a bank must hold still while one of its gates is open and
-    // closing, which bounds the push rate: two pushes to the same bank must
-    // be at least three clocks apart.  Consecutive pushes alternate banks, so
-    // a back-to-back pair is fine, but three pushes on three consecutive
-    // clocks would move a bank's bus on the edge that closes its gate.
-    // Nothing pushes that fast (the FSM's OUT_FIFO_WR_RD and the host's
-    // register write are both slower), and a push every other clock leaves
-    // two clocks of margin.
+    // The data bus must hold still from the push until that row's gate has
+    // closed, which bounds the push rate: two pushes must be at least three
+    // clocks apart.  The bus is shared, so this counts every push, not just
+    // the ones to the same bank: a push one or two clocks after another would
+    // move the bus before or as the first row's gate closes.  Nothing pushes
+    // that fast (the FSM's OUT_FIFO_WR_RD and the host's register write are
+    // both far slower), and the regression's FIFO monitor sees no two pushes
+    // closer than that in any test.  One bus instead of two costs a bank's
+    // worth of data flops (8 per FIFO) in the shard's densest area.
     //
     // The latch is transparent while written, so the head is available on the
     // clock the write lands, which is the clock `count` counts it.  Reset:
     // the row gates open with rst_n low and the data registers reset to 0.
     // Against 8 flops plus 8 write muxes per row this is about a third less
     // area and far fewer cells in the shard's densest area.
-    reg  [7:0]    wq   [0:1];                  // next write data per bank
+    reg  [7:0]    wq;                          // next write data, shared by both banks
     reg  [AW-2:0] wrow [0:1];                  // its row within the bank
     reg  [1:0]    wst;                         // one-clock write strobe per bank
     reg  [1:0]    wst_p1;                      // that strobe one clock later: the row gate
@@ -140,8 +142,7 @@ module prism_fifo
     begin
         if (!rst_n)
         begin
-            wq[0]   <= 8'h0;
-            wq[1]   <= 8'h0;
+            wq      <= 8'h0;
             wrow[0] <= {(AW-1){1'b0}};
             wrow[1] <= {(AW-1){1'b0}};
             wst     <= 2'b00;
@@ -155,7 +156,7 @@ module prism_fifo
 
             if (do_push)
             begin
-                wq[wr_ptr[0]]   <= push_data;
+                wq              <= push_data;
                 wrow[wr_ptr[0]] <= wr_ptr[AW-1:1];
                 wst[wr_ptr[0]]  <= 1'b1;
             end
@@ -174,7 +175,7 @@ module prism_fifo
                 .rst_n    ( rst_n     ),
                 .enable   ( gate      ),
                 .wr       ( wst_p1[B] ),
-                .data_in  ( wq[B]     ),
+                .data_in  ( wq        ),
                 .data_out ( mem_w[r]  )
             );
         end
