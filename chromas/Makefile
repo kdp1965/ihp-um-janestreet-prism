@@ -26,6 +26,10 @@ init:
 clean:
 	rm -f *.lst *.tab
 
+# Regenerate the PRISM's STEW decode (prism.v) from the config's field table
+stew-map:
+	python3 stew_map.py $(CFG) ../src/user_peripherals/prism/prism.v
+
 yosys: yosys_fetch
 	make -C $(YOSYS_DIR) -j8
 

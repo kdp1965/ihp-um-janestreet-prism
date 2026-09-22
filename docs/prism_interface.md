@@ -861,11 +861,13 @@ two per SRAM word - is written into an SRAM by the SRAM's trace port
 (`prism_trace_port.v`, next to the macro) until the buffer is full (1024
 entries on the 512x32; `2^(SRAM_AW+1)`), and the host reads the entries
 back.  The 21 outputs of a traced clock are not stored: they follow from
-the entry and the chroma the host loaded (state outputs at STEW bits
-[61:41], tree 1 outputs [82:62], tree 0 outputs [103:83]; while halted
-the outputs were the debugger's), and `prism_trace_outputs()` in the SDK
-rebuilds them; the test checks that rebuild against the real outputs on
-every traced clock.  The triggers: at once; in a given state; that state
+the entry and the chroma the host loaded (the default, tree 1 or tree 0
+output vector of the traced state, wherever the STEW layout in
+`chromas/tinyqv32.cfg` puts them - since the by-consumer layout of
+2026-09-22 an output's three legs are three adjacent bits in bank 2 or 3;
+while halted the outputs were the debugger's), and `prism_trace_outputs()`
+in the SDK rebuilds them; the test checks that rebuild against the real
+outputs on every traced clock.  The triggers: at once; in a given state; that state
 taking either jump (a decision tree fires while the shard executes, so a
 halted shard does not trigger); or an edge (rising, falling, either) on
 any of the 32 PRISM inputs.  Entry 0 is the trigger cycle itself: in the

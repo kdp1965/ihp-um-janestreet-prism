@@ -129,15 +129,32 @@ def stew_of(chroma, si):
     b = (len(chroma) // STEW_WORDS - 1 - si) * STEW_WORDS
     return (chroma[b] << 96) | (chroma[b + 1] << 64) | (chroma[b + 2] << 32) | chroma[b + 3]
 
+# Where the three 21-bit output vectors sit in the STEW comes from the chroma
+# compiler's config (chromas/tinyqv32.cfg), the same table prism.v's decode is
+# generated from, so the layout is never repeated here.
+def _stew_output_positions():
+    import os, sys
+    chromas = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "chromas")
+    sys.path.insert(0, chromas)
+    from stew_map import parse_items
+    _, _, _, fields = parse_items(open(os.path.join(chromas, "tinyqv32.cfg")).read())
+    outs = [pos for typ, pos in fields if typ == "out"]
+    return {"tree0": outs[0], "tree1": outs[1], "default": outs[2]}
+STEW_OUT_POS = _stew_output_positions()
+
+def stew_field(stew, positions):
+    ''' Gather a field from a STEW word: bit i of the result is STEW bit positions[i] '''
+    return sum(((stew >> p) & 1) << i for i, p in enumerate(positions))
+
 def trace_outputs(e, chroma):
     ''' The 21 outputs the shard drove in a traced clock, from the entry and
-        the chroma (state outputs at STEW [61:41], tree 1 outputs [82:62],
-        tree 0 outputs [103:83]); None while halted '''
+        the chroma (the tree 0, tree 1 or default output vector of the traced
+        state, wherever the STEW layout puts them); None while halted '''
     if not e & TRC_E_EXEC:
         return None
     stew = stew_of(chroma, trace_si(e))
-    lsb = 83 if e & TRC_E_MATCH0 else 62 if e & TRC_E_MATCH1 else 41
-    return (stew >> lsb) & 0x1FFFFF
+    leg = "tree0" if e & TRC_E_MATCH0 else "tree1" if e & TRC_E_MATCH1 else "default"
+    return stew_field(stew, STEW_OUT_POS[leg])
 
 CFG_FIFO_DIR_TX = 1 << 23
 CFG_COMM_LOAD_K = 1 << 30   # OUT_COMM_LOAD loads K[{out20, out18}] from CONST
