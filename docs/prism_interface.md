@@ -184,19 +184,20 @@ registers only:
 | +0x18 | FLAGS (RO): count1_term, count1_wrap, count2_cmp, count2_eq_comm, shift_term, shift_data, latched_in[1:0] |
 | +0x1C | CFG1: `in_prev` pin selects, FIFO thresholds (later; the input sync mode landed in CFG0[19:18]) |
 | +0x20 | FIFO data (byte lane 0) |
-| +0x24 | FIFO status: count, empty, full; write = flush |
+| +0x24 | FIFO status: count[21:8], word bytes[7:6], push busy[5], word full[4], almost_full[3], almost_empty[2], full[1], empty[0]; write = flush (the 32-bit word registers too) |
 | +0x28 | CRC ctrl: init value select, poly select |
 | +0x2C | CRC value (read; write = preset) |
 | +0x30 | CRC expected |
 | +0x34 | CFG2: input slot selects for inputs 16-19 and 28-31 (4 bits each), section 4h |
 | +0x38 | CONST: K0..K3 (K3 also the comm match value), section 4h |
-| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p |
+| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p; [11] 32-bit FIFO access through FIFO32 (+0x54), section 4b |
 | +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
 | +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
 | +0x50 | COMM_PINS: multi-bit shift lanes, section 4r: [2:0] window base b (comm[b+3:b], b = 0-4), [2k+5:2k+4] the window lane uo_out[k+1] shows when its pinmux code is 6 and CFG0[2] is set |
 | +0x4C | CONST_TAB: the 16x8 latch FIFO as addressable constants, section 4n: [0] enable (OUT_COMM_LOAD loads the row at the 4-bit index; {OUT_K_SEL1, OUT_K_SEL0} = how the index moves on each load: 0 clear, 1 + 1, 2 + add_to_idx [10:8], 3 = idx_load [7:4], or + idx_load with [1]), [2] post (the row before the move; default after), [19:16] the index (a write sets it, reads back live) |
 | +0x48 | TRACE_CTRL: write [0] arm (flushes the SRAM FIFO), [1] stop; read [0] armed, [1] running, [2] done, [3] big, [4] active.  Entry (16 bits) = [4:0] SI, [10:5] LUT mux inputs, [11] tree 0 matched, [12] tree 1 taken, [13] executing; the traced SRAM's FIFO then serves the entries as bytes through +0x20 of the window that reads that SRAM (count = FIFO bytes / 2) |
-| +0x4C-0x7C | spare |
+| +0x54 | FIFO32: 32-bit FIFO access with CFG3[11], section 4b: TX a word write pushes its four bytes low byte first; RX a read takes the assembled word |
+| +0x58-0x7C | spare |
 
 The SDK (`prism.h`, item 11) then needs only a base per shard and the
 common block; the per-config remap is the base addresses plus a feature
@@ -249,6 +250,29 @@ write flushes.  CFG1[19:16] / [23:20] are the almost-empty (count <=)
 and almost-full (count >= 16 - level) levels.  Inputs 20 empty, 21 full,
 26 almost_full, 27 almost_empty.  Contents survive PRISM disable, so a TX
 FIFO can be filled before the FSM starts.
+
+32-bit access (CFG3[11], `FIFO32` at +0x54; ported from the sg13g2 tiles
+2026-09-22): the host moves words instead of bytes, one instruction per
+four bytes.  In TX mode a word written to FIFO32 is pushed a byte at a
+time, low byte first, one every fourth clock; FIFO_STATUS[5] is set while
+that runs, a push waits on a full FIFO, and a word written while busy is
+dropped, so poll the bit before a write when the FIFO may be full
+(straight-line code never sees it busy: four pushes take 13 clocks,
+TinyQV's instructions 16).  In RX mode a pop machine takes four bytes out
+of the FIFO as soon as it holds that many, low byte first, into a word
+register; FIFO_STATUS[4] and the shard's interrupt say the word is
+complete, and a read of FIFO32 takes it (a read of an incomplete word
+returns it and takes nothing).  A byte read of +0x20 while the word
+register holds anything comes from its low byte, the rest shift down and
+the machine refills the top from the FIFO, so the byte order is the same
+however the host mixes word and byte reads; with the mode off the
+register still drains first.  Short messages leave their stragglers in
+the FIFO where FIFO_STATUS shows them (count) or, after byte reads, in
+the word register (FIFO_STATUS[7:6], the count of bytes held when [4] is
+clear): the host times out and reads them with byte reads.  A flush
+empties both machines.  `test_fifo32` runs it on the fifo_loop chroma,
+flop and SRAM FIFOs.  The 16-byte flop FIFO holds four words; the SRAM
+FIFO (section 4i) is the one to pair it with for frames.
 
 CRC: 32-bit bit-serial LFSR, programmable polynomial (+0x28), width from
 CFG0[21:20] `crc_mode` (8 / 16 / 32), CFG0[22] `crc_reflect` (shift right,

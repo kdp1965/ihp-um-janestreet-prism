@@ -20,7 +20,7 @@ from user_peripherals.prism.prism_tests import (
     RegisterTest, StewIntegrityTest, EncoderTest, Ws2812Test, Gpio24Test,
     SpiSlaveTest, UartTxTest, FifoLoopTest, SramFifoTest, EdgeTest, UsbDeviceTest, EthernetTxTest, EthernetRxTest, EthernetLoopTest, FracturedTest,
     TraceTest, Timer2Test, ConstTableTest, I2cMasterTest, SamplerTest, I2cSlaveTest, PioTest, SpiMasterTest,
-    OneWireTest)
+    OneWireTest, Fifo32Test)
 
 
 async def run(dut, test_class):
@@ -60,6 +60,10 @@ async def test_uart_tx(dut):
 @cocotb.test()
 async def test_fifo_loop(dut):
     await run(dut, FifoLoopTest)
+
+@cocotb.test()
+async def test_fifo32(dut):
+    await run(dut, Fifo32Test)
 
 @cocotb.test(skip=NO_SRAM)
 async def test_sram_fifo(dut):

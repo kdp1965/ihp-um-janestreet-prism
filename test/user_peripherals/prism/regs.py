@@ -49,7 +49,11 @@ REG_TOGGLE  = 0x115       # byte write: toggle host_in[0], clear interrupt
 REG_FLAGS   = 0x118
 REG_CFG1    = 0x11C       # [15:0] in_prev sources, [23:16] FIFO levels, [31:24] FIFO flag selects
 REG_FIFO    = 0x120       # byte: write pushes (TX mode), read pops (RX mode)
-REG_FIFO_ST = 0x124       # {count[12:8], af[3], ae[2], full[1], empty[0]}; write flushes
+REG_FIFO_ST = 0x124       # {count[21:8], word bytes[7:6], push busy[5], word full[4], af[3], ae[2], full[1], empty[0]}; write flushes
+FIFO_ST_WORD_FULL = 1 << 4  # 32-bit mode: the RX word register holds a complete word (also the shard's interrupt)
+FIFO_ST_PUSH_BUSY = 1 << 5  # 32-bit mode: the TX push machine is still feeding a word in
+def FIFO_ST_WORD_BYTES(st): return 4 if st & FIFO_ST_WORD_FULL else (st >> 6) & 3   # bytes in the RX word register
+REG_FIFO32  = 0x154       # 32-bit FIFO access (CFG3_FIFO32): write pushes four bytes, read takes a complete word
 REG_CRC_POLY= 0x128
 REG_CRC     = 0x12C       # read value, write preset
 REG_CRC_EXP = 0x130
@@ -58,6 +62,7 @@ REG_CONST   = 0x138       # constants K3..K0 (K3 = comm match value)
 REG_CFG3    = 0x13C       # [2:0] Manchester receive pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit
                           # [9] double-edge sampling (hb = half clocks per half bit), [27:16] edge-clocked sampler (CFG3_SMP_*)
 CFG3_MRX_DDR   = 1 << 9   # recoverer samples the pin on both clock edges
+CFG3_FIFO32    = 1 << 11  # 32-bit FIFO access through REG_FIFO32
 CFG3_SMP_EN    = 1 << 16  # sampler enable
 def CFG3_SMP_SRC(n): return (n & 0x1f) << 17   # the PRISM input whose edge clocks it
 CFG3_SMP_RISE  = 0 << 22
