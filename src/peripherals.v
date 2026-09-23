@@ -256,17 +256,24 @@ module tinyQV_peripherals (
     assign cfgmem_addr_lo = cfgmem_addr_sel ? cfgmem_addr : prism_sit_addr_a;
     assign cfgmem_addr_hi = cfgmem_addr_sel ? cfgmem_addr : prism_sit_addr_b;
 
-    // Programming chains run within a bank: host -> lo0 -> lo1 -> lo2 -> lo3
-    // and host -> hi0 -> hi1 -> hi2 -> hi3 (macro i's Di is macro i-1's Do),
-    // so all chain wiring stays inside the bank's macro block.  With the
-    // bank's bypass bit set every macro's Do is its Di, so the host word
-    // reaches any macro in the chain and each is shifted with its own strobe.
+    // Programming chains, one per macro column: host -> lo0 -> lo1 (left
+    // column) and host -> lo2 -> lo3 (right column), the same for hi (macro
+    // i's Di is macro i-1's Do within a column, the host word at the head of
+    // each).  One chain through all four (2026-09-23 and earlier) put the
+    // 64-wire link from lo1 / hi1 to lo2 / hi2 across the whole middle
+    // corridor on Metal3 for a path that only runs during download.  With
+    // the bank's bypass bit set every macro's Do is its Di, so the host word
+    // still reaches every macro and each is shifted with its own strobe.
     wire [CFGMEM_COUNT*32-1:0] cfgmem_chain_lo;
     wire [CFGMEM_COUNT*32-1:0] cfgmem_chain_hi;
-    assign cfgmem_chain_lo[31:0] = cfgmem_data_out;
-    assign cfgmem_chain_hi[31:0] = cfgmem_data_out;
-    assign cfgmem_chain_lo[CFGMEM_COUNT*32-1:32] = cfgmem_data_in_lo[(CFGMEM_COUNT-1)*32-1:0];
-    assign cfgmem_chain_hi[CFGMEM_COUNT*32-1:32] = cfgmem_data_in_hi[(CFGMEM_COUNT-1)*32-1:0];
+    assign cfgmem_chain_lo[ 31: 0] = cfgmem_data_out;
+    assign cfgmem_chain_hi[ 31: 0] = cfgmem_data_out;
+    assign cfgmem_chain_lo[ 63:32] = cfgmem_data_in_lo[31:0];
+    assign cfgmem_chain_hi[ 63:32] = cfgmem_data_in_hi[31:0];
+    assign cfgmem_chain_lo[ 95:64] = cfgmem_data_out;
+    assign cfgmem_chain_hi[ 95:64] = cfgmem_data_out;
+    assign cfgmem_chain_lo[127:96] = cfgmem_data_in_lo[95:64];
+    assign cfgmem_chain_hi[127:96] = cfgmem_data_in_hi[95:64];
 
     cfgmem_periph
     #(

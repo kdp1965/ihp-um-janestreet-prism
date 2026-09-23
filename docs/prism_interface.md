@@ -601,6 +601,19 @@ into row 0 of macro i, which `cfgmem_verify` uses to walk both chains.
 Only the chain input word of each bank leaves the block, so the 2x2 macro
 blocks need no lo-to-hi data wiring.
 
+**Two chains per bank, one per macro column (2026-09-23):** the single
+chain host -> 0 -> 1 -> 2 -> 3 put the 32-wire link from macro 1 (left
+column) to macro 2 (right column) across the whole middle corridor, 64
+Metal3 wires per tile for a path that only runs during download, and the
+host readback of every macro's output word sent another 128 wires from the
+right column to the read mux beside the CPU.  Now each column has its own
+chain (host -> 0 -> 1, host -> 2 -> 3, the same for hi) and the read mux is
+built as a 4:1 per column, kept as a wire so the placer leaves it beside
+its macros, plus a 2:1 at the bus.  Under bypass every macro still sees the
+host word, so the loaders (bench.py `load_banks`, the SDK) are unchanged;
+only a non-bypass write to macro 2 or 3 differs, taking the host word
+instead of macro 1's output, which nothing used.
+
 ## 4g. in_prev edge capture (decision 2, 2026-09-13)
 
 Each shard has four edge-capture flops on inputs 16-19.  CFG1[4i+3:4i]

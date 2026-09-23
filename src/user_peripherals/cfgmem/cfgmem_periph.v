@@ -149,8 +149,28 @@ module cfgmem_periph
     // (the row selected by the control byte's address when addr_sel is set,
     // otherwise the row the PRISM is addressing).  With a bank's bypass bit
     // set its macros return their Di instead, i.e. the chain input.
-    assign r_lo = rdata_lo[address[4:2]];
-    assign r_hi = rdata_hi[address[4:2]];
+    //
+    // The read mux is built in two levels, a 4:1 per macro column (macros
+    // 2c and 2c+1, lo and hi) and a 2:1 between the columns, with the column
+    // words kept as wires so synthesis does not fold them back into one 8:1
+    // at the bus.  Each column mux then has all 128 inputs on its own
+    // column and 32 outputs, so the placer keeps it beside the macros and
+    // only 32 wires per column travel to the peripheral instead of 128.
+    generate
+        if (WIDTH == 4) begin : GEN_RD_COLUMNS
+            (* keep *) wire [31:0] col_rd [1:0];
+            genvar cc;
+            for (cc = 0; cc < 2; cc = cc + 1) begin : COL
+                assign col_rd[cc] = address[5] ? (address[2] ? rdata_hi[2*cc+1] : rdata_hi[2*cc])
+                                               : (address[2] ? rdata_lo[2*cc+1] : rdata_lo[2*cc]);
+            end
+            assign r_lo = address[3] ? col_rd[1] : col_rd[0];
+            assign r_hi = r_lo;
+        end else begin : GEN_RD_FLAT
+            assign r_lo = rdata_lo[address[4:2]];
+            assign r_hi = rdata_hi[address[4:2]];
+        end
+    endgenerate
     // Bit 5 of the control byte reads back the loader FSM busy flag so
     // firmware can pace back-to-back shift writes (each write takes DEPTH*3
     // clocks to walk the WROW pulses; a write issued while busy is dropped).

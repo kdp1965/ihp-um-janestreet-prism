@@ -169,36 +169,39 @@ static void test_shift_readback(void)
     report("CFGMEM shift/readback", errors, 2 * CFGMEM_COUNT * CFGMEM_DEPTH);
 }
 
-/* 2. Walk each bank's chain with the bypass off: addressing row r of the
-      bank and shifting macro i once per row (15..0) copies macro i-1 into
-      macro i.  Going up the chain, every macro of a bank ends up holding
-      macro 0's pattern. */
+/* 2. Walk each bank's chains with the bypass off: a chain per macro column
+      (host -> 0 -> 1, host -> 2 -> 3), so addressing row r of the bank and
+      shifting the column's tail macro once per row (15..0) copies the head
+      into it.  Afterwards each column holds its head's pattern; the heads
+      are untouched (a shift of a head would load the host word). */
 static void test_chain(void)
 {
     uint32_t errors = 0, lines = 0;
 
-    for (uint32_t i = 1; i < CFGMEM_COUNT; i++)
+    for (uint32_t i = 1; i < CFGMEM_COUNT; i += 2)          /* the column tails */
         for (int r = CFGMEM_DEPTH - 1; r >= 0; r--) {
             cfgmem_ctrl(CFGMEM_CTRL_ADDR_SEL | CFGMEM_CTRL_ADDR(r));
             cfgmem_shift_lo(i, 0xDEAD0000u | r);   /* data ignored */
             cfgmem_shift_hi(i, 0xBEEF0000u | r);
         }
 
-    for (uint32_t i = 0; i < CFGMEM_COUNT; i++)
+    for (uint32_t i = 0; i < CFGMEM_COUNT; i++) {
+        uint32_t head = i & ~1u;                              /* the column's chain head */
         for (uint32_t r = 0; r < CFGMEM_DEPTH; r++) {
             uint32_t got = cfgmem_read_lo(i, r);
-            if (got != lo_pat[0][r]) {
+            if (got != lo_pat[head][r]) {
                 errors++;
-                mismatch(&lines, "lo", i, r, lo_pat[0][r], got);
+                mismatch(&lines, "lo", i, r, lo_pat[head][r], got);
             }
             got = cfgmem_read_hi(i, r);
-            if (got != hi_pat[0][r]) {
+            if (got != hi_pat[head][r]) {
                 errors++;
-                mismatch(&lines, "hi", i, r, hi_pat[0][r], got);
+                mismatch(&lines, "hi", i, r, hi_pat[head][r], got);
             }
         }
+    }
     cfgmem_release();
-    report("CFGMEM chains lo0->lo3 / hi0->hi3", errors, 2 * CFGMEM_COUNT * CFGMEM_DEPTH);
+    report("CFGMEM chains lo0->lo1, lo2->lo3 / hi", errors, 2 * CFGMEM_COUNT * CFGMEM_DEPTH);
 }
 
 /* 3. Load the gpio24 chroma (32 states x 4 words) and verify every row. */

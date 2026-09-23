@@ -88,9 +88,10 @@ class PrismBench:
            Loads the PRISM State Information Table (the CFGMEM macros).
            lo_words / hi_words list the states of bank A / bank B highest
            state first, 4 words per state, MSW first; word 0 -> macro 3 ...
-           word 3 -> macro 0.  Each bank's macros form a chain (host -> 0
-           -> 1 -> 2 -> 3); with the bank's bypass bit set every macro sees
-           the host word and is shifted with its own strobe.  State s ends
+           word 3 -> macro 0.  Each bank's macros form two chains, one per
+           macro column (host -> 0 -> 1 and host -> 2 -> 3); with the bank's
+           bypass bit set every macro sees the host word and is shifted with
+           its own strobe.  State s ends
            up in row s of its bank.
         '''
         await self.disable()
