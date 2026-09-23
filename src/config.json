@@ -4,7 +4,8 @@
     "substituting_steps": {
       "+Odb.ManualMacroPlacement": "Project.MouthKeepouts",
       "+OpenROAD.GeneratePDN": "Project.ExtendPowerStripes",
-      "+OpenROAD.ResizerTimingPostCTS": "Project.DiodesOnSramPins"
+      "+OpenROAD.ResizerTimingPostCTS": "Project.DiodesOnSramPins",
+      "+Checker.TrDRC": "Project.DropKeepouts"
     }
   },
   "//1": "pdngen's connectivity check runs before flow.py's stripe step bridges the macro pins; LVS is the verdict",

@@ -80,6 +80,19 @@ class MouthKeepouts(OdbpyStep):
 
 
 @Step.factory.register()
+class DropKeepouts(OdbpyStep):
+    """Removes the mouth keep-outs after detailed routing is signed off and
+    before fill insertion, so the filler can put decap in the freed rows
+    (fill and decap carry no signal pins, so they cannot take back the
+    Metal2 tracks the keep-outs protected).  Ported from the sg13g2 tree."""
+    id = "Project.DropKeepouts"
+    name = "Drop the Placement Keep-outs"
+
+    def get_script_path(self):
+        return os.path.join(HERE, "odb_keepout_drop.py")
+
+
+@Step.factory.register()
 class SramPinDiodePlacement(OdbpyStep):
     id = "Project.SramPinDiodePlacement"
     name = "Diodes on SRAM Input Pins"
