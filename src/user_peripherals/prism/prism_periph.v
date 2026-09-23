@@ -32,8 +32,8 @@
 //     +0x24  FIFO_STATUS {count[21:8], word bytes[7:6], push busy[5], word full[4], almost_full[3],
 //                     almost_empty[2], full[1], empty[0]}; any write flushes (the word registers too)
 //     +0x28  CRC_POLY
-//     +0x2C  CRC      value; write = preset
-//     +0x30  CRC_EXPECTED
+//     +0x2C  CRC      value; write = preset (counter mode: the count)
+//     +0x30  CRC_EXPECTED (counter mode: the compare value)
 //     +0x34  CFG2     input slot selects: [3:0]/[7:4]/[11:8]/[15:12] inputs 16-19, [19:16]..[31:28] inputs 28-31
 //                     (0 = default: in_prev[i] / 0, 1-4 in_prev[0..3], 5-12 comm[0..7], 13 comm == K3, 14 flag2,
 //                      15 Manchester bit valid)
@@ -50,6 +50,10 @@
 //                     clear / load; [28] flag2 inverts the edge (rising <-> falling) so one FSM flag
 //                     switches a bidirectional protocol's sampling edge; its sticky "edge pending" is
 //                     slot code 15 too (cleared by the FSM's OUT_SHIFT or OUT_LATCH) and FLAGS[11]
+//                     [10] counter mode (prism_crc.v, crc_mode must be 0): the 32-bit CRC register is an
+//                     up / down counter: OUT_CRC_CLEAR presets it (0, or all ones with CFG0[25]),
+//                     OUT_CRC_UPDATE + 1, OUT_LOAD_CRC - 1 (no shifter load); input 22 and FLAGS[10]
+//                     = count >= CRC_EXPECTED (unsigned).  CRC = the count, host readable / writable.
 //     +0x40  PRELOAD2 [23:0] timer 2 period: a 24-bit down counter reloads from it and raises input 28 (default
 //                     slot value) for one clock every PRELOAD2 + 1 clocks; 0 = off (Ethernet link pulses).
 //                     [24] restart the count on entry into state [29:25] (next SI == it, current SI != it):
@@ -111,6 +115,7 @@
 //     12   OUT_CRC_CLEAR      13  OUT_CRC_UPDATE       14  OUT_HOST_INTERRUPT
 //     15   OUT_SEMA_CLEAR (fractured) / OUT_FIFO_PUSH_POP (unfractured, shard 0: which FIFO bit 5 strobes)
 //     16   OUT_COMM_LOAD      17  OUT_LOAD_CRC (selected shifter <= CRC; through comm one byte per load)
+//          (counter mode, CFG3[10]: 12 = preset, 13 = count up, 17 = count down)
 //     18   OUT_K_SEL0 (constant select bit 0 for OUT_COMM_LOAD with CFG0[30])
 //     19   OUT_SEMA_SET (fractured) / OUT_FLAG2 (value OUT_LATCH stores in flag2 with CFG0[29])
 //     20   OUT_K_SEL1 (constant select bit 1)
@@ -128,7 +133,7 @@
 //     11   count2_cmp   13:12 latched_in (or latched outputs)   14 shift_term
 //     15   count2_eq_comm   19:16 in_prev[3:0] (edge-capture flops, sources in CFG1)
 //     20   FIFO flag slot E (default empty)   21 FIFO flag slot F (default full)
-//     22   crc_ok   23 count1_wrap   24 sema_in   25 other_shard_halt
+//     22   crc_ok (counter mode: count >= compare)   23 count1_wrap   24 sema_in   25 other_shard_halt
 //     26   FIFO B flag slot E   27 FIFO B flag slot F (shard 0, unfractured; else 0)
 //     28    timer2 tick (slot default; CFG2 may select something else)   31:29 spare
 //
@@ -146,7 +151,8 @@
 
 `default_nettype none
 
-module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SRAM_FIFO: number of SRAM FIFOs (0/1/2); SRAM_AW 11: 2048x32, 10: 1024x32, 9: 512x32 (2 KB)
+module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter CNT_CMP = 1 ) (    // CNT_CMP: build the CRC register's counter mode (CFG3[10])
+                         // SRAM_FIFO: number of SRAM FIFOs (0/1/2); SRAM_AW 11: 2048x32, 10: 1024x32, 9: 512x32 (2 KB)
     input             clk,          // Clock - the TinyQV project clock is normally set to 64MHz.
     input             rst_n,        // Reset_n - low to reset.
     input      [7:0]  ui_in,        // The input PMOD, 2-flop synchronized (project.v).  ui_in[7] is normally UART RX.
@@ -280,6 +286,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
     localparam       CFG3_MRX_EN    = 3;    // CFG3: [2:0] pin, [3] enable, [7:4] clocks per half bit
     localparam       CFG3_SHIFT_MRX = 8;    //       [8] shifter input = recovered bit
     localparam       CFG3_MRX_DDR   = 9;    //       [9] double-edge sampling (hb in half clocks)
+    localparam       CFG3_CNT_EN    = 10;   //       [10] CRC register = up / down counter with compare
     localparam       CFG3_FIFO32    = 11;   //       [11] 32-bit FIFO access through FIFO32
     localparam       CFG3_SMP_EN    = 16;   // edge-clocked sampler: [16] enable
     localparam       CFG3_SMP_SRC   = 17;   //       [21:17] clock input (PRISM input 0-31)
@@ -661,6 +668,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                                     cfg0[CFG_COMM_LOAD_K] ? k_sel   : preload[7:0];
             wire [31:0]               crc_value, crc_out;
             wire                      crc_ok;
+            wire                      cnt_en = cfg3[CFG3_CNT_EN];    // CRC register counts (CFG3[10])
             // in_prev edge-capture flops: CFG1[4i+3:4i] = source input number
             reg   [3:0]               in_prev;
             wire  [3:0]               in_prev_src_val;
@@ -790,7 +798,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
                 .o_comm_load      ( out_s[OUT_COMM_LOAD]               ),
                 .o_fifo_pop       ( out_s[OUT_FIFO_WR_RD] & pop_dir    ),
                 .fifo_data        ( pop_head                           ),
-                .o_load_crc       ( out_s[OUT_LOAD_CRC]                ),
+                .o_load_crc       ( out_s[OUT_LOAD_CRC] & !cnt_en      ),    // counter mode: OUT_LOAD_CRC only counts down
                 .crc_data         ( crc_out                            ),
                 .crc_byte         ( crc_byte                           ),
                 .comm_load_data   ( comm_load_data                     ),
@@ -857,14 +865,16 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9 ) (    // SR
 
             // CRC over the bit the shifter is receiving (crc_src = 0) or
             // transmitting (crc_src = 1) in the cycle OUT_CRC_UPDATE is set
-            prism_crc i_crc
+            // or, with CFG3[10], a 32-bit up / down counter on the same strobes
+            prism_crc #( .COUNTER ( CNT_CMP ) ) i_crc
             (
                 .clk          ( clk                              ),
                 .rst_n        ( rst_n                            ),
                 .enable       ( prism_enable                     ),
                 .clear        ( exec & out_s[OUT_CRC_CLEAR]      ),
                 .update       ( exec & out_s[OUT_CRC_UPDATE]     ),
-                .consume      ( exec & out_s[OUT_LOAD_CRC] & !cfg0[CFG_SHIFT_WIDE] ),
+                .consume      ( exec & out_s[OUT_LOAD_CRC] & (cnt_en | !cfg0[CFG_SHIFT_WIDE]) ),
+                .count_en     ( cnt_en                           ),
                 .bit_in       ( cfg0[CFG_CRC_SRC] ? shift_data : shift_in_bit ),
                 .mode         ( cfg0[CFG_CRC_MODE +: 2]          ),
                 .reflect      ( cfg0[CFG_CRC_REFLECT]            ),

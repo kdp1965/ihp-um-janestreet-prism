@@ -28,6 +28,7 @@ from user_peripherals.prism.chroma_onewire import *
 from user_peripherals.prism.chroma_usb_ls import *
 from user_peripherals.prism.chroma_eth_tx import *
 from user_peripherals.prism.chroma_eth_rx import *
+from user_peripherals.prism.chroma_counter import *
 
 
 # =============================================================================
@@ -1488,6 +1489,136 @@ class EdgeTest(PrismTest):
         assert await tqv.read_word_reg(REG_COUNT1) == 5
         dut.ui_in[2].value = 0
         await tqv.write_word_reg(REG_CFG1, 0)
+        await bench.disable()
+
+
+class CounterTest(PrismTest):
+    ''' CRC register counter mode (CFG3[10]): the 32-bit CRC register is an
+        up / down counter on the CRC strobes, OUT_CRC_CLEAR presets it,
+        OUT_CRC_UPDATE counts up, OUT_LOAD_CRC counts down, and crc_ok
+        (input 22, FLAGS[10]) is the unsigned count >= CRC_EXPECTED.  The
+        counter chroma steps once per ui_in[2] transition (down while
+        host_in[1] is set), presets on a host_in[0] toggle, counts the steps
+        that end at or above the compare value in count2 and shows the
+        compare on uo_out[1].  Everything is checked against a model of the
+        count; with the mode off the same strobes run the CRC as before. '''
+    name = "up / down counter with compare (CRC register counter mode)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        dut.ui_in[2].value = 0
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        await tqv.write_word_reg(REG_CFG1, (2 << 0) | (8 << 4))     # in_prev0 <- ui_in[2], in_prev1 <- host_in[0]
+        await tqv.write_word_reg(REG_CFG3, CFG3_CNT_EN)
+        await bench.load_chroma(chroma_counter, chroma_counter_ctrlReg, chroma_counter_pinmuxReg)
+        await self.clocks(20)
+
+        m = {"v": 0, "hits": 0, "cmp": 0, "host0": 0, "down": False}
+
+        async def compare(c):
+            m["cmp"] = c
+            await tqv.write_word_reg(REG_CRC_EXP, c)
+
+        async def direction(down):
+            m["down"] = down
+            await tqv.write_byte_reg(REG_HOST, (0x02 if down else 0x00) | m["host0"])
+
+        async def steps(n, gap=12):
+            for _ in range(n):
+                dut.ui_in[2].value = 1 - int(dut.ui_in[2].value)
+                m["v"] = (m["v"] + (-1 if m["down"] else 1)) & 0xFFFFFFFF
+                if m["v"] >= m["cmp"]:
+                    m["hits"] += 1
+                await self.clocks(gap)
+
+        async def host_preset(v):                       # host_in[0] toggle -> ZERO state
+            await tqv.write_byte_reg(REG_TOGGLE, 0x00)
+            m["host0"] ^= 1
+            m["v"] = v
+            await self.clocks(12)
+
+        async def preset(v):                            # host write of the count
+            await tqv.write_word_reg(REG_CRC, v)
+            m["v"] = v
+
+        async def check(what):
+            v = await tqv.read_word_reg(REG_CRC)
+            assert v == m["v"], f"{what}: count {v:#x} expected {m['v']:#x}"
+            hits = await tqv.read_byte_reg(REG_COUNT2)
+            assert hits == m["hits"] & 0xFF, f"{what}: {hits} hits expected {m['hits']}"
+            ge = m["v"] >= m["cmp"]
+            flags = await tqv.read_word_reg(REG_FLAGS)
+            assert bool(flags & FLAG_CRC_OK) == ge, f"{what}: FLAGS {flags:#x}, count >= compare should be {ge}"
+            pin = (int(dut.uo_out.value) >> 1) & 1
+            assert pin == ge, f"{what}: uo_out[1] {pin}, count >= compare should be {ge}"
+
+        self.log("count up through the compare value, then down through it")
+        await compare(5)
+        await check("start")
+        await steps(3)
+        await check("3 up")
+        await steps(4)                                   # 5, 6, 7 are at or above 5
+        await check("7 up")
+        await direction(True)
+        await steps(4)                                   # 6, 5 are, 4, 3 are not
+        await check("4 down")
+
+        self.log("OUT_CRC_CLEAR presets 0, the host presets anything; 32-bit wrap both ways")
+        await host_preset(0)
+        await check("cleared")
+        await direction(False)
+        await preset(0xFFFF_FFFE)
+        await check("host preset")
+        await steps(3)                                   # FFFFFFFF, 0, 1
+        await check("wrapped up")
+        await preset(1)
+        await direction(True)
+        await steps(2)                                   # 0, FFFFFFFF
+        await check("wrapped down")
+
+        self.log("the compare is unsigned")
+        await compare(0x8000_0000)
+        await direction(False)
+        await preset(0x7FFF_FFFF)
+        await check("below")
+        await steps(1)
+        await check("at")
+        await direction(True)
+        await steps(1)
+        await check("below again")
+        await compare(0)                                 # always at or above
+        await check("compare 0")
+        await compare(0xFFFF_FFFF)
+        await preset(0xFFFF_FFFF)
+        await check("all ones")
+
+        self.log("crc_init_ones presets all ones; a count down leaves the shifter alone")
+        await tqv.write_word_reg(REG_CFG0, chroma_counter_ctrlReg | (1 << 25))
+        await host_preset(0xFFFF_FFFF)
+        await check("preset ones")
+        await tqv.write_word_reg(REG_CFG0, chroma_counter_ctrlReg)
+        await tqv.write_byte_reg(REG_COMM, 0xA5)
+        await steps(1)
+        await check("down 1")
+        assert await tqv.read_byte_reg(REG_COMM) == 0xA5
+        await host_preset(0)
+        await check("preset zero")
+
+        self.log("mode off: the strobes run the CRC register as before (mode 0: shift on OUT_LOAD_CRC only)")
+        await tqv.write_word_reg(REG_CFG3, 0)
+        await direction(False)
+        await tqv.write_word_reg(REG_CRC, 0x1234_5678)
+        await steps(2)                                   # OUT_CRC_UPDATE: nothing with crc_mode 0
+        assert await tqv.read_word_reg(REG_CRC) == 0x1234_5678
+        await direction(True)
+        await steps(1)                                   # OUT_LOAD_CRC: comm <= low byte, register advances
+        assert await tqv.read_word_reg(REG_CRC) == 0x3456_7800
+        assert await tqv.read_byte_reg(REG_COMM) == 0x78
+        assert not (await tqv.read_word_reg(REG_FLAGS) & FLAG_CRC_OK)
+        assert ((int(dut.uo_out.value) >> 1) & 1) == 0
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        await tqv.write_word_reg(REG_CFG1, 0)
+        dut.ui_in[2].value = 0
         await bench.disable()
 
 

@@ -25,6 +25,9 @@
 `ifndef PRISM_SRAM_AW
 `define PRISM_SRAM_AW 9             // 9: 512x32 (2 KB), 10: 1024x32 (4 KB), 11: 2048x32 (8 KB)
 `endif
+`ifndef PRISM_CNT_CMP
+`define PRISM_CNT_CMP 1             // 1: the CRC register doubles as a 32-bit up / down counter with compare (CFG3[10])
+`endif
 
 module tinyQV_peripherals (
     input         clk,
@@ -355,7 +358,7 @@ module tinyQV_peripherals (
     // --------------------------------------------------------------------- //
     // PRISM Peripheral
 
-    tqvp_prism #( .SRAM_FIFO ( `PRISM_SRAM_FIFO ), .SRAM_AW ( `PRISM_SRAM_AW ) ) i_prism
+    tqvp_prism #( .SRAM_FIFO ( `PRISM_SRAM_FIFO ), .SRAM_AW ( `PRISM_SRAM_AW ), .CNT_CMP ( `PRISM_CNT_CMP ) ) i_prism
     (
         .clk(clk),
         .rst_n(rst_n),

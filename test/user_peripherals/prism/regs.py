@@ -62,6 +62,7 @@ REG_CONST   = 0x138       # constants K3..K0 (K3 = comm match value)
 REG_CFG3    = 0x13C       # [2:0] Manchester receive pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit
                           # [9] double-edge sampling (hb = half clocks per half bit), [27:16] edge-clocked sampler (CFG3_SMP_*)
 CFG3_MRX_DDR   = 1 << 9   # recoverer samples the pin on both clock edges
+CFG3_CNT_EN    = 1 << 10  # the CRC register is a 32-bit up / down counter (OUT_CRC_CLEAR / UPDATE / LOAD_CRC), crc_ok = count >= CRC_EXPECTED
 CFG3_FIFO32    = 1 << 11  # 32-bit FIFO access through REG_FIFO32
 CFG3_SMP_EN    = 1 << 16  # sampler enable
 def CFG3_SMP_SRC(n): return (n & 0x1f) << 17   # the PRISM input whose edge clocks it

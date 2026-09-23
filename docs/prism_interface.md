@@ -27,12 +27,12 @@ From `changes.md` item 12, with the spares filled in as suggestions.
 | 9 | OUT_COUNT2_INC | |
 | 10 | OUT_COUNT2_DEC | |
 | 11 | OUT_COUNT2_CLEAR | |
-| 12 | OUT_CRC_CLEAR | reset CRC to init value |
-| 13 | OUT_CRC_UPDATE | feed the shifter's current bit (or byte) into the CRC |
+| 12 | OUT_CRC_CLEAR | reset CRC to init value (counter mode: preset the count, 0 or all ones) |
+| 13 | OUT_CRC_UPDATE | feed the shifter's current bit (or byte) into the CRC (counter mode: count + 1) |
 | 14 | OUT_HOST_INTERRUPT | set the shard's sticky interrupt flag once per assertion (edge-detected in the peripheral, not re-armed every clock the state persists); two interrupt lines to the host, one per shard |
 | 15 | OUT_SEMA_CLEAR / OUT_FIFO_PUSH_POP | fractured: clear the semaphore the other shard set for us (setting it towards the other shard rides on OUT_SEMA_SET).  Unfractured (shard 0): bit 5 strobes FIFO A (0) or FIFO B (1), i.e. push / pop with A = RX, B = TX; see 4b |
 | 16 | OUT_COMM_LOAD | load comm from preload[7:0], or from constant K[{out20, out18}] with CFG0[30] (4h) |
-| 17 | OUT_LOAD_CRC | load the selected shifter from the CRC: the wide shifter takes all 32 bits, comm takes one byte per load in wire order and the CRC advances to the next byte (4h) |
+| 17 | OUT_LOAD_CRC | load the selected shifter from the CRC: the wide shifter takes all 32 bits, comm takes one byte per load in wire order and the CRC advances to the next byte (4h); counter mode: count - 1, no shifter load |
 | 18 | OUT_K_SEL0 | constant select bit 0 for OUT_COMM_LOAD when CFG0[30] is set (4h) |
 | 19 | OUT_SEMA_SET / OUT_FLAG2 | fractured: set the sticky semaphore seen by the other shard.  Also the value OUT_LATCH stores in flag2 with CFG0[29] (4h) |
 | 20 | OUT_K_SEL1 | constant select bit 1 (4h) |
@@ -59,7 +59,7 @@ features take 16 and up.
 | 16-19 | slots, default in_prev[3:0] | input slots (4h): CFG2 picks in_prev[k], a comm bit, comm == K3 or flag2; default = the edge-capture flops (sources CFG1[15:0], see 4g) |
 | 20 | fifo flag slot E | own FIFO: empty by default; CFG1[25:24] selects almost-empty / full / almost-full |
 | 21 | fifo flag slot F | own FIFO: full by default; CFG1[27:26] selects almost-full / empty / almost-empty |
-| 22 | crc_ok | CRC residue equals the expected / magic value |
+| 22 | crc_ok | CRC residue equals the expected / magic value; counter mode (CFG3[10]): count >= CRC_EXPECTED, unsigned |
 | 23 | count1_wrap | count1 rolled over (count-up natural mode) |
 | 24 | sema_in | sticky semaphore set by the other shard's OUT_SEMA_SET, cleared by this shard's OUT_SEMA_CLEAR (same-cycle winner = CFG0[24]); implemented Phase 2 |
 | 25 | other_shard_halt | the other shard is halted (debugger); implemented Phase 2 |
@@ -186,11 +186,11 @@ registers only:
 | +0x20 | FIFO data (byte lane 0) |
 | +0x24 | FIFO status: count[21:8], word bytes[7:6], push busy[5], word full[4], almost_full[3], almost_empty[2], full[1], empty[0]; write = flush (the 32-bit word registers too) |
 | +0x28 | CRC ctrl: init value select, poly select |
-| +0x2C | CRC value (read; write = preset) |
-| +0x30 | CRC expected |
+| +0x2C | CRC value (read; write = preset); counter mode: the count |
+| +0x30 | CRC expected; counter mode: the compare value |
 | +0x34 | CFG2: input slot selects for inputs 16-19 and 28-31 (4 bits each), section 4h |
 | +0x38 | CONST: K0..K3 (K3 also the comm match value), section 4h |
-| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p; [11] 32-bit FIFO access through FIFO32 (+0x54), section 4b |
+| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p; [11] 32-bit FIFO access through FIFO32 (+0x54), section 4b; [10] counter mode: the CRC register is a 32-bit up / down counter with compare, section 4b |
 | +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
 | +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
 | +0x50 | COMM_PINS: multi-bit shift lanes, section 4r: [2:0] window base b (comm[b+3:b], b = 0-4), [2k+5:2k+4] the window lane uo_out[k+1] shows when its pinmux code is 6 and CFG0[2] is set |
@@ -287,6 +287,21 @@ count1, per `shift_wide`) from the CRC so the checksum can be sent; through
 comm each load takes the next byte in wire order (low byte first for
 reflected CRCs, high byte first otherwise) and advances the CRC register,
 so CRC16 / CRC32 go out in 2 / 4 loads (4h).
+
+Counter mode (CFG3[10], `PRISM_CNT_CMP` / the `CNT_CMP` parameter builds
+it; ported from the sg13g2 tiles 2026-09-23): a chroma that does not use
+the CRC gets a 32-bit up / down counter with a 32-bit compare out of the
+same register and the same three strobes.  With `crc_mode` 0 and CFG3[10]
+set, OUT_CRC_CLEAR presets the register (0, or all ones with
+`crc_init_ones`), OUT_CRC_UPDATE adds 1 and OUT_LOAD_CRC subtracts 1
+(both in one cycle: no change; OUT_LOAD_CRC no longer loads a shifter),
+and `crc_ok` (input 22, FLAGS[10]) becomes the unsigned compare count >=
+CRC_EXPECTED (+0x30).  The host reads and presets the count at +0x2C as
+before.  The cost is one 32-bit adder and one 32-bit comparator per
+shard: the counter reuses the CRC's 32 flops, its host access and its
+strobes.  `chroma_counter` / `test_counter` exercise it: one step per pin
+transition, up or down by host_in[1], preset on a host_in[0] toggle, the
+compare on uo_out[1].
 
 Two FIFOs for shard 0 (unfractured, 2026-09-13): shard 1's FIFO and its
 OUT_SEMA_CLEAR output are idle while unfractured, so shard 0 owns both

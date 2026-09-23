@@ -20,7 +20,7 @@ from user_peripherals.prism.prism_tests import (
     RegisterTest, StewIntegrityTest, EncoderTest, Ws2812Test, Gpio24Test,
     SpiSlaveTest, UartTxTest, FifoLoopTest, SramFifoTest, EdgeTest, UsbDeviceTest, EthernetTxTest, EthernetRxTest, EthernetLoopTest, FracturedTest,
     TraceTest, Timer2Test, ConstTableTest, I2cMasterTest, SamplerTest, I2cSlaveTest, PioTest, SpiMasterTest,
-    OneWireTest, Fifo32Test)
+    OneWireTest, Fifo32Test, CounterTest)
 
 
 async def run(dut, test_class):
@@ -96,6 +96,10 @@ async def test_fractured(dut):
 @cocotb.test(skip=NO_SRAM or GATE_LEVEL)
 async def test_trace(dut):
     await run(dut, TraceTest)
+
+@cocotb.test()
+async def test_counter(dut):
+    await run(dut, CounterTest)
 
 @cocotb.test(skip=GATE_LEVEL)
 async def test_timer2(dut):
