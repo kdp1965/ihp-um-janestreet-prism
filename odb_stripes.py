@@ -29,38 +29,75 @@ def is_sram(master):
 
 
 @click.command()
-@click.option("--layer", default="Metal4", help="Vertical PDN layer")
+@click.option("--layer", default="Metal4", help="Vertical PDN layer of the tile")
+@click.option("--sram-layer", default=None, help="Layer of the IHP SRAM's power columns when it is not the tile's stripe layer "
+              "(e.g. Metal4 columns under TopMetal1 stripes): the stripes drawn on the columns then get via stacks down to them")
+@click.option("--clearance", "clearance_um", default=0.24, type=float, help="Spacing (um) kept between a drawn stripe and the other net's macro rails / tile pins on the stripe layer")
+@click.option("--stack-pitch", default=10.0, type=float, help="Spacing (um) of the via stacks along an SRAM power column")
+@click.option("--pin-face-margin", default=3.0, type=float, help="No rail via stack within this distance (um) of a macro edge that carries pins: "
+              "the stack's landing patches would sit on the pins' escape route (an unfixable short)")
+@click.option("--sram-all-columns/--sram-grid-columns", default=False,
+              help="Put a stripe on every legal supply column of an IHP SRAM, not only the ones the "
+                   "tile grid and the per-region minimum ask for.  The macro's internal mesh then "
+                   "carries far less current; it costs one full-height stripe per column in that corridor")
 @click_odb
-def extend(reader, layer):
+def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin, sram_all_columns):
     block = reader.block
     tech = reader.tech
     m = tech.findLayer(layer)
     core = block.getCoreArea()
     ylo, yhi = core.yMin(), core.yMax()
     dbu = block.getDefUnits()
+    sram_layer = sram_layer or layer
+    same_layer = sram_layer == layer
 
-    # The pdngen via stacks that join a Metal1 rail to a Metal4 stripe (one
-    # dbVia per layer pair, 5 cuts across a 2.1 um stripe), by name prefix
-    rail_vias = []
-    for prefix in ("via1_2_2100_440", "via2_3_2100_440", "via3_4_2100_440"):
-        found = [v for v in block.getVias() if v.getName().startswith(prefix)]
-        if found:
-            rail_vias.append(found[0])
+    # pdngen's via masters by layer pair (bottom -> top)
+    routing = sorted((l for l in tech.getLayers() if l.getType() == "ROUTING"), key=lambda l: l.getRoutingLevel())
+    names = [l.getName() for l in routing]
+    by_pair = {}
+    for v in block.getVias():
+        if v.getBottomLayer() is not None and v.getTopLayer() is not None:
+            by_pair.setdefault((v.getBottomLayer().getName(), v.getTopLayer().getName()), []).append(v)
 
-    # Signal pins of the tile (top edge): a stripe may not sit under one
+    def stack(lo, hi, pick):
+        """one via master per layer pair from lo up to hi"""
+        out = []
+        for a, b in zip(names[names.index(lo):names.index(hi)], names[names.index(lo) + 1:names.index(hi) + 1]):
+            cands = by_pair.get((a, b), [])
+            if not cands:
+                print(f"[WARNING] no via master between {a} and {b} in the design: stacks through it are skipped")
+                return []
+            out.append(pick(cands))
+        return out
+
+    def height(v):
+        bb = v.getBBox()
+        return bb.yMax() - bb.yMin()
+
+    # The stacks that join a Metal1 rail to a stripe (rail-sized, one cut row)
+    rail_vias = stack("Metal1", layer, lambda c: min(c, key=height))
+    # The stacks from a stripe down to an SRAM power column on a lower layer
+    sram_vias = [] if same_layer else stack(sram_layer, layer, lambda c: max(c, key=height))
+    print(f"[INFO] rail via stack: {' + '.join(v.getName() for v in rail_vias) or 'none'}")
+    if not same_layer:
+        print(f"[INFO] SRAM column via stack ({sram_layer} -> {layer}): {' + '.join(v.getName() for v in sram_vias) or 'none'}")
+
+    # Signal pins of the tile on the stripe layer: a stripe may not sit under one
     pin_xs = []
     for bterm in block.getBTerms():
         if bterm.getSigType() in ("POWER", "GROUND"):
             continue
         for bpin in bterm.getBPins():
             for box in bpin.getBoxes():
-                pin_xs.append((box.xMin(), box.xMax()))
+                if box.getTechLayer() is not None and box.getTechLayer().getName() == layer:
+                    pin_xs.append((box.xMin(), box.xMax()))
 
     # Hard macros up front: SRAM footprints with their power columns (per
     # net), and the Metal4 rails of every other macro (per net), so a stripe
     # drawn for one macro can be checked against all the others it crosses.
     sram_cols = {"VPWR": [], "VGND": []}     # (x0, x1) of a column, tile coordinates
     sram_boxes = []
+    sram_rects = []
     macro_rails = {"VPWR": [], "VGND": []}   # (x0, x1) of a CFGMEM-style rail
     for inst in block.getInsts():
         master = inst.getMaster()
@@ -70,6 +107,7 @@ def extend(reader, layer):
         ox = ib.xMin()
         if is_sram(master):
             sram_boxes.append((ib.xMin(), ib.xMax()))
+            sram_rects.append(odb.Rect(ib.xMin(), ib.yMin(), ib.xMax(), ib.yMax()))
             for nn, pins in SRAM_PINS.items():
                 for pin_name in pins:
                     mterm = master.findMTerm(pin_name)
@@ -77,7 +115,7 @@ def extend(reader, layer):
                         continue
                     for mpin in mterm.getMPins():
                         for box in mpin.getGeometry():
-                            if box.getTechLayer().getName() == layer:
+                            if box.getTechLayer().getName() == sram_layer:
                                 sram_cols[nn].append((ox + box.xMin(), ox + box.xMax()))
             continue
         for nn in ("VPWR", "VGND"):
@@ -90,12 +128,48 @@ def extend(reader, layer):
                         macro_rails[nn].append((ox + box.xMin(), ox + box.xMax()))
     for nn in sram_cols:
         sram_cols[nn] = sorted(set(sram_cols[nn]))
-    clearance = int(0.24 * dbu)              # Metal4 spacing for a 2.1 um wire
+    clearance = int(clearance_um * dbu)      # spacing on the stripe layer (0.24 um for a 2.1 um Metal4 wire, 1.64 on TopMetal1)
+
+    # Macro edges that carry signal pins (x range, y of the edge): no rail via
+    # stack may land within pin_face_margin of them.  A stack's Metal1-Metal3
+    # patches are 1.9 um wide and sit on the row rail 1-2 um beyond the edge,
+    # exactly where the pins' escape wires must go; the router then has no
+    # legal connection for those pins (the stuck single short of run g2_8x4).
+    pin_faces = []
+    edge_tol = int(3.0 * dbu)
+    for inst in block.getInsts():
+        if not inst.getMaster().isBlock():
+            continue
+        ib = inst.getBBox()
+        top = bottom = 0
+        for it in inst.getITerms():
+            if it.getMTerm().getSigType() != "SIGNAL":
+                continue
+            bb = it.getBBox()
+            if ib.yMax() - bb.yMax() <= edge_tol:
+                top += 1
+            if bb.yMin() - ib.yMin() <= edge_tol:
+                bottom += 1
+        if top:
+            pin_faces.append((ib.xMin(), ib.xMax(), ib.yMax()))
+        if bottom:
+            pin_faces.append((ib.xMin(), ib.xMax(), ib.yMin()))
+    face_margin = int(pin_face_margin * dbu)
+
+    def near_pin_face(x, y):
+        return any(fx0 - face_margin <= x <= fx1 + face_margin and abs(y - fy) <= face_margin for fx0, fx1, fy in pin_faces)
+
+    def inside_sram(b):
+        return any(r.xMin() <= b.xMin() and b.xMax() <= r.xMax() and r.yMin() <= b.yMin() and b.yMax() <= r.yMax()
+                   for r in sram_rects)
 
     def on_sram_column(x0, x1, nn):
         """A full-height stripe [x0, x1] may cross an SRAM only inside one of
         its own columns of the same polarity (its Metal4 is obstructed
-        everywhere else, with 0.26 um to spare)."""
+        everywhere else, with 0.26 um to spare).  A stripe layer above the
+        macro's top obstruction (TopMetal1 over the IHP SRAM) is free."""
+        if not same_layer:
+            return True
         for (sx0, sx1) in sram_boxes:
             if x1 <= sx0 or x0 >= sx1:
                 continue
@@ -175,6 +249,8 @@ def extend(reader, layer):
                 for r in rails:
                     if r.xMin() <= cx <= r.xMax():
                         ry = (r.yMin() + r.yMax()) // 2
+                        if near_pin_face(cx, ry):
+                            continue
                         if not any(abs(h - ry) < 0.3 * dbu for h in have):
                             for via in rail_vias:
                                 odb.dbSBox_create(swire, via, cx, ry, "STRIPE")
@@ -227,7 +303,7 @@ def extend(reader, layer):
                 continue
             for mpin in mterm.getMPins():
                 for box in mpin.getGeometry():
-                    if box.getTechLayer().getName() != layer:
+                    if box.getTechLayer().getName() != sram_layer:
                         continue
                     c = (ox + box.xMin(), ox + box.xMax())
                     if pin_name == "VSS!":
@@ -326,6 +402,18 @@ def extend(reader, layer):
                 print(f"[INFO] {inst.getName()}: VPWR stripe added at {where(c)} so the band has two pairs")
                 complete_pairs()
 
+        # 4. every remaining legal column, when the corridor can afford it:
+        #    the columns are all one net inside the macro, so feeding more of
+        #    them shortens the path from the grid to the far side of an array
+        if sram_all_columns:
+            added = {"VPWR": 0, "VGND": 0}
+            for nn in ("VPWR", "VGND"):
+                for c in sorted(free(nn), key=centre):
+                    chosen[nn].append(c)
+                    added[nn] += 1
+            print(f"[INFO] {inst.getName()}: all-columns: +{added['VPWR']} VPWR / +{added['VGND']} VGND "
+                  f"stripes on the remaining legal columns")
+
         print(f"[INFO] {inst.getName()}: " + ", ".join(f"{r}: {pairs(r)} pairs" for r in regions) +
               f"; VPWR {len(chosen['VPWR'])} / VGND {len(chosen['VGND'])} stripes for the "
               f"{n_grid['VPWR']} / {n_grid['VGND']} tile stripes crossing the macro")
@@ -414,8 +502,13 @@ def extend(reader, layer):
                            and on_removed(box):
                             odb.dbBox_destroy(box)
                 for b in list(swire.getWires()):
-                    if b.getTechLayer() is None and on_removed(b):
-                        odb.dbSBox_destroy(b)      # a via on a removed stripe
+                    if inside_sram(b) or not on_removed(b):
+                        continue
+                    lyr = b.getTechLayer()
+                    if lyr is None:
+                        odb.dbSBox_destroy(b)      # a via on a removed stripe (column stacks inside an SRAM stay)
+                    elif lyr.getName() not in (layer, "Metal1") and (b.xMax() - b.xMin()) < (b.yMax() - b.yMin()) * 8:
+                        odb.dbSBox_destroy(b)      # pdngen's small patch on an intermediate layer of that via stack
                 stripes = [b for b in stripes if b not in crossing]
                 for c in columns:
                     stripes.append(odb.dbSBox_create(swire, m, c[0], ylo, c[1], yhi, "STRIPE"))
@@ -427,6 +520,8 @@ def extend(reader, layer):
                     for r in rails:
                         if r.xMin() <= cx <= r.xMax() and (r.yMax() <= ib.yMin() or r.yMin() >= ib.yMax()):
                             ry = (r.yMin() + r.yMax()) // 2
+                            if near_pin_face(cx, ry):
+                                continue
                             for via in rail_vias:
                                 odb.dbSBox_create(swire, via, cx, ry, "STRIPE")
                 print(f"[INFO] {inst.getName()}: {net_name}: {removed} tile stripes replaced by {len(columns)} on the macro's tracks "
@@ -468,6 +563,56 @@ def extend(reader, layer):
                         odb.dbBox_create(bpin, m, r.xMin(), ylo, r.xMax(), yhi)
                     added += 1
         print(f"[INFO] {net_name}: {len(stripes)} tile stripes kept, {added} full-height stripes added over macro pin columns")
+
+        # pdngen's own rail stacks (and any patches) inside a pin-face band go too
+        cleared = 0
+        for b in list(swire.getWires()):
+            if inside_sram(b):
+                continue
+            lyr = b.getTechLayer()
+            is_via = lyr is None
+            is_patch = (not is_via) and lyr.getName() not in (layer, "Metal1") and (b.xMax() - b.xMin()) < (b.yMax() - b.yMin()) * 8
+            if (is_via or is_patch) and near_pin_face((b.xMin() + b.xMax()) // 2, (b.yMin() + b.yMax()) // 2):
+                odb.dbSBox_destroy(b); cleared += 1
+        print(f"[INFO] {net_name}: {cleared} via / patch shapes removed from the {pin_face_margin} um bands beside {len(pin_faces)} macro pin faces")
+
+        # ---- SRAM columns on a lower layer: via stacks from the stripe down to
+        # every column rect that carries a stripe, spaced along the column
+        if sram_vias:
+            stacks = 0
+            tol = int(0.05 * dbu)
+            margin = int(2.0 * dbu)
+            step = max(int(stack_pitch * dbu), 1)
+            for inst in block.getInsts():
+                master = inst.getMaster()
+                if not (master.isBlock() and is_sram(master)):
+                    continue
+                cols = sram_alloc[inst.getName()][net_name]
+                ib = inst.getBBox()
+                ox, oy, h = ib.xMin(), ib.yMin(), master.getHeight()
+                flipped = inst.getOrient() == "MX"       # R0 or MX only (checked above)
+                for pin_name in SRAM_PINS[net_name]:
+                    mterm = master.findMTerm(pin_name)
+                    if mterm is None:
+                        continue
+                    for mpin in mterm.getMPins():
+                        for box in mpin.getGeometry():
+                            if box.getTechLayer().getName() != sram_layer:
+                                continue
+                            rx0, rx1 = ox + box.xMin(), ox + box.xMax()
+                            if flipped:
+                                ry0, ry1 = oy + h - box.yMax(), oy + h - box.yMin()
+                            else:
+                                ry0, ry1 = oy + box.yMin(), oy + box.yMax()
+                            if not any(abs(c[0] - rx0) <= tol and abs(c[1] - rx1) <= tol for c in cols):
+                                continue
+                            cx = (rx0 + rx1) // 2
+                            ys = list(range(ry0 + margin, ry1 - margin + 1, step)) or [(ry0 + ry1) // 2]
+                            for y in ys:
+                                for via in sram_vias:
+                                    odb.dbSBox_create(swire, via, cx, y, "STRIPE")
+                                stacks += 1
+            print(f"[INFO] {net_name}: {stacks} via stacks from the {layer} stripes down to the SRAM {sram_layer} columns")
         tidy(net_name, swire, bpin, rails)
 
 

@@ -56,6 +56,9 @@ def main(reader, macro_prefix, width, margin, max_density, inward):
     if not macros:
         print(f"no macros with master prefix {macro_prefix}: nothing to do")
         return
+    if width <= 0:
+        print("keep-out width is 0: no keep-outs created")
+        return
 
     # group into columns by x extent
     columns = {}
