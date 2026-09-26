@@ -11,11 +11,19 @@
 # the gap and lands exactly on the macro pins. It warns if a macro pin column
 # is not aligned with an existing tile stripe.
 #
+# Column choice (allocate_sram): the grid's stripes moved onto the SRAM's own
+# columns plus complete pairs per region; --sram-all-columns adds every other
+# legal column, --sram-array-every-other every second pair position of the
+# bit-cell arrays only.  No SRAM column stripe lands on a hard macro's signal
+# pin on the stripe layer, since the stripes run the full core height.
+#
 # It finishes by leaving exactly one full-height box per stripe x: the
 # abstract LEF turns every Metal4 power box into a PORT rect, and the Tiny
 # Tapeout pin check rejects a power port rect that stops short of either
 # edge (pdngen's segments between the macros of a column, and its channel
 # repair stripe beside a macro; see tidy()).
+import collections
+
 import click
 import odb
 from reader import click_odb
@@ -40,8 +48,15 @@ def is_sram(master):
               help="Put a stripe on every legal supply column of an IHP SRAM, not only the ones the "
                    "tile grid and the per-region minimum ask for.  The macro's internal mesh then "
                    "carries far less current; it costs one full-height stripe per column in that corridor")
+@click.option("--sram-array-every-other/--no-sram-array-every-other", default=False,
+              help="In each bit-cell array of an IHP SRAM, a VPWR/VGND stripe pair on every other available "
+                   "pair position (VGND one column right of VPWR, as the tile grid pairs them), phased so the "
+                   "grid's own pairs stay: about half the array stripes of --sram-all-columns.  The macro's "
+                   "standard-cell band keeps only what the grid and the two-pair minimum give it")
 @click_odb
-def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin, sram_all_columns):
+def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin, sram_all_columns, sram_array_every_other):
+    if sram_all_columns and sram_array_every_other:
+        raise click.ClickException("--sram-all-columns already covers every column; drop --sram-array-every-other")
     block = reader.block
     tech = reader.tech
     m = tech.findLayer(layer)
@@ -91,6 +106,27 @@ def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin
             for box in bpin.getBoxes():
                 if box.getTechLayer() is not None and box.getTechLayer().getName() == layer:
                     pin_xs.append((box.xMin(), box.xMax()))
+
+    # Signal pins of the hard macros on the stripe layer (tile x ranges).  An
+    # SRAM column stripe runs the full core height, so it may not land on one
+    # anywhere: in runs/dma_band (all-columns) the stripes crossing
+    # CFGMEMS_LEFT[1].cfgmem_lo (top-left, over the SRAMs' x range) sat on or
+    # beside 41 of its 56 Metal4 data pins, 12 fixed Metal4 shorts / spacing
+    # errors in the final DRC.  R0 / MX placements keep the pins' x.
+    macro_pin_xs = []
+    for inst in block.getInsts():
+        master = inst.getMaster()
+        if not master.isBlock():
+            continue
+        mox = inst.getBBox().xMin()
+        for mterm in master.getMTerms():
+            if mterm.getSigType() in ("POWER", "GROUND"):
+                continue
+            for mpin in mterm.getMPins():
+                for box in mpin.getGeometry():
+                    if box.getTechLayer() is not None and box.getTechLayer().getName() == layer:
+                        macro_pin_xs.append((mox + box.xMin(), mox + box.xMax()))
+    print(f"[INFO] {len(macro_pin_xs)} macro signal pin shapes on {layer}: SRAM column stripes keep clear of them")
 
     # Hard macros up front: SRAM footprints with their power columns (per
     # net), and the Metal4 rails of every other macro (per net), so a stripe
@@ -336,6 +372,7 @@ def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin
 
         def clear(c, nn):
             return all(c[1] + pin_margin < px0 or c[0] - pin_margin > px1 for (px0, px1) in pin_xs) \
+                and all(c[1] + pin_margin < px0 or c[0] - pin_margin > px1 for (px0, px1) in macro_pin_xs) \
                 and clear_of_rails(c[0], c[1], nn)
 
         def free(nn, region=None):
@@ -413,6 +450,41 @@ def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin
                     added[nn] += 1
             print(f"[INFO] {inst.getName()}: all-columns: +{added['VPWR']} VPWR / +{added['VGND']} VGND "
                   f"stripes on the remaining legal columns")
+
+        # 4b. every other VPWR/VGND pair position of each bit-cell array.  A
+        #     pair position is a VPWR column with a VGND column one column
+        #     pitch (5.62 um) to its right, as the tile grid pairs its stripes;
+        #     the alternation is phased to the pairs the grid already put in
+        #     the array, so those stay and the new ones fall between them.  A
+        #     position with either column taken counts as served.  The band
+        #     (the macro's own standard cells) keeps what steps 1-3 gave it.
+        if sram_array_every_other:
+            col_pitch = int(5.62 * dbu)
+            tol = int(1.0 * dbu)
+            for r in ("array L", "array R"):
+                vps = sorted((c for c, rr in cols["VPWR"].items() if rr == r), key=centre)
+                vgs = sorted((c for c, rr in cols["VGND"].items() if rr == r), key=centre)
+                locs = []
+                for c in vps:
+                    right = [g for g in vgs if abs(centre(g) - centre(c) - col_pitch) <= tol]
+                    if right:
+                        locs.append((c, right[0]))
+                if not locs:
+                    continue
+                held = [i for i, (c, g) in enumerate(locs) if c in chosen["VPWR"] or g in chosen["VGND"]]
+                phase = collections.Counter(i % 2 for i in held).most_common(1)[0][0] if held else 0
+                n = blocked = 0
+                for i, (c, g) in enumerate(locs):
+                    if i % 2 != phase or c in chosen["VPWR"] or g in chosen["VGND"]:
+                        continue
+                    if not (clear(c, "VPWR") and clear(g, "VGND")):
+                        blocked += 1
+                        continue
+                    chosen["VPWR"].append(c)
+                    chosen["VGND"].append(g)
+                    n += 1
+                print(f"[INFO] {inst.getName()}: array-every-other: {r}: {len(locs)} pair positions, "
+                      f"{len(held)} held by the grid, +{n} pairs ({blocked} positions blocked by pins / rails)")
 
         print(f"[INFO] {inst.getName()}: " + ", ".join(f"{r}: {pairs(r)} pairs" for r in regions) +
               f"; VPWR {len(chosen['VPWR'])} / VGND {len(chosen['VGND'])} stripes for the "

@@ -39,6 +39,7 @@ class ExtendPowerStripes(OdbpyStep):
         Variable("EXTEND_STRIPES_STACK_PITCH", Decimal, "Spacing of the via stacks along an SRAM power column.", units="µm", default=Decimal("10")),
         Variable("EXTEND_STRIPES_PIN_FACE_MARGIN", Decimal, "No rail via stack within this distance of a macro edge that carries pins (the stack would block the pins' escape); 0 leaves pdngen's stacks alone.", units="µm", default=Decimal("3")),
         Variable("EXTEND_STRIPES_SRAM_ALL_COLUMNS", bool, "Put a stripe on every legal supply column of an IHP SRAM rather than only the ones the tile grid and the per-region minimum need.", default=False),
+        Variable("EXTEND_STRIPES_SRAM_ARRAY_EVERY_OTHER", bool, "In each bit-cell array of an IHP SRAM, add a VPWR/VGND stripe pair on every other available pair position (the grid's pairs stay; the macro's standard-cell band is left as the grid gives it).  Not with EXTEND_STRIPES_SRAM_ALL_COLUMNS.", default=False),
     ]
 
     def get_command(self):
@@ -51,6 +52,8 @@ class ExtendPowerStripes(OdbpyStep):
         if self.config.get("EXTEND_STRIPES_SRAM_LAYER"):
             cmd += ["--sram-layer", self.config["EXTEND_STRIPES_SRAM_LAYER"]]
         cmd += ["--sram-all-columns" if self.config["EXTEND_STRIPES_SRAM_ALL_COLUMNS"] else "--sram-grid-columns"]
+        if self.config["EXTEND_STRIPES_SRAM_ARRAY_EVERY_OTHER"]:
+            cmd += ["--sram-array-every-other"]
         return cmd
 
 
