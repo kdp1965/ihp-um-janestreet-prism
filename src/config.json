@@ -9,7 +9,7 @@
     }
   },
   "//1": "pdngen's connectivity check runs before flow.py's stripe step bridges the macro pins; LVS is the verdict",
-  "PL_TARGET_DENSITY_PCT": 52,
+  "PL_TARGET_DENSITY_PCT": 57,
   "CLOCK_PERIOD": 14,
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
   "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,
@@ -48,10 +48,11 @@
   "//": "pdn_cfg.tcl is LibreLane's PDN config without the per-macro grid, which has no shapes with this single-layer PDN and makes an unpatched pdngen fail (PDN-0233); the macros get their power from Project.ExtendPowerStripes",
   "PDN_CFG": "dir::pdn_cfg.tcl",
   "//": "Placement keep-outs (soft, density cap) in the rows outside each CFGMEM column's tile-facing edge at the pair gaps: every stalled route died there (see docs 4z.6)",
-  "//stripes": "Project.ExtendPowerStripes: a full-height Metal4 stripe on every legal supply column of each IHP SRAM (36 VPWR + 36 VGND per instance instead of the 11 the tile grid gives), so the macro's internal mesh carries little current; run sram_all (2026-09-23) routed and signed off like ch9 (+0.8% wire, +7 first-round passes). Pin-face margin 0 keeps pdngen's rail via stacks beside the CFGMEM pin faces, the way every clean CMOS5L run was made.",
-  "EXTEND_STRIPES_SRAM_ALL_COLUMNS": true,
+  "//stripes": "Project.ExtendPowerStripes: the SRAMs get the tile grid's stripes moved onto their own supply columns plus complete pairs per region, and (EXTEND_STRIPES_SRAM_ARRAY_EVERY_OTHER) a VPWR/VGND pair on every other pair position of each bit-cell array; no SRAM column stripe lands within 0.5 um of a macro's Metal4 signal pin (all-columns feeding put 41 full-height stripes on or beside CFGMEMS_LEFT[1].cfgmem_lo's data pins in runs/dma_band, 12 fixed DRC errors).  CFGMEMS_LEFT[1].cfgmem_lo sits at the top left by the tile pins (the band layout), one 44.96 um grid step east of dma_band's 87.51 so its westmost pins leave SRAM[1] alone.  runs/dma_band_eo_l1e (2026-09-26) signed off with exactly this config.",
+  "EXTEND_STRIPES_SRAM_ALL_COLUMNS": false,
+  "EXTEND_STRIPES_SRAM_ARRAY_EVERY_OTHER": true,
   "EXTEND_STRIPES_PIN_FACE_MARGIN": 0,
-  "MOUTH_KEEPOUT_WIDTH": 60,
+  "MOUTH_KEEPOUT_WIDTH": 40,
   "MOUTH_KEEPOUT_MARGIN": 20,
   "MOUTH_KEEPOUT_MAX_DENSITY": 0.25,
   "MOUTH_KEEPOUT_INWARD": 0,
@@ -84,10 +85,10 @@
         },
         "i_peripherals.CFGMEMS_LEFT[1].cfgmem_lo": {
           "location": [
-            537.11,
-            366.66
+            132.47,
+            619.92
           ],
-          "orientation": "FS"
+          "orientation": "N"
         },
         "i_peripherals.CFGMEMS_LEFT[1].cfgmem_hi": {
           "location": [

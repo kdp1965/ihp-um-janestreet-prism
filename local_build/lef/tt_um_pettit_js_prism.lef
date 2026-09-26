@@ -16,15 +16,7 @@ MACRO tt_um_pettit_js_prism
     END
     PORT
       LAYER Metal4 ;
-        RECT 24.480 3.780 27.290 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
         RECT 35.720 3.780 38.530 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 46.960 3.780 49.770 706.860 ;
     END
     PORT
       LAYER Metal4 ;
@@ -32,23 +24,11 @@ MACRO tt_um_pettit_js_prism
     END
     PORT
       LAYER Metal4 ;
-        RECT 69.440 3.780 72.250 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
         RECT 80.680 3.780 83.490 706.860 ;
     END
     PORT
       LAYER Metal4 ;
-        RECT 91.920 3.780 94.730 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
         RECT 103.160 3.780 105.970 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 114.400 3.780 117.210 706.860 ;
     END
     PORT
       LAYER Metal4 ;
@@ -60,19 +40,7 @@ MACRO tt_um_pettit_js_prism
     END
     PORT
       LAYER Metal4 ;
-        RECT 148.120 3.780 150.930 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 159.360 3.780 162.170 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 170.600 3.780 173.410 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 181.840 3.780 184.650 706.860 ;
+        RECT 148.480 3.780 150.580 706.860 ;
     END
     PORT
       LAYER Metal4 ;
@@ -84,35 +52,11 @@ MACRO tt_um_pettit_js_prism
     END
     PORT
       LAYER Metal4 ;
-        RECT 218.000 3.780 220.810 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 228.300 3.780 231.110 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 238.710 3.780 241.520 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 249.950 3.780 252.760 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 261.190 3.780 264.000 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
         RECT 272.430 3.780 275.240 706.860 ;
     END
     PORT
       LAYER Metal4 ;
         RECT 283.670 3.780 286.480 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 294.910 3.780 297.720 706.860 ;
     END
     PORT
       LAYER Metal4 ;
@@ -128,35 +72,11 @@ MACRO tt_um_pettit_js_prism
     END
     PORT
       LAYER Metal4 ;
-        RECT 339.870 3.780 342.680 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 351.110 3.780 353.920 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 362.350 3.780 365.160 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
         RECT 373.590 3.780 376.400 706.860 ;
     END
     PORT
       LAYER Metal4 ;
-        RECT 384.830 3.780 387.640 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 396.070 3.780 398.880 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 407.310 3.780 410.120 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 463.200 3.560 465.300 707.080 ;
+        RECT 463.200 3.780 465.300 706.860 ;
     END
     PORT
       LAYER Metal4 ;
@@ -280,15 +200,7 @@ MACRO tt_um_pettit_js_prism
     END
     PORT
       LAYER Metal4 ;
-        RECT 18.860 3.780 21.670 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
         RECT 30.100 3.780 32.910 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 41.340 3.780 44.150 706.860 ;
     END
     PORT
       LAYER Metal4 ;
@@ -296,23 +208,11 @@ MACRO tt_um_pettit_js_prism
     END
     PORT
       LAYER Metal4 ;
-        RECT 63.820 3.780 66.630 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
         RECT 75.060 3.780 77.870 706.860 ;
     END
     PORT
       LAYER Metal4 ;
-        RECT 86.300 3.780 89.110 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
         RECT 97.540 3.780 100.350 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 108.780 3.780 111.590 706.860 ;
     END
     PORT
       LAYER Metal4 ;
@@ -324,19 +224,7 @@ MACRO tt_um_pettit_js_prism
     END
     PORT
       LAYER Metal4 ;
-        RECT 142.500 3.780 145.310 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 153.740 3.780 156.550 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 164.980 3.780 167.790 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 176.220 3.780 179.030 706.860 ;
+        RECT 142.860 3.780 144.960 706.860 ;
     END
     PORT
       LAYER Metal4 ;
@@ -348,31 +236,7 @@ MACRO tt_um_pettit_js_prism
     END
     PORT
       LAYER Metal4 ;
-        RECT 212.850 3.780 215.660 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 223.150 3.780 225.960 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 244.330 3.780 247.140 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 255.570 3.780 258.380 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 266.810 3.780 269.620 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
         RECT 278.050 3.780 280.860 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 289.290 3.780 292.100 706.860 ;
     END
     PORT
       LAYER Metal4 ;
@@ -388,39 +252,11 @@ MACRO tt_um_pettit_js_prism
     END
     PORT
       LAYER Metal4 ;
-        RECT 334.250 3.780 337.060 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 345.490 3.780 348.300 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 356.730 3.780 359.540 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
         RECT 367.970 3.780 370.780 706.860 ;
     END
     PORT
       LAYER Metal4 ;
-        RECT 379.210 3.780 382.020 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 390.450 3.780 393.260 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 401.690 3.780 404.500 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 412.930 3.780 415.740 706.860 ;
-    END
-    PORT
-      LAYER Metal4 ;
-        RECT 457.580 3.560 459.680 707.080 ;
+        RECT 457.580 3.780 459.680 706.860 ;
     END
     PORT
       LAYER Metal4 ;
@@ -776,8 +612,8 @@ MACRO tt_um_pettit_js_prism
   PIN uio_out[0]
     DIRECTION OUTPUT ;
     USE SIGNAL ;
-    ANTENNAGATEAREA 0.552500 ;
-    ANTENNADIFFAREA 0.632400 ;
+    ANTENNAGATEAREA 0.241800 ;
+    ANTENNADIFFAREA 2.827200 ;
     PORT
       LAYER Metal4 ;
         RECT 87.210 709.640 87.510 710.640 ;
@@ -786,7 +622,7 @@ MACRO tt_um_pettit_js_prism
   PIN uio_out[1]
     DIRECTION OUTPUT ;
     USE SIGNAL ;
-    ANTENNADIFFAREA 0.677200 ;
+    ANTENNADIFFAREA 1.413600 ;
     PORT
       LAYER Metal4 ;
         RECT 83.370 709.640 83.670 710.640 ;
@@ -795,7 +631,7 @@ MACRO tt_um_pettit_js_prism
   PIN uio_out[2]
     DIRECTION OUTPUT ;
     USE SIGNAL ;
-    ANTENNADIFFAREA 0.677200 ;
+    ANTENNADIFFAREA 1.413600 ;
     PORT
       LAYER Metal4 ;
         RECT 79.530 709.640 79.830 710.640 ;
@@ -841,7 +677,7 @@ MACRO tt_um_pettit_js_prism
   PIN uio_out[7]
     DIRECTION OUTPUT ;
     USE SIGNAL ;
-    ANTENNAGATEAREA 0.218400 ;
+    ANTENNAGATEAREA 0.109200 ;
     ANTENNADIFFAREA 0.632400 ;
     PORT
       LAYER Metal4 ;
@@ -878,7 +714,7 @@ MACRO tt_um_pettit_js_prism
   PIN uo_out[3]
     DIRECTION OUTPUT ;
     USE SIGNAL ;
-    ANTENNADIFFAREA 0.615900 ;
+    ANTENNADIFFAREA 2.827200 ;
     PORT
       LAYER Metal4 ;
         RECT 106.410 709.640 106.710 710.640 ;
@@ -887,7 +723,7 @@ MACRO tt_um_pettit_js_prism
   PIN uo_out[4]
     DIRECTION OUTPUT ;
     USE SIGNAL ;
-    ANTENNADIFFAREA 0.615900 ;
+    ANTENNADIFFAREA 0.632400 ;
     PORT
       LAYER Metal4 ;
         RECT 102.570 709.640 102.870 710.640 ;
@@ -896,7 +732,7 @@ MACRO tt_um_pettit_js_prism
   PIN uo_out[5]
     DIRECTION OUTPUT ;
     USE SIGNAL ;
-    ANTENNADIFFAREA 0.615900 ;
+    ANTENNADIFFAREA 0.632400 ;
     PORT
       LAYER Metal4 ;
         RECT 98.730 709.640 99.030 710.640 ;
@@ -926,9 +762,9 @@ MACRO tt_um_pettit_js_prism
       LAYER Metal1 ;
         RECT 2.880 3.560 1721.280 707.080 ;
       LAYER Metal2 ;
-        RECT 1.335 1.115 1723.785 710.365 ;
+        RECT 1.335 0.695 1720.905 709.525 ;
       LAYER Metal3 ;
-        RECT 1.295 1.160 1723.825 710.320 ;
+        RECT 1.295 0.735 1720.945 709.485 ;
       LAYER Metal4 ;
         RECT 13.595 709.430 29.400 709.640 ;
         RECT 30.120 709.430 33.240 709.640 ;
@@ -973,83 +809,42 @@ MACRO tt_um_pettit_js_prism
         RECT 179.880 709.430 183.000 709.640 ;
         RECT 183.720 709.430 186.840 709.640 ;
         RECT 187.560 709.430 190.680 709.640 ;
-        RECT 191.400 709.430 1719.940 709.640 ;
-        RECT 13.595 707.290 1719.940 709.430 ;
-        RECT 13.595 707.070 457.370 707.290 ;
-        RECT 16.260 3.570 18.650 707.070 ;
-        RECT 21.880 3.570 24.270 707.070 ;
-        RECT 27.500 3.570 29.890 707.070 ;
+        RECT 191.400 709.430 1720.420 709.640 ;
+        RECT 13.595 707.290 1720.420 709.430 ;
+        RECT 13.595 707.070 502.330 707.290 ;
+        RECT 16.260 3.570 29.890 707.070 ;
         RECT 33.120 3.570 35.510 707.070 ;
-        RECT 38.740 3.570 41.130 707.070 ;
-        RECT 44.360 3.570 46.750 707.070 ;
-        RECT 49.980 3.570 52.370 707.070 ;
+        RECT 38.740 3.570 52.370 707.070 ;
         RECT 55.600 3.570 57.990 707.070 ;
-        RECT 61.220 3.570 63.610 707.070 ;
-        RECT 66.840 3.570 69.230 707.070 ;
-        RECT 72.460 3.570 74.850 707.070 ;
+        RECT 61.220 3.570 74.850 707.070 ;
         RECT 78.080 3.570 80.470 707.070 ;
-        RECT 83.700 3.570 86.090 707.070 ;
-        RECT 89.320 3.570 91.710 707.070 ;
-        RECT 94.940 3.570 97.330 707.070 ;
+        RECT 83.700 3.570 97.330 707.070 ;
         RECT 100.560 3.570 102.950 707.070 ;
-        RECT 106.180 3.570 108.570 707.070 ;
-        RECT 111.800 3.570 114.190 707.070 ;
-        RECT 117.420 3.570 119.810 707.070 ;
+        RECT 106.180 3.570 119.810 707.070 ;
         RECT 123.040 3.570 125.430 707.070 ;
         RECT 128.660 3.570 131.050 707.070 ;
         RECT 134.280 3.570 136.670 707.070 ;
-        RECT 139.900 3.570 142.290 707.070 ;
-        RECT 145.520 3.570 147.910 707.070 ;
-        RECT 151.140 3.570 153.530 707.070 ;
-        RECT 156.760 3.570 159.150 707.070 ;
-        RECT 162.380 3.570 164.770 707.070 ;
-        RECT 168.000 3.570 170.390 707.070 ;
-        RECT 173.620 3.570 176.010 707.070 ;
-        RECT 179.240 3.570 181.630 707.070 ;
-        RECT 184.860 3.570 192.040 707.070 ;
+        RECT 139.900 3.570 142.650 707.070 ;
+        RECT 145.170 3.570 148.270 707.070 ;
+        RECT 150.790 3.570 192.040 707.070 ;
         RECT 195.270 3.570 197.190 707.070 ;
         RECT 200.420 3.570 202.340 707.070 ;
         RECT 205.570 3.570 207.490 707.070 ;
-        RECT 210.720 3.570 212.640 707.070 ;
-        RECT 215.870 3.570 217.790 707.070 ;
-        RECT 221.020 3.570 222.940 707.070 ;
-        RECT 226.170 3.570 228.090 707.070 ;
-        RECT 231.320 3.570 238.500 707.070 ;
-        RECT 241.730 3.570 244.120 707.070 ;
-        RECT 247.350 3.570 249.740 707.070 ;
-        RECT 252.970 3.570 255.360 707.070 ;
-        RECT 258.590 3.570 260.980 707.070 ;
-        RECT 264.210 3.570 266.600 707.070 ;
-        RECT 269.830 3.570 272.220 707.070 ;
+        RECT 210.720 3.570 272.220 707.070 ;
         RECT 275.450 3.570 277.840 707.070 ;
         RECT 281.070 3.570 283.460 707.070 ;
-        RECT 286.690 3.570 289.080 707.070 ;
-        RECT 292.310 3.570 294.700 707.070 ;
-        RECT 297.930 3.570 300.320 707.070 ;
+        RECT 286.690 3.570 300.320 707.070 ;
         RECT 303.550 3.570 305.940 707.070 ;
         RECT 309.170 3.570 311.560 707.070 ;
         RECT 314.790 3.570 317.180 707.070 ;
         RECT 320.410 3.570 322.800 707.070 ;
         RECT 326.030 3.570 328.420 707.070 ;
-        RECT 331.650 3.570 334.040 707.070 ;
-        RECT 337.270 3.570 339.660 707.070 ;
-        RECT 342.890 3.570 345.280 707.070 ;
-        RECT 348.510 3.570 350.900 707.070 ;
-        RECT 354.130 3.570 356.520 707.070 ;
-        RECT 359.750 3.570 362.140 707.070 ;
-        RECT 365.370 3.570 367.760 707.070 ;
+        RECT 331.650 3.570 367.760 707.070 ;
         RECT 370.990 3.570 373.380 707.070 ;
-        RECT 376.610 3.570 379.000 707.070 ;
-        RECT 382.230 3.570 384.620 707.070 ;
-        RECT 387.850 3.570 390.240 707.070 ;
-        RECT 393.470 3.570 395.860 707.070 ;
-        RECT 399.090 3.570 401.480 707.070 ;
-        RECT 404.710 3.570 407.100 707.070 ;
-        RECT 410.330 3.570 412.720 707.070 ;
-        RECT 415.950 3.570 457.370 707.070 ;
-        RECT 13.595 3.350 457.370 3.570 ;
-        RECT 459.890 3.350 462.990 707.290 ;
-        RECT 465.510 3.350 502.330 707.290 ;
+        RECT 376.610 3.570 457.370 707.070 ;
+        RECT 459.890 3.570 462.990 707.070 ;
+        RECT 465.510 3.570 502.330 707.070 ;
+        RECT 13.595 3.350 502.330 3.570 ;
         RECT 504.850 3.350 507.950 707.290 ;
         RECT 510.470 707.070 906.970 707.290 ;
         RECT 510.470 3.570 547.290 707.070 ;
@@ -1109,8 +904,8 @@ MACRO tt_um_pettit_js_prism
         RECT 1679.430 3.570 1703.700 707.070 ;
         RECT 1706.220 3.570 1716.250 707.070 ;
         RECT 1319.750 3.350 1716.250 3.570 ;
-        RECT 1718.770 3.350 1719.940 707.290 ;
-        RECT 13.595 1.535 1719.940 3.350 ;
+        RECT 1718.770 3.350 1720.420 707.290 ;
+        RECT 13.595 0.695 1720.420 3.350 ;
   END
 END tt_um_pettit_js_prism
 END LIBRARY
