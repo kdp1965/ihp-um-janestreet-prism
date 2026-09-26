@@ -321,33 +321,60 @@ module tinyQV_peripherals (
         .cfgmem_data_in_hi ( cfgmem_data_in_hi )
     );
 
-    generate
-        for (i = 0; i < CFGMEM_COUNT/2; i = i + 1) begin : CFGMEMS_LEFT
-            (* keep = "true" *)
-            CFGMEM_IHP_LEFT16 cfgmem_lo
-            (
-                .WE0  ( cfgmem_we_lo[i]                     ),
-                .EN0  ( 1'b1                                ),
-                .BYP  ( cfgmem_byp_lo                       ),
-                .WROW ( cfgmem_wrow                         ),
-                .A0   ( cfgmem_addr_lo                      ),
-                .Di0  ( cfgmem_chain_lo[(i+1)*32-1 -: 32]   ),
-                .Do0  ( cfgmem_data_in_lo[(i+1)*32-1 -: 32] )
-            );
-            
-            (* keep = "true" *)
-            CFGMEM_IHP_LEFT16 cfgmem_hi
-            (
-                .WE0  ( cfgmem_we_hi[i]                     ),
-                .EN0  ( 1'b1                                ),
-                .BYP  ( cfgmem_byp_hi                       ),
-                .WROW ( cfgmem_wrow                         ),
-                .A0   ( cfgmem_addr_hi                      ),
-                .Di0  ( cfgmem_chain_hi[(i+1)*32-1 -: 32]   ),
-                .Do0  ( cfgmem_data_in_hi[(i+1)*32-1 -: 32] )
-            );
-        end
+    // The left column, written out: CFGMEMS_LEFT[1].cfgmem_lo is the
+    // CFGMEM_IHP_LEFT16_SRAM variant (rails on SRAM[1]'s supply columns for
+    // its spot above that SRAM), so the loop over the two LEFT pairs is
+    // unrolled.  The escaped instance names are the ones the loop generated,
+    // so the macro placement and PDN hooks in src/config.json still apply.
+    (* keep = "true" *)
+    CFGMEM_IHP_LEFT16 \CFGMEMS_LEFT[0].cfgmem_lo
+    (
+        .WE0  ( cfgmem_we_lo[0]         ),
+        .EN0  ( 1'b1                    ),
+        .BYP  ( cfgmem_byp_lo           ),
+        .WROW ( cfgmem_wrow             ),
+        .A0   ( cfgmem_addr_lo          ),
+        .Di0  ( cfgmem_chain_lo[31:0]   ),
+        .Do0  ( cfgmem_data_in_lo[31:0] )
+    );
 
+    (* keep = "true" *)
+    CFGMEM_IHP_LEFT16 \CFGMEMS_LEFT[0].cfgmem_hi
+    (
+        .WE0  ( cfgmem_we_hi[0]         ),
+        .EN0  ( 1'b1                    ),
+        .BYP  ( cfgmem_byp_hi           ),
+        .WROW ( cfgmem_wrow             ),
+        .A0   ( cfgmem_addr_hi          ),
+        .Di0  ( cfgmem_chain_hi[31:0]   ),
+        .Do0  ( cfgmem_data_in_hi[31:0] )
+    );
+
+    (* keep = "true" *)
+    CFGMEM_IHP_LEFT16_SRAM \CFGMEMS_LEFT[1].cfgmem_lo
+    (
+        .WE0  ( cfgmem_we_lo[1]          ),
+        .EN0  ( 1'b1                     ),
+        .BYP  ( cfgmem_byp_lo            ),
+        .WROW ( cfgmem_wrow              ),
+        .A0   ( cfgmem_addr_lo           ),
+        .Di0  ( cfgmem_chain_lo[63:32]   ),
+        .Do0  ( cfgmem_data_in_lo[63:32] )
+    );
+
+    (* keep = "true" *)
+    CFGMEM_IHP_LEFT16 \CFGMEMS_LEFT[1].cfgmem_hi
+    (
+        .WE0  ( cfgmem_we_hi[1]          ),
+        .EN0  ( 1'b1                     ),
+        .BYP  ( cfgmem_byp_hi            ),
+        .WROW ( cfgmem_wrow              ),
+        .A0   ( cfgmem_addr_hi           ),
+        .Di0  ( cfgmem_chain_hi[63:32]   ),
+        .Do0  ( cfgmem_data_in_hi[63:32] )
+    );
+
+    generate
         for (i = CFGMEM_COUNT/2; i < CFGMEM_COUNT; i = i + 1) begin : CFGMEMS
             (* keep = "true" *)
             CFGMEM_IHP16 cfgmem_lo

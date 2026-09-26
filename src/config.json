@@ -63,13 +63,11 @@
   "FP_MACRO_VERTICAL_HALO": 0.48,
   "DIODE_CELL": "sg13cmos5l_antennanp/A",
   "ERROR_ON_PDN_VIOLATIONS": 0,
-  "//swap": "Project.SwapMacroCells: the RTL makes every CFGMEMS_LEFT[*] macro a CFGMEM_IHP_LEFT16; after synthesis CFGMEMS_LEFT[1].cfgmem_lo becomes CFGMEM_IHP_LEFT16_SRAM, the same netlist and pins built with its Metal4 rails on SRAM[1]'s supply columns for this spot (DFFRAM make left_cmos5l_sram), so the SRAM stripes run through it on its rails.  Swapped in the netlist rather than the RTL so synthesis is unchanged: runs/sram16 (2026-09-26) signed off with exactly this.",
-  "MACRO_CELL_SWAPS": {
-    "i_peripherals.CFGMEMS_LEFT[1].cfgmem_lo": "CFGMEM_IHP_LEFT16_SRAM"
-  },
+  "//swap": "CFGMEMS_LEFT[1].cfgmem_lo is CFGMEM_IHP_LEFT16_SRAM in the RTL (src/peripherals.v writes the left column out; model src/user_peripherals/cfgmem/cfgmem_left_sram.v): the LEFT16 netlist and pins built with its Metal4 rails on SRAM[1]'s supply columns for this spot (DFFRAM make left_cmos5l_sram), so the SRAM stripes run through it on its rails.  runs/rtl16 (2026-09-26) signed off with exactly this.  Project.SwapMacroCells stays in the flow for post-synthesis swaps (MACRO_CELL_SWAPS, unset); branch dma keeps the swap variant (runs/sram16).",
   "EXTRA_VERILOG_MODELS": [
     "src/user_peripherals/cfgmem/cfgmem.v",
-    "src/user_peripherals/cfgmem/cfgmem_left.v"
+    "src/user_peripherals/cfgmem/cfgmem_left.v",
+    "src/user_peripherals/cfgmem/cfgmem_left_sram.v"
   ],
   "MACROS": {
     "CFGMEM_IHP_LEFT16": {
