@@ -16,18 +16,19 @@ import os
 import sys
 
 from librelane.flows.classic import Classic
-from librelane.steps import OpenROAD
+from librelane.steps import OpenROAD, Yosys
 
-# The step lives in the LibreLane plugin module so the stock Tiny Tapeout
-# harden (python -m librelane from the repo root) picks it up too; see
+# The steps live in the LibreLane plugin module so the stock Tiny Tapeout
+# harden (python -m librelane from the repo root) picks them up too; see
 # librelane_plugin_prism_pdn.py and meta.substituting_steps in src/config.json.
-from librelane_plugin_prism_pdn import ExtendPowerStripes
+from librelane_plugin_prism_pdn import ExtendPowerStripes, SwapMacroCells
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 class ProjectFlow(Classic):
     Steps = list(Classic.Steps)
+    Steps.insert(Steps.index(Yosys.Synthesis) + 1, SwapMacroCells)
     Steps.insert(Steps.index(OpenROAD.GeneratePDN) + 1, ExtendPowerStripes)
 
 

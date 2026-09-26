@@ -15,7 +15,9 @@
 # columns plus complete pairs per region; --sram-all-columns adds every other
 # legal column, --sram-array-every-other every second pair position of the
 # bit-cell arrays only.  No SRAM column stripe lands on a hard macro's signal
-# pin on the stripe layer, since the stripes run the full core height.
+# pin on the stripe layer, since the stripes run the full core height, and
+# one crossing an SRAM-aligned macro (all its rails over the SRAM on the
+# SRAM's columns, e.g. CFGMEM_IHP_LEFT16_SRAM) lands on one of its rails.
 #
 # It finishes by leaving exactly one full-height box per stripe x: the
 # abstract LEF turns every Metal4 power box into a PORT rect, and the Tiny
@@ -135,6 +137,7 @@ def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin
     sram_boxes = []
     sram_rects = []
     macro_rails = {"VPWR": [], "VGND": []}   # (x0, x1) of a CFGMEM-style rail
+    rail_sets = []                           # per CFGMEM-style macro: (name, x0, x1, {net: [(x0, x1)]})
     for inst in block.getInsts():
         master = inst.getMaster()
         if not master.isBlock():
@@ -154,6 +157,7 @@ def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin
                             if box.getTechLayer().getName() == sram_layer:
                                 sram_cols[nn].append((ox + box.xMin(), ox + box.xMax()))
             continue
+        rail_sets.append((inst.getName(), ib.xMin(), ib.xMax(), {"VPWR": [], "VGND": []}))
         for nn in ("VPWR", "VGND"):
             mterm = master.findMTerm(nn)
             if mterm is None:
@@ -162,6 +166,7 @@ def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin
                 for box in mpin.getGeometry():
                     if box.getTechLayer().getName() == layer:
                         macro_rails[nn].append((ox + box.xMin(), ox + box.xMax()))
+                        rail_sets[-1][3][nn].append((ox + box.xMin(), ox + box.xMax()))
     for nn in sram_cols:
         sram_cols[nn] = sorted(set(sram_cols[nn]))
     clearance = int(clearance_um * dbu)      # spacing on the stripe layer (0.24 um for a 2.1 um Metal4 wire, 1.64 on TopMetal1)
@@ -216,6 +221,31 @@ def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin
     def clear_of_rails(x0, x1, nn):
         other = "VGND" if nn == "VPWR" else "VPWR"
         return all(x1 + clearance <= r0 or x0 - clearance >= r1 for (r0, r1) in macro_rails[other])
+
+    # SRAM-aligned macros: every rail a macro has over an SRAM's x range sits
+    # on one of that SRAM's columns of the same net (a CFGMEM built for one
+    # spot above the SRAM, e.g. CFGMEM_IHP_LEFT16_SRAM).  Its rails are then
+    # the stripe positions across it: an SRAM column stripe crossing such a
+    # macro must land on one of its rails of the same net, so the grid
+    # stripes allocate_sram moves onto the SRAM and the pairs it completes end
+    # up on the macro's rails instead of between them, where they would only
+    # pass over the macro.  An ordinary grid macro over an SRAM (rails off the
+    # columns) is not aligned and changes nothing.
+    aligned = []
+    for name, mx0, mx1, rs in rail_sets:
+        over = [(nn, r) for nn in rs for r in rs[nn]
+                if any(r[1] > sx0 and r[0] < sx1 for (sx0, sx1) in sram_boxes)]
+        if over and all(on_sram_column(r[0], r[1], nn) for nn, r in over):
+            aligned.append((mx0, mx1, rs))
+            print(f"[INFO] {name}: SRAM-aligned ({len(over)} rails on SRAM columns): "
+                  f"SRAM stripes cross it on its rails only")
+    rail_tol = int(0.05 * dbu)
+
+    def on_aligned_rails(x0, x1, nn):
+        cx = (x0 + x1) // 2
+        return all(x1 <= mx0 or x0 >= mx1
+                   or any(abs((r[0] + r[1]) // 2 - cx) <= rail_tol for r in rs[nn])
+                   for mx0, mx1, rs in aligned)
 
     def clear_of_pins(x0, x1):
         return all(x1 + clearance <= px0 or x0 - clearance >= px1 for (px0, px1) in pin_xs)
@@ -373,7 +403,8 @@ def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin
         def clear(c, nn):
             return all(c[1] + pin_margin < px0 or c[0] - pin_margin > px1 for (px0, px1) in pin_xs) \
                 and all(c[1] + pin_margin < px0 or c[0] - pin_margin > px1 for (px0, px1) in macro_pin_xs) \
-                and clear_of_rails(c[0], c[1], nn)
+                and clear_of_rails(c[0], c[1], nn) \
+                and on_aligned_rails(c[0], c[1], nn)
 
         def free(nn, region=None):
             return [c for c, r in cols[nn].items()
@@ -625,7 +656,11 @@ def extend(reader, layer, sram_layer, clearance_um, stack_pitch, pin_face_margin
                     nearest = min(
                         (abs((e.xMin() + e.xMax()) / 2 - cx) for e in stripes), default=None
                     )
-                    if nearest is None or nearest > 0.05 * dbu:
+                    # a rail over an SRAM (on one of its columns, checked above)
+                    # gets its stripe from the SRAM's allocation, which may not
+                    # have been drawn yet when this macro comes first
+                    over_sram = any(r.xMax() > sx0 and r.xMin() < sx1 for (sx0, sx1) in sram_boxes)
+                    if not over_sram and (nearest is None or nearest > 0.05 * dbu):
                         print(
                             f"[WARNING] {inst.getName()} {net_name} pin column at x={cx/dbu:.3f} um is "
                             f"{'not near any' if nearest is None else f'{nearest/dbu:.3f} um off the nearest'} tile stripe"

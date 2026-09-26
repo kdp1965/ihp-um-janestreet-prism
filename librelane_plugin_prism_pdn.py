@@ -139,6 +139,88 @@ class DiodesOnSramPins(CompositeStep):
     Steps = [SramPinDiodePlacement, DetailedPlacement]
 
 
+# --- post-synthesis macro swap.  The RTL instantiates one macro module for a
+# whole generate loop (every CFGMEMS_LEFT[*] macro is a CFGMEM_IHP_LEFT16), but
+# one instance may need a physical variant with the same ports: a macro built
+# for its spot, like CFGMEM_IHP_LEFT16_SRAM, whose Metal4 rails sit on the
+# supply columns of the SRAM under CFGMEMS_LEFT[1].cfgmem_lo.  Selecting it in
+# the RTL would change the synthesized netlist (renaming a module alone makes
+# yosys renumber its internal names, and ABC's mapping can follow), and with
+# it the placement.  This step edits the synthesized netlist instead: each
+# instance in MACRO_CELL_SWAPS gets the listed master and nothing else
+# changes.  Inserted right after synthesis (meta.substituting_steps
+# "+Yosys.Synthesis"), ahead of the checks that match MACROS against the
+# netlist.  Gate-level simulation then needs the new master's netlist too
+# (macros/<master>/<master>.nl.v in test/test_basic.mk and test_prog.mk).
+from typing import Dict, Tuple  # noqa: E402
+
+from librelane.common import Path  # noqa: E402
+from librelane.state import DesignFormat, State  # noqa: E402
+from librelane.steps.step import StepError, ViewsUpdate, MetricsUpdate  # noqa: E402
+from librelane.logging import info  # noqa: E402
+
+
+@Step.factory.register()
+class SwapMacroCells(Step):
+    id = "Project.SwapMacroCells"
+    name = "Swap Macro Cells"
+
+    inputs = [DesignFormat.NETLIST, DesignFormat.JSON_HEADER]
+    outputs = [DesignFormat.NETLIST, DesignFormat.JSON_HEADER]
+
+    config_vars = [
+        Variable(
+            "MACRO_CELL_SWAPS",
+            Optional[Dict[str, str]],
+            "Macro instances whose master is replaced after synthesis: instance name "
+            "(as in MACROS) -> the macro it becomes.  The new macro must be in MACROS with "
+            "that instance, and must have every port the instance connects.",
+            default=None,
+        ),
+    ]
+
+    def run(self, state_in: State, **kwargs) -> Tuple[ViewsUpdate, MetricsUpdate]:
+        swaps = self.config["MACRO_CELL_SWAPS"] or {}
+        if not swaps:
+            return {}, {}
+        macros = self.config["MACROS"] or {}
+        design = self.config["DESIGN_NAME"]
+        netlist = open(str(state_in[DesignFormat.NETLIST])).read()
+        header = _json.load(open(str(state_in[DesignFormat.JSON_HEADER])))
+        cells = header["modules"][design]["cells"]
+        for inst, master in swaps.items():
+            macro = macros.get(master)
+            if macro is None or inst not in macro.instances:
+                raise StepError(f"MACRO_CELL_SWAPS: {master} must be in MACROS with {inst} among its instances")
+            pattern = _re.compile(r"^(\s*)(\S+)(\s+\\" + _re.escape(inst) + r"\s+\()", _re.M)
+            hits = list(pattern.finditer(netlist))
+            if len(hits) != 1:
+                raise StepError(f"MACRO_CELL_SWAPS: {len(hits)} instances named {inst} in the netlist")
+            old = hits[0].group(2)
+            if old not in macros:
+                raise StepError(f"MACRO_CELL_SWAPS: {inst} is a {old}, which is not a macro in MACROS")
+            body = netlist[hits[0].end():netlist.index(");", hits[0].end())]
+            used = set(_re.findall(r"\.(\w+)\s*\(", body))
+            pins = set()   # port names: a LEF lists bus pins bit by bit (A0[0] ...)
+            for lef in macro.lef:
+                for name in _re.findall(r"^\s*PIN\s+(\S+)", open(str(lef)).read(), _re.M):
+                    pins.add(_re.sub(r"\\?\[.*$", "", name))
+            if not used <= pins:
+                raise StepError(f"MACRO_CELL_SWAPS: {master} has no port {sorted(used - pins)} for {inst}")
+            netlist = netlist[:hits[0].start(2)] + master + netlist[hits[0].end(2):]
+            if cells.get(inst, {}).get("type") != old:
+                raise StepError(f"MACRO_CELL_SWAPS: {inst} is not a {old} cell of {design} in the JSON header")
+            cells[inst]["type"] = master
+            info(f"{inst}: {old} -> {master}")
+        nl_out = os.path.join(self.step_dir, f"{design}.nl.v")
+        json_out = os.path.join(self.step_dir, f"{design}.h.json")
+        with open(nl_out, "w") as f:
+            f.write(netlist)
+        with open(json_out, "w") as f:
+            _json.dump(header, f)
+        return {DesignFormat.NETLIST: Path(nl_out), DesignFormat.JSON_HEADER: Path(json_out)}, {}
+
+
 # --- netgen writes the IHP SRAM's power pin names (VDD!, VSS!, VDDARRAY!) into
 # its LVS JSON with a stray backslash ("\VDD!"), which is not a valid JSON
 # escape, and librelane.steps.netgen.LVS then dies in json.loads before the

@@ -58,6 +58,7 @@ NL ?= placement
 VERILOG_SOURCES += ../runs/wokwi/results/$(NL)/tt_um_pettit_js_prism.nl.v
 VERILOG_SOURCES += $(PWD)/../macros/CFGMEM_IHP16/CFGMEM_IHP16.nl.v
 VERILOG_SOURCES += $(PWD)/../macros/CFGMEM_IHP_LEFT16/CFGMEM_IHP_LEFT16.nl.v
+VERILOG_SOURCES += $(PWD)/../macros/CFGMEM_IHP_LEFT16_SRAM/CFGMEM_IHP_LEFT16_SRAM.nl.v
 VERILOG_SOURCES += $(SRAM_MODELS)
 
 endif
@@ -84,6 +85,7 @@ VERILOG_SOURCES += $(PWD)/gate_level_netlist.v
 # netlists (no power ports, like the tile netlist and the cell models).
 VERILOG_SOURCES += $(PWD)/../macros/CFGMEM_IHP16/CFGMEM_IHP16.nl.v
 VERILOG_SOURCES += $(PWD)/../macros/CFGMEM_IHP_LEFT16/CFGMEM_IHP_LEFT16.nl.v
+VERILOG_SOURCES += $(PWD)/../macros/CFGMEM_IHP_LEFT16_SRAM/CFGMEM_IHP_LEFT16_SRAM.nl.v
 # ... and so are the SRAMs
 VERILOG_SOURCES += $(SRAM_MODELS)
 
