@@ -24,6 +24,29 @@ REG_DBG_CTRL   = (0x004, 0x008)   # per shard
 REG_DBG_STATUS = 0x00C            # shard 0 in [12:0], shard 1 in [25:13]
 REG_STEW0      = 0x010            # 4 words: STEW of shard 0's current state
 REG_INT_STATUS = 0x024
+# RX DMA (prism_dma.v, next to TinyQV): TinyQV internal registers, not in the PRISM window
+DMA_CFG_ADDR    = 0x8000020  # [0] enable [1] shard [2] irq enable [3] frame end = shard host interrupt
+                             #   [6:4] K (2^K slots) [7] chain [22:11] ring base in RAM B (2 KB units); enable = 0 resets
+DMA_STATUS_ADDR = 0x8000024  # read: [7:0] head [15:8] tail [16] irq [17] overflow [18] busy [19] dropping [30:20] slot offset
+                             # write: [15:8] -> tail with [24]; [16] clears irq; [17] clears overflow; [31] ends the frame
+DMA_IRQ_NUM     = 10         # TinyQV interrupt line of the frame interrupt
+DMA_EN       = 1 << 0
+DMA_SHARD1   = 1 << 1
+DMA_IRQ_EN   = 1 << 2
+DMA_HW_END   = 1 << 3
+DMA_CHAIN    = 1 << 7     # FIFO A drains into FIFO B by itself: a 32-byte FIFO for a DMA on shard 1, frame end from shard 0
+def DMA_K(k):      return (k & 7) << 4
+def DMA_BASE(off): return (off >> 11) << 11          # ring base: a 2 KB-aligned byte offset into RAM B
+DMA_ST_IRQ   = 1 << 16
+DMA_ST_OVF   = 1 << 17
+DMA_ST_BUSY  = 1 << 18
+DMA_ST_DROP  = 1 << 19
+DMA_ST_SET_TAIL = 1 << 24
+DMA_ST_END   = 1 << 31
+def DMA_ST_HEAD(st): return st & 0xFF
+def DMA_ST_TAIL(st): return (st >> 8) & 0xFF
+def DMA_ST_OFFSET(st): return (st >> 20) & 0x7FF
+DMA_SLOT     = 2048       # bytes per ring slot: [0:2] frame length (bit 15 = truncated), [4:] the frame
 REG_IN_DATA    = 0x03C            # shard 0 input vector
 REG_FRAC_CFG   = 0x040
 REG_OUT_MASK0  = 0x044
@@ -50,6 +73,10 @@ REG_FLAGS   = 0x118
 REG_CFG1    = 0x11C       # [15:0] in_prev sources, [23:16] FIFO levels, [31:24] FIFO flag selects
 REG_FIFO    = 0x120       # byte: write pushes (TX mode), read pops (RX mode)
 REG_FIFO_ST = 0x124       # {count[21:8], word bytes[7:6], push busy[5], word full[4], af[3], ae[2], full[1], empty[0]}; write flushes
+FIFO_DEPTH_A = 16         # bytes in shard 0's flop FIFO (FIFO_AW_A = 4; a deeper one keeps CFG1 levels in 4-byte units)
+FIFO_DEPTH_B = 16         # bytes in shard 1's flop FIFO (FIFO_AW_B = 4): CFG1 levels in bytes
+def fifo_depth(base): return FIFO_DEPTH_B if base else FIFO_DEPTH_A
+def fifo_count(st): return (st >> 8) & 0x3FFF   # the count field of FIFO_STATUS
 FIFO_ST_WORD_FULL = 1 << 4  # 32-bit mode: the RX word register holds a complete word (also the shard's interrupt)
 FIFO_ST_PUSH_BUSY = 1 << 5  # 32-bit mode: the TX push machine is still feeding a word in
 def FIFO_ST_WORD_BYTES(st): return 4 if st & FIFO_ST_WORD_FULL else (st >> 6) & 3   # bytes in the RX word register

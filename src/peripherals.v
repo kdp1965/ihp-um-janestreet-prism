@@ -50,7 +50,20 @@ module tinyQV_peripherals (
 
     input         data_read_complete,  // Set by TinyQV when a read is complete
 
-    output [15:2] user_interrupts  // User peripherals get interrupts 2-15
+    output [15:2] user_interrupts,  // User peripherals get interrupts 2-15
+
+    // The PRISM's RX DMA tap (the engine, prism_dma.v, sits next to TinyQV)
+    output  [7:0] dma_head,
+    output        dma_empty,
+    output        dma_drained,
+    output        dma_avail4,
+    output        dma_af,
+    output        dma_frame_end,
+    input         dma_pop,
+    input         dma_en,
+    input         dma_shard,
+    input         dma_chain,
+    input         dma_hw_end
 );
 
     // Registered data out to TinyQV
@@ -385,6 +398,18 @@ module tinyQV_peripherals (
         .data_ready(data_ready_from_prism),
 
         .user_interrupt(user_interrupts[9:8]),   // shard 0 = IRQ 8, shard 1 = IRQ 9
+
+        .dma_head      ( dma_head      ),
+        .dma_empty     ( dma_empty     ),
+        .dma_drained   ( dma_drained   ),
+        .dma_avail4    ( dma_avail4    ),
+        .dma_af        ( dma_af        ),
+        .dma_frame_end ( dma_frame_end ),
+        .dma_pop       ( dma_pop       ),
+        .dma_en        ( dma_en        ),
+        .dma_shard     ( dma_shard     ),
+        .dma_chain     ( dma_chain     ),
+        .dma_hw_end    ( dma_hw_end    ),
 
         // CFGMEM interface
         .sit_addr_a ( prism_sit_addr_a  ),

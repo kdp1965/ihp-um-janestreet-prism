@@ -157,6 +157,7 @@ Common block 0x000-0x0FF:
 | 0x10-0x1C | STEW of shard 0's current state (exists) |
 | 0x20 | ID word |
 | 0x24 | INT_STATUS (read): [1:0] shard interrupts, [3:2] semaphore as seen by shard 0 / shard 1 |
+| (0x8000020 / 0x8000024) | DMA_CFG / DMA_STATUS of the RX DMA are TinyQV internal registers, not PRISM ones, section 4y |
 | 0x30 | DEBUG_DOUT (exists) |
 | 0x34 | DECISION (exists) |
 | 0x38 | OUT_DATA (exists) |
@@ -322,6 +323,68 @@ clear again.  `chroma_fifo_loop` (unit test) moves bytes from B (TX) to A
 Chromas: `chroma_spislave` pushes received bytes into the RX FIFO and runs
 a CRC8 over the received bits; `chroma_uart_tx` is an 8N1 transmitter fed
 from the TX FIFO that appends the CRC8 on request.
+
+## 4y. RX DMA into PSRAM B (2026-09-23)
+
+The idea: a received frame should reach PSRAM without the host popping
+bytes, so that one of the two SRAM FIFOs can go (the transmitter keeps
+one; the receiver's traffic goes straight to PSRAM B).  `prism_dma.v` is
+a second master on TinyQV's QSPI memory port (`tinyqv.v`: it takes the
+port when the CPU has no memory transaction in flight and is not inside
+a continued sequence, keeps it for a burst, and the CPU halts on its next
+memory access until the burst is over).
+
+Where it lives, and why.  The engine is instantiated in `project.v` next
+to TinyQV, with its registers in TinyQV's internal peripheral space
+(DMA_CFG 0x8000020, DMA_STATUS 0x8000024, word access) and its frame
+interrupt on TinyQV interrupt 10.  Only a byte-serial tap crosses the
+tile to the PRISM: the selected FIFO's head byte, empty / drained /
+four-more-available / almost-full flags, the frame-end pulse, a pop
+strobe and the four mode bits (`dma_en`, `dma_shard`, `dma_chain`,
+`dma_hw_end`), about 17 nets.  The first version sat inside the PRISM
+with its 32-bit data, 25-bit address and register buses running to the
+memory controller, which the placer keeps in the left column's upper
+mouth: nets crossing the four CFGMEM mouths went from 16 / 13 / 5 / 1
+to 34 / 41 / 16 / 19, the global placer inflated cells 26 % against 10 %,
+and GRT overflow was 21-27 k against 9 k (runs dma, dma2, dma3).  A
+64-byte FIFO A and a two-stage read mux were tried on the way and were
+not the cause; the FIFOs are 16 bytes again.
+
+Data path.  The engine pops one byte per clock from the tap into its own
+word register; each full word is one 32-bit PSRAM write, and consecutive
+words stay inside one QSPI transaction (`data_continue`) while the FIFO
+already holds the next one, up to 8 words (32 bytes, 64 SPI clocks,
+inside the PSRAM's CS-low limit) and never across a 1 KB PSRAM page.  A
+burst starts when the FIFO reaches its almost-full level (CFG1[23:20])
+or when a frame ends; the last one to three bytes of a frame go out as
+byte writes.
+
+Ring: 2^K slots of 2 KB from a 2 KB-aligned base in RAM B.  Bytes 0-1 of
+a slot are the frame length (bit 15: the frame was cut at 2044 bytes),
+2-3 zero, the frame from byte 4 (word aligned).  The engine fills slot
+`head`; at the frame end it writes the length, advances head and raises
+interrupt 10.  Software owns `tail`; a frame that starts while
+`(head + 1) mod 2^K == tail` is consumed and dropped with the overflow
+flag set.  Frame end: the receiving shard's OUT_HOST_INTERRUPT (the
+eth_rx chroma raises it after the last byte) with DMA_CFG[3], which then
+no longer latches the shard's own interrupt, or a write of
+DMA_STATUS[31].
+
+Chain mode (DMA_CFG[7]): in TX-over-SRAM operation FIFO B is idle, so a
+mover in the PRISM pops A and pushes B whenever A holds a byte and B has
+room, one byte every third clock (the latch FIFO's push spacing); the DMA
+drains B (shard select 1, B's almost-full level as the trigger) and the
+frame end comes from shard 0.  The two 16-byte FIFOs act as one 32-byte
+one and bursts are 16 bytes: at 10 Mb/s the port is busy about 15 % of
+the time, the CPU's stall budget.
+
+Test: `make dma_verify` (programs/dma_verify + test_dma_verify.py), chain
+mode with the PRISM disabled: the program pushes bytes into FIFO A (TX
+mode, the same push path a chroma uses), the mover carries them to B and
+the DMA lands a 70-byte frame (bursts and a tail), drops one against a
+full ring, lands a 5-byte one, an empty one and a 1500-byte one that
+crosses a PSRAM page while the CPU writes RAM B between the bursts, and
+the guard half of RAM B stays untouched.
 
 ## 4c. Host software (item 11, Phase 5)
 

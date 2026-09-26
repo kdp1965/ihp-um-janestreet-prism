@@ -21,6 +21,9 @@
 // row tab_idx instead of the read pointer's row, so the 16 rows serve as
 // addressable constants for OUT_COMM_LOAD; pushes and flushes still work
 // (that is how the host loads the table).
+//
+// The head mux is two stages (rows inside a group, then the group) with a
+// kept boundary, see the read path at the end.
 
 `default_nettype none
 
@@ -181,6 +184,31 @@ module prism_fifo
         end
     endgenerate
 
-    assign head = mem_w[tab_en ? tab_idx : rd_ptr];
+    // Read path: two mux stages with a kept boundary between them.  Left to
+    // itself the synthesizer flattens the DEPTH:1 selection into one wide
+    // AND-OR whose every latch output travels to a single point; on the
+    // 64-byte FIFO that is 512 nets converging, and the tile's Metal3 could
+    // not take it (run dma, 2026-09-23: GRT overflow 21k against 9k).  Stage
+    // one picks a row inside each group of 2^GW rows, next to the rows;
+    // stage two picks the group, so only 8 x NG nets leave the groups.
+    localparam GW = AW / 2;                     // rows per group = 2^GW
+    localparam NG = DEPTH >> GW;                // groups
+    wire [AW-1:0]   sel = tab_en ? tab_idx : rd_ptr;
+    (* keep *) wire [8*NG-1:0] grp_head;        // stage one: the selected row of each group
+
+    genvar g, k;
+    generate
+        for (g = 0; g < NG; g = g + 1)
+        begin : GRP
+            wire [8*(1<<GW)-1:0] rows;
+            for (k = 0; k < (1 << GW); k = k + 1)
+            begin : RK
+                assign rows[8*k +: 8] = mem_w[g*(1<<GW) + k];
+            end
+            assign grp_head[8*g +: 8] = rows[8*sel[GW-1:0] +: 8];
+        end
+    endgenerate
+
+    assign head = grp_head[8*sel[AW-1:GW] +: 8];
 
 endmodule

@@ -31,7 +31,8 @@ from drc_deck import override as _drc_override  # noqa: E402  (full KLayout deck
 
 LIBRELANE = ["python", "-m", "librelane", "--pdk-root", os.environ.get("PDK_ROOT", os.path.expanduser("~/projects/fossi")),
              "--pdk", "ihp-sg13cmos5l", "--manual-pdk"] + [a for o in _drc_override() for a in ("-c", o)]
-CONFIG = "src/config_merged.json"
+CONFIG = os.environ.get("SEED_CONFIG", "src/config_merged.json")      # SEED_CONFIG: another merged config (e.g. the keep-out 40 one)
+EXTRA = [a for kv in os.environ.get("SEED_EXTRA", "").split() for a in ("-c", kv)]   # SEED_EXTRA="K=V K=V": more overrides
 GRT_STEP = "OpenROAD.GlobalRouting"
 NEXT_STEP = "OpenROAD.CheckAntennas"
 
@@ -49,7 +50,7 @@ def run_seed(pct, drt_iters=0, threads=None):
         cmd += ["-c", f"DRT_OPT_ITERS={drt_iters}", "-c", "DRT_SAVE_DRC_REPORT_ITERS=2", "-c", "DRT_ANTENNA_REPAIR_ITERS=0"]
     if threads:
         cmd += ["-c", f"DRT_THREADS={threads}"]
-    cmd += [CONFIG]
+    cmd += EXTRA + [CONFIG]
     print(f"== seed {pct}: {' '.join(cmd)}", flush=True)
     with open(f"runs/{tag}.log", "w") as log:
         rc = subprocess.call(cmd, stdout=log, stderr=subprocess.STDOUT)
@@ -108,7 +109,7 @@ def finish(pct):
     tag = f"seed_{pct}"
     routed = bool(glob.glob(f"runs/{tag}/*-openroad-detailedrouting*"))
     cmd = LIBRELANE + ["--run-tag", tag, "--force-run-dir", f"runs/{tag}", "--from", DRT_STEP if routed else NEXT_STEP,
-                       "-c", f"PL_TARGET_DENSITY_PCT={pct}", CONFIG]
+                       "-c", f"PL_TARGET_DENSITY_PCT={pct}"] + EXTRA + [CONFIG]
     print(f"== finishing {tag}: {' '.join(cmd)}", flush=True)
     with open(f"runs/{tag}.log", "a") as log:
         rc = subprocess.call(cmd, stdout=log, stderr=subprocess.STDOUT)

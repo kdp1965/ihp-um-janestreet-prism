@@ -20,6 +20,17 @@ module tinyQV (
     input         data_ready,  // Transaction complete/data request can be modified.
     input  [31:0] data_in,
 
+    // A second master on the QSPI memory port (the PRISM's RX DMA): a burst
+    // of RAM writes issued while the CPU has no memory transaction in
+    // flight.  The CPU halts on its next memory access until dma_req drops.
+    input         dma_req,      // hold while the burst has more transfers
+    input  [24:0] dma_addr,
+    input  [31:0] dma_wdata,
+    input   [1:0] dma_write_n,  // 00 = 8-bit, 01 = 16-bit, 10 = 32-bit
+    input         dma_continue, // another transfer at the next address follows
+    output        dma_grant,    // the DMA owns the port
+    output        dma_ready,    // this transfer is done
+
     // Interrupt requests: Bottom 2 bits trigger on rising edge, next fourteen are a status
     input  [15:0] interrupt_req,
     input         time_pulse,
@@ -74,11 +85,34 @@ module tinyQV (
   wire [31:0] mem_data_from_read;
 
   wire is_mem = qv_data_addr[27:25] == 0;
-  assign qv_data_ready = is_mem ? mem_data_ready : data_ready;
+
+  // DMA arbitration: the DMA takes the memory port when the CPU has no
+  // memory transaction in flight and is not in the middle of a continued
+  // sequence (the controller ignores the address of a continued transfer,
+  // so a DMA write slipped in there would land in the CPU's stream).  It
+  // keeps the port until dma_req drops; the CPU's request waits meanwhile.
+  reg  dma_active;
+  wire cpu_mem_req = is_mem && (qv_data_write_n != 2'b11 || qv_data_read_n != 2'b11);
+  always @(posedge clk) begin
+    if (!rstn)
+      dma_active <= 1'b0;
+    else if (!dma_active)
+      dma_active <= dma_req && !cpu_mem_req && !qv_data_continue;
+    else if (!dma_req)
+      dma_active <= 1'b0;
+  end
+  assign dma_grant = dma_active;
+  assign dma_ready = dma_active && mem_data_ready;
+
+  wire [24:0] mem_data_addr     = dma_active ? dma_addr     : qv_data_addr[24:0];
+  wire [31:0] mem_data_to_write = dma_active ? dma_wdata    : qv_data_to_write;
+  wire        mem_data_continue = dma_active ? dma_continue : qv_data_continue;
+
+  assign qv_data_ready = is_mem ? (mem_data_ready && !dma_active) : data_ready;
   assign qv_data_from_read = is_mem ? mem_data_from_read : data_in;
 
-  assign mem_data_write_n = is_mem ? qv_data_write_n : 2'b11;
-  assign mem_data_read_n =  is_mem ? qv_data_read_n  : 2'b11;
+  assign mem_data_write_n = dma_active ? dma_write_n : (is_mem ? qv_data_write_n : 2'b11);
+  assign mem_data_read_n  = dma_active ? 2'b11       : (is_mem ? qv_data_read_n  : 2'b11);
 
   assign data_addr = qv_data_addr;
   assign data_write_n =       !is_mem ? qv_data_write_n       : 2'b11;
@@ -142,11 +176,11 @@ module tinyQV (
         .instr_data(instr_data),
         .instr_ready(instr_ready),
 
-        .data_addr(qv_data_addr[24:0]),
+        .data_addr(mem_data_addr),
         .data_write_n(mem_data_write_n),
         .data_read_n(mem_data_read_n),
-        .data_to_write(qv_data_to_write),
-        .data_continue(qv_data_continue),
+        .data_to_write(mem_data_to_write),
+        .data_continue(mem_data_continue),
 
         .data_ready(mem_data_ready),
         .data_from_read(mem_data_from_read),

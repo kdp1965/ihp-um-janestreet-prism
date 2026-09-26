@@ -21,6 +21,8 @@ module tt_um_pettit_js_prism (
     localparam PERI_GPIO_OUT_SEL = 4'h3;
     localparam PERI_DEBUG_UART = 4'h6;
     localparam PERI_DEBUG_UART_STATUS = 4'h7;
+    localparam PERI_DMA_CFG = 4'h8;             // 0x8000020: PRISM RX DMA configuration (prism_dma.v)
+    localparam PERI_DMA_STATUS = 4'h9;          // 0x8000024: its ring head / tail and flags
     localparam PERI_DEBUG = 4'hC;
     localparam PERI_USER = 4'hF;
 
@@ -140,8 +142,24 @@ module tt_um_pettit_js_prism (
         ui_in_sync <= ui_in_sync0;
     end
 
-    // Interrupt requests
-    wire [15:0] interrupt_req = {peri_interrupts, ui_in_sync[1:0]};
+    // The PRISM's RX DMA (prism_dma.v) lives here, next to the memory
+    // controller it drives; only a byte-serial tap reaches the PRISM
+    wire        dma_mem_req;
+    wire [24:0] dma_mem_addr;
+    wire [31:0] dma_mem_wdata;
+    wire  [1:0] dma_mem_write_n;
+    wire        dma_mem_continue;
+    wire        dma_mem_grant;
+    wire        dma_mem_ready;
+    wire  [7:0] dma_head;
+    wire        dma_empty, dma_drained, dma_avail4, dma_af, dma_frame_end;
+    wire        dma_pop, dma_en, dma_shard, dma_chain, dma_hw_end, dma_irq;
+    wire [31:0] dma_cfg_rd, dma_st_rd;
+    wire        dma_cfg_wr = (write_n == 2'b10) && connect_peripheral == PERI_DMA_CFG;
+    wire        dma_st_wr  = (write_n == 2'b10) && connect_peripheral == PERI_DMA_STATUS;
+
+    // Interrupt requests; the DMA's frame interrupt is 10
+    wire [15:0] interrupt_req = {peri_interrupts[15:11], peri_interrupts[10] | dma_irq, peri_interrupts[9:2], ui_in_sync[1:0]};
 
     tinyQV i_tinyqv(
         .clk(clk),
@@ -155,6 +173,14 @@ module tt_um_pettit_js_prism (
 
         .data_ready(data_ready),
         .data_in(data_from_read),
+
+        .dma_req(dma_mem_req),
+        .dma_addr(dma_mem_addr),
+        .dma_wdata(dma_mem_wdata),
+        .dma_write_n(dma_mem_write_n),
+        .dma_continue(dma_mem_continue),
+        .dma_grant(dma_mem_grant),
+        .dma_ready(dma_mem_ready),
 
         .interrupt_req(interrupt_req),
         .time_pulse(time_pulse),
@@ -213,7 +239,48 @@ module tt_um_pettit_js_prism (
 
         .data_read_complete(read_complete),
 
-        .user_interrupts(peri_interrupts)
+        .user_interrupts(peri_interrupts),
+
+        .dma_head      ( dma_head      ),
+        .dma_empty     ( dma_empty     ),
+        .dma_drained   ( dma_drained   ),
+        .dma_avail4    ( dma_avail4    ),
+        .dma_af        ( dma_af        ),
+        .dma_frame_end ( dma_frame_end ),
+        .dma_pop       ( dma_pop       ),
+        .dma_en        ( dma_en        ),
+        .dma_shard     ( dma_shard     ),
+        .dma_chain     ( dma_chain     ),
+        .dma_hw_end    ( dma_hw_end    )
+    );
+
+    prism_dma i_dma (
+        .clk             ( clk              ),
+        .rst_n           ( rst_peri_n       ),
+        .cfg_wr          ( dma_cfg_wr       ),
+        .st_wr           ( dma_st_wr        ),
+        .wdata           ( data_to_write    ),
+        .cfg_rd          ( dma_cfg_rd       ),
+        .st_rd           ( dma_st_rd        ),
+        .fifo_head       ( dma_head         ),
+        .fifo_empty      ( dma_empty        ),
+        .fifo_drained    ( dma_drained      ),
+        .fifo_avail4     ( dma_avail4       ),
+        .fifo_af         ( dma_af           ),
+        .frame_end_pulse ( dma_frame_end    ),
+        .fifo_pop        ( dma_pop          ),
+        .enable          ( dma_en           ),
+        .shard_sel       ( dma_shard        ),
+        .hw_end          ( dma_hw_end       ),
+        .chain           ( dma_chain        ),
+        .irq             ( dma_irq          ),
+        .mem_req         ( dma_mem_req      ),
+        .mem_addr        ( dma_mem_addr     ),
+        .mem_wdata       ( dma_mem_wdata    ),
+        .mem_write_n     ( dma_mem_write_n  ),
+        .mem_continue    ( dma_mem_continue ),
+        .mem_grant       ( dma_mem_grant    ),
+        .mem_ready       ( dma_mem_ready    )
     );
 
     always @(*) begin
@@ -230,6 +297,8 @@ module tt_um_pettit_js_prism (
         case (connect_peripheral)
             PERI_GPIO_OUT_SEL:data_from_read = {24'h0, gpio_out_sel, 6'h0};
             PERI_DEBUG_UART_STATUS: data_from_read = {31'h0, debug_uart_tx_busy};
+            PERI_DMA_CFG:     data_from_read = dma_cfg_rd;
+            PERI_DMA_STATUS:  data_from_read = dma_st_rd;
             PERI_USER:        data_from_read = peri_data_out;
             default:          data_from_read = 32'hFFFF_FFFF;
         endcase

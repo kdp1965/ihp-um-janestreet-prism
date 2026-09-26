@@ -25,6 +25,7 @@ project:
     - "user_peripherals/prism/prism_periph.v"
     - "user_peripherals/prism/prism_datapath.v"
     - "user_peripherals/prism/prism_fifo.v"
+    - "user_peripherals/prism/prism_dma.v"
     - "user_peripherals/prism/prism_sram_fifo.v"
     - "user_peripherals/prism/prism_trace_port.v"
     - "user_peripherals/prism/prism_mrx.v"

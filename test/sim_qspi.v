@@ -92,6 +92,29 @@ module sim_qspi_pmod (
         end
     end
 
+    // ---- Checks a real APS6404 PSRAM would care about (report only):
+    //  * CS low for more than tCEM = 8 us breaks the refresh (the DMA keeps a
+    //    burst under 64 SPI clocks, TinyQV's own transactions are shorter);
+    //  * a burst that runs past a 1 KB page: the part wraps inside the page
+    //    (linear burst), so the bytes would land at the page start instead.
+    // Nibble address: addr[0] is the nibble, addr[RAM_BITS:1] the byte; a
+    // 1 KB page is 2048 nibbles.
+    reg  [63:0] ram_cs_fall;
+    reg         ram_selected_d;
+    wire        ram_selected = !qspi_ram_a_select || !qspi_ram_b_select;
+    always @(posedge qspi_clk or posedge any_select or negedge qspi_ram_a_select or negedge qspi_ram_b_select) begin
+        if (ram_selected && !ram_selected_d)
+            ram_cs_fall <= $time;
+        if (ram_selected && ram_selected_d && ($time - ram_cs_fall) > 64'd8000)   // 8 us in the testbench's time unit
+            $display("SIM_QSPI_CHECK: PSRAM CS low longer than 8 us at %t", $time);
+        ram_selected_d <= ram_selected;
+    end
+    always @(negedge qspi_clk) begin
+        if ((reading || writing) && ram_selected && addr[11:0] == 12'hFFF)
+            $display("SIM_QSPI_CHECK: PSRAM burst crosses a 1 KB page at byte address %h (%s) at %t",
+                     addr[24:1], writing ? "write" : "read", $time);
+    end
+
     always @(posedge debug_clk) begin
         if (debug_addr[24] == 1'b0)
             debug_data <= rom[debug_addr[ROM_BITS-1:0]];

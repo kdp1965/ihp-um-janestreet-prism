@@ -18,6 +18,9 @@
 //     0x004-0x050        debugger / fracture registers (prism.v)
 //     0x020  ID
 //     0x024  INT_STATUS  [3:2] semaphore seen by shard 1 / shard 0, [1:0] interrupts
+//     (the RX DMA's registers are TinyQV internal ones, 0x8000020 / 0x8000024, see
+//      prism_dma.v; this module only provides the byte-serial FIFO tap and, with the
+//      chain mode, the mover that drains FIFO A into FIFO B)
 //
 //   Shard windows, identical layout: shard 0 at 0x100, shard 1 at 0x180
 //     +0x00  CFG0     datapath / input configuration (chroma ctrl_reg)
@@ -27,7 +30,8 @@
 //     +0x10  COUNTS   {comm_count, shift_count, comm, compare, count2}; byte lanes 0-2 writable
 //     +0x14  HOST     host_in[1:0]; byte +0x15 write toggles host_in[0] and clears the interrupt
 //     +0x18  FLAGS    RO datapath flags
-//     +0x1C  CFG1     [19:16] FIFO almost-empty level, [23:20] FIFO almost-full level
+//     +0x1C  CFG1     [19:16] FIFO almost-empty level, [23:20] FIFO almost-full level (bytes on a
+//                     16-byte FIFO, 4-byte units on shard 0's 64-byte one: FIFO_AW_A / FIFO_AW_B)
 //     +0x20  FIFO     byte: write pushes (TX mode), read pops (RX mode)
 //     +0x24  FIFO_STATUS {count[21:8], word bytes[7:6], push busy[5], word full[4], almost_full[3],
 //                     almost_empty[2], full[1], empty[0]}; any write flushes (the word registers too)
@@ -151,7 +155,8 @@
 
 `default_nettype none
 
-module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter CNT_CMP = 1 ) (    // CNT_CMP: build the CRC register's counter mode (CFG3[10])
+module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter CNT_CMP = 1,       // CNT_CMP: build the CRC register's counter mode (CFG3[10])
+                     parameter FIFO_AW_A = 4, parameter FIFO_AW_B = 4 ) (                        // log2 of the flop FIFO depth of shard 0 (A) / shard 1 (B); levels in bytes at 4, 4-byte units above
                          // SRAM_FIFO: number of SRAM FIFOs (0/1/2); SRAM_AW 11: 2048x32, 10: 1024x32, 9: 512x32 (2 KB)
     input             clk,          // Clock - the TinyQV project clock is normally set to 64MHz.
     input             rst_n,        // Reset_n - low to reset.
@@ -173,6 +178,20 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     output            data_ready,
 
     output     [1:0]  user_interrupt, // Interrupt request per shard
+
+    // RX DMA tap (prism_dma.v sits next to TinyQV): the selected shard's
+    // receive FIFO, byte-serial, and the mode bits the engine owns
+    output    [7:0]   dma_head,       // the FIFO head byte
+    output            dma_empty,      // that FIFO has nothing
+    output            dma_drained,    // nothing anywhere (chain: both FIFOs and the mover)
+    output            dma_avail4,     // at least four more bytes are there
+    output            dma_af,         // the FIFO reached its almost-full level (burst trigger)
+    output            dma_frame_end,  // the receiving shard's OUT_HOST_INTERRUPT rising
+    input             dma_pop,        // take dma_head this clock
+    input             dma_en,
+    input             dma_shard,      // 0 = FIFO A, 1 = FIFO B
+    input             dma_chain,      // FIFO A drains into FIFO B by itself
+    input             dma_hw_end,     // the receiving shard's host interrupt ends frames (and is not a host IRQ)
 
     // State Information Table interface (CFGMEM macros in peripherals.v)
     output    [3:0]   sit_addr_a,
@@ -297,8 +316,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     localparam       CFG3_SMP_TIMER = 27;   //       [27] count1 clear / load on the edge
     localparam       CFG3_SMP_INV   = 28;   //       [28] flag2 swaps rising and falling
 
-    localparam  FIFO_DEPTH  = 16;
-    localparam  FIFO_AW     = 4;
+    // The flop FIFOs: shard 0 (A) FIFO_AW_A, shard 1 (B) FIFO_AW_B deep.  A
+    // FIFO deeper than 16 bytes keeps CFG1's 4-bit levels in 4-byte units.
 
     wire                prism_enable;
     wire                prism_wr;
@@ -438,6 +457,34 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
         end
     endfunction
     wire [32*SHARDS-1:0] fifo32_v;      // the RX word registers
+    wire [14*SHARDS-1:0] fifo_count_v;
+    wire [SHARDS-1:0]    fifo_empty_v, fifo_full_v, fifo_af_v, host_irq_pulse_v;
+    // DMA chain mode (DMA_CFG[7]): FIFO A drains into FIFO B by itself, so
+    // the two 16-byte FIFOs act as one 32-byte one for the DMA, which then
+    // reads B (shard select 1); the frame end still comes from shard 0, the
+    // receiving chroma's shard.  A move pops A and pushes B in the same
+    // clock, one every third clock (the latch FIFO's push spacing); the
+    // byte is in neither count for a clock, which mv_busy covers.
+    reg  [1:0]           mv_gap;
+    reg                  mv_d1;
+    wire                 mv      = dma_chain & !fifo_empty_v[0] & !fifo_full_v[SHARDS-1] & (mv_gap == 2'd0);
+    wire                 mv_busy = mv | mv_d1;
+    always @(posedge clk or negedge rst_n)
+    begin
+        if (!rst_n)
+        begin
+            mv_gap <= 2'd0;
+            mv_d1  <= 1'b0;
+        end
+        else
+        begin
+            mv_d1 <= mv;
+            if (mv)
+                mv_gap <= 2'd2;
+            else if (mv_gap != 2'd0)
+                mv_gap <= mv_gap - 2'd1;
+        end
+    end
     wire [8*SHARDS-1:0]  fifo_rd_v;     // what a byte read of FIFO returns
     wire [32*SHARDS-1:0] crc_poly_v;
     wire [32*SHARDS-1:0] crc_v;
@@ -662,7 +709,16 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                                                   (SRAM_FIFO != 1 || s == 0 || !cfg0_v[CFG_FIFO_SRAM]);
             assign fifo_traced = (SRAM_FIFO != 0) && trc_held_v[SI];
             wire  [7:0]               lf_head;
+            localparam                FIFO_AW    = (s == 0) ? FIFO_AW_A : FIFO_AW_B;
+            localparam                FIFO_DEPTH = 1 << FIFO_AW;
+            localparam                FIFO_LVL_SH = (FIFO_AW > 4) ? FIFO_AW - 4 : 0;   // CFG1 level unit = 2^FIFO_LVL_SH bytes
             wire  [FIFO_AW:0]         lf_count;
+            wire  [FIFO_AW-1:0]       lf_tab_idx = tab_idx;                     // the table is rows 0-15
+            wire  [FIFO_AW-1:0]       lf_ae_lvl  = cfg1[16 +: 4] << FIFO_LVL_SH; // CFG1 levels: bytes, or 4-byte units on a deep FIFO
+            wire  [FIFO_AW-1:0]       lf_af_lvl  = cfg1[20 +: 4] << FIFO_LVL_SH;
+            // RX DMA (prism_dma.v, next to TinyQV) pops this shard's FIFO through the tap
+            wire                      dma_on    = dma_en && (dma_shard == (s == 1));
+            wire                      dma_end_s = dma_en && (dma_chain ? (s == 0) : (dma_shard == (s == 1)));  // its host interrupt ends the DMA's frames
             wire                      lf_empty, lf_full, lf_ae, lf_af;
             assign comm_load_data = ctab[CT_EN]           ? lf_head :          // the constant table's row
                                     cfg0[CFG_COMM_LOAD_K] ? k_sel   : preload[7:0];
@@ -710,9 +766,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             assign fifo32_v[32*s +: 32]  = pop_w;
             // FIFO requests: RX (fifo_dir = 0) FSM pushes comm / host pops by reading,
             //                TX (fifo_dir = 1) host pushes by writing / FSM pops into comm
-            wire                      f_push  = fifo_dir ? (fifo_wr | fsm_push) : fifo_op;
-            wire  [7:0]               f_pdata = fifo_dir ? (fifo_wr ? data_in[7:0] : push_w[7:0]) : push_src;
-            wire                      f_pop   = fifo_dir ? fifo_op : (host_pop | fsm_pop);
+            wire                      mv_push = (s == SHARDS-1) & mv;          // chain: B takes A's head
+            wire                      mv_pop  = (s == 0) & mv;                 //        A gives it up
+            wire                      f_push  = mv_push | (fifo_dir ? (fifo_wr | fsm_push) : fifo_op);
+            wire  [7:0]               f_pdata = mv_push ? fifo_head_v[7:0] :
+                                                fifo_dir ? (fifo_wr ? data_in[7:0] : push_w[7:0]) : push_src;
+            wire                      f_pop   = mv_pop | (dma_on & dma_pop) | (fifo_dir ? fifo_op : (host_pop | fsm_pop));
 
             always @(posedge clk or negedge rst_n)
             begin
@@ -839,9 +898,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                 .push_data    ( f_pdata                          ),
                 .pop          ( f_pop & !fifo_sram               ),
                 .tab_en       ( ctab[CT_EN]                      ),
-                .tab_idx      ( tab_idx                          ),
-                .ae_level     ( cfg1[16 +: FIFO_AW]              ),
-                .af_level     ( cfg1[20 +: FIFO_AW]              ),
+                .tab_idx      ( lf_tab_idx                       ),
+                .ae_level     ( lf_ae_lvl                        ),
+                .af_level     ( lf_af_lvl                        ),
                 .head         ( lf_head                          ),
                 .count        ( lf_count                         ),
                 .empty        ( lf_empty                         ),
@@ -1078,8 +1137,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                     // shard's INT_CLR byte with bit 7 set, by the host_in
                     // toggle write, or by disabling the PRISM.
                     if ((halt_s && !halt_r) ||
-                        (exec && out_s[OUT_HOST_INTERRUPT] && !host_irq_r))
-                        irq <= 1'b1;
+                        (exec && out_s[OUT_HOST_INTERRUPT] && !host_irq_r && !(dma_end_s && dma_hw_end)))
+                        irq <= 1'b1;                            // (the DMA takes the pulse as a frame end instead)
                     else if (!prism_enable ||
                              (byte_wr && address == (s == 0 ? REG_INT_CLR0 : REG_INT_CLR1) && data_in[7]) ||
                              (byte_wr && win && shard_off == SH_TOGGLE))
@@ -1409,6 +1468,11 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             assign fifo_st_v [32*s +: 32] = {10'h0, fifo_count, pop_n[1:0], push_busy, word_full,
                                              fifo_af, fifo_ae, fifo_full, fifo_empty};
             assign fifo_head_v[8*s +: 8]  = fifo_head;
+            assign fifo_count_v[14*s +: 14] = fifo_count;
+            assign fifo_empty_v[s]        = fifo_empty;
+            assign fifo_full_v[s]         = fifo_full;
+            assign fifo_af_v[s]           = fifo_af;
+            assign host_irq_pulse_v[s]    = exec & out_s[OUT_HOST_INTERRUPT] & !host_irq_r;
             assign comm_v     [8*s +: 8]  = comm;
             if (s == 0)
             begin : XOP
@@ -1434,6 +1498,19 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     endgenerate
 
     assign user_interrupt = irq_v;
+
+    // =============================================================
+    // RX DMA tap: the selected shard's FIFO, byte-serial, for prism_dma.v
+    // (next to TinyQV); in chain mode the mover above feeds B from A and
+    // the frame end is shard 0's, the receiving chroma's
+    // =============================================================
+    wire [13:0] dma_count_sum = fifo_count_v[14*(SHARDS-1) +: 14] + fifo_count_v[13:0];
+    assign dma_head      = fifo_head_v[8*dma_shard +: 8];
+    assign dma_empty     = fifo_empty_v[dma_shard];
+    assign dma_drained   = dma_chain ? (fifo_empty_v[SHARDS-1] & fifo_empty_v[0] & !mv_busy) : fifo_empty_v[dma_shard];
+    assign dma_avail4    = (dma_chain ? dma_count_sum : fifo_count_v[14*dma_shard +: 14]) >= 14'd4;
+    assign dma_af        = fifo_af_v[dma_shard];
+    assign dma_frame_end = dma_chain ? host_irq_pulse_v[0] : host_irq_pulse_v[dma_shard];
 
     // =============================================================
     // Output pins: shard 0 wins a pin it claims, otherwise shard 1
