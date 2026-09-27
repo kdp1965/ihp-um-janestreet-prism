@@ -97,6 +97,15 @@
 #define PRISM_SH_CRC_POLY       0x28
 #define PRISM_SH_CRC            0x2c    /* read value; write = preset */
 #define PRISM_SH_CRC_EXPECTED   0x30
+#define PRISM_SH_CFG2           0x34    /* input slot selects */
+#define PRISM_SH_CONST          0x38    /* constants K3..K0 (K3 also the comm match value) */
+#define PRISM_SH_CFG3           0x3c    /* Manchester bit recoverer */
+#define PRISM_SH_PRELOAD2       0x40    /* free-running timer period (24 bits), 0 = off */
+#define PRISM_SH_TRACE_CFG      0x44
+#define PRISM_SH_TRACE_CTRL     0x48
+#define PRISM_SH_CTAB           0x4c    /* constant table: the latch FIFO as addressable constants */
+#define PRISM_SH_COMM_PINS      0x50
+#define PRISM_SH_FIFO32         0x54    /* 32-bit FIFO push / pop (CFG3[11]) */
 
 /* Shard 0 shortcuts */
 #define PRISM_REG_CFG0          (PRISM_SHARD_BASE(0) + PRISM_SH_CFG0)
@@ -286,6 +295,37 @@ static inline uint32_t prism_load_chroma(const uint32_t *chroma, uint32_t states
             uint32_t got  = s < PRISM_BANK_STATES ? cfgmem_read_lo(inst, s)
                                                   : cfgmem_read_hi(inst, s - PRISM_BANK_STATES);
             if (got != ws[j]) errors++;
+        }
+    }
+    cfgmem_release();
+    return errors;
+}
+
+/*
+ * Fractured: load one 16-state table into each bank, bank A for shard 0 and
+ * bank B for shard 1.  Each pointer is PRISM_BANK_STATES rows in the
+ * yosys-prism order (highest state first, most significant word first):
+ * for a chroma built for 32 states that is its table + 64 words, the 16
+ * lowest states.  Returns the number of words that read back wrong.
+ */
+static inline uint32_t prism_load_banks(const uint32_t *bank_a, const uint32_t *bank_b)
+{
+    uint32_t errors = 0;
+
+    cfgmem_ctrl(CFGMEM_CTRL_BYP_HI);
+    for (uint32_t k = 0; k < PRISM_BANK_STATES * PRISM_STEW_WORDS; k++)
+        cfgmem_shift_hi(PRISM_STEW_WORDS - 1 - (k % PRISM_STEW_WORDS), bank_b[k]);
+    cfgmem_ctrl(CFGMEM_CTRL_BYP_LO);
+    for (uint32_t k = 0; k < PRISM_BANK_STATES * PRISM_STEW_WORDS; k++)
+        cfgmem_shift_lo(PRISM_STEW_WORDS - 1 - (k % PRISM_STEW_WORDS), bank_a[k]);
+    cfgmem_ctrl(0);
+
+    for (uint32_t s = 0; s < PRISM_BANK_STATES; s++) {
+        uint32_t row = (PRISM_BANK_STATES - 1 - s) * PRISM_STEW_WORDS;
+        for (uint32_t j = 0; j < PRISM_STEW_WORDS; j++) {
+            uint32_t inst = PRISM_STEW_WORDS - 1 - j;
+            if (cfgmem_read_lo(inst, s) != bank_a[row + j]) errors++;
+            if (cfgmem_read_hi(inst, s) != bank_b[row + j]) errors++;
         }
     }
     cfgmem_release();
