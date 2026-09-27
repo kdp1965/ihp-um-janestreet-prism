@@ -4,7 +4,9 @@
 # QSPI flash, data in PSRAM A), which drives the PRISM TX DMA: frames from
 # PSRAM B slots into FIFO B (the SRAM FIFO on SRAM[1]), checked by popping
 # them back, and a loopback through the fifo_loop chroma and the RX DMA with
-# both DMAs sharing the memory port.  The program reports over the debug
+# both DMAs sharing the memory port; then the RX DMA draining an SRAM FIFO
+# (FIFO A on SRAM[0]) and both DMAs on their own SRAMs at once (TX into
+# SRAM[1], RX out of SRAM[0]).  The program reports over the debug
 # UART; this side checks the report and, in the RTL simulation, watches the
 # memory-port arbiter in project.v: when both DMAs ask for a free port the
 # RX DMA must get it, and an RX request never waits long.

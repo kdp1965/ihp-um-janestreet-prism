@@ -20,6 +20,12 @@
  *   5. flow control: 2044 bytes from slot 2 fill FIFO B; a second copy of 64
  *      bytes from slot 3 waits for room; 64 bytes popped let it finish; the
  *      2044 bytes left go through the loopback into ring slot 1
+ *   6. the RX DMA on an SRAM FIFO: FIFO A on SRAM[0], B the flop FIFO; the
+ *      host pushes a 1500-byte frame into B, the chroma loops it into A and
+ *      the RX DMA drains A into ring slot 0, bursting from 1088 bytes in
+ *   7. full duplex on the two SRAMs: the TX DMA fills B on SRAM[1] with a
+ *      2044-byte frame from slot 2 while the chroma loops it into A on
+ *      SRAM[0] and the RX DMA drains A into ring slot 1
  */
 #include <stdint.h>
 #include <stdbool.h>
@@ -64,6 +70,7 @@ extern const uint32_t chroma_fifo_loop_pinmuxReg;
 #define SLOT_SRC_B              3u
 #define SEED_A                  0x61u
 #define SEED_B                  0x72u
+#define SEED_C                  0x83u           /* the host-pushed frame of case 6 */
 
 #define PRISM_CFG_FIFO_SRAM     (1u << 31)
 #define SH1(r)                  (PRISM_SHARD_BASE(1) + (r))
@@ -73,6 +80,12 @@ extern const uint32_t chroma_fifo_loop_pinmuxReg;
 #define FIFO_COUNT(v)           (((v) >> 8) & 0x3fffu)
 #define B_TX                    (PRISM_CFG_FIFO_DIR_TX | PRISM_CFG_FIFO_SRAM)
 #define B_RX                    (PRISM_CFG_FIFO_SRAM)
+/* On an SRAM FIFO the CFG1 levels count 64-byte units, the almost-full one
+   as free space: level 15 = 2048 - 15 * 64 = 1088 bytes in, the earliest
+   the RX DMA's burst trigger can be set */
+#define SRAM_AF_LEVEL           15u
+#define SRAM_AF_BYTES           (2048u - SRAM_AF_LEVEL * 64u)
+#define RX_BURST_BYTES          32u             /* prism_dma.v BURST_WORDS = 8 */
 
 #define MAX_MISMATCH_LINES      6
 #define POLL_LIMIT              200000u
@@ -193,6 +206,25 @@ static uint32_t fifo_b_count(void)
     return FIFO_COUNT(prism_read(PRISM_REG_FIFO_STATUS_B));
 }
 
+static uint32_t fifo_a_count(void)
+{
+    return FIFO_COUNT(prism_read(PRISM_REG_FIFO_STATUS));
+}
+
+/* The host pushes n bytes of slot_byte(seed, i) into FIFO B (in TX mode),
+   waiting while it is full; returns 0, or all ones if B never drains */
+static uint32_t push_b(uint32_t n, uint32_t seed)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t spins = 0;
+        while (prism_read(PRISM_REG_FIFO_STATUS_B) & PRISM_FIFO_FULL)
+            if (++spins > POLL_LIMIT)
+                return 0xFFFFFFFFu;
+        prism_write_byte(PRISM_REG_FIFO_B, slot_byte(seed, i));
+    }
+    return 0;
+}
+
 /* Pop n bytes of FIFO B (switched to RX so the host reads it) and compare
    them with slot_byte(seed, first + i); B is left in TX mode */
 static void pop_check_b(const char *name, uint32_t n, uint32_t seed, uint32_t first)
@@ -237,24 +269,35 @@ static void check_ring(const char *name, uint32_t slot,
     report(name, errors, n0 + n1);
 }
 
-/* Loopback: once FIFO B is empty (and the chroma has pushed its last byte
-   into A) end the RX frame; the RX DMA drains what A still holds (it only
-   bursts at A's almost-full level).  Returns the RX DMA status after its
-   interrupt, 0 on a timeout */
-static uint32_t rx_frame_end(void)
+/* Loopback: wait until FIFO B is empty and the chroma has pushed its last
+   byte into A (then `settle` more clocks); false on a timeout */
+static bool wait_b_drained(uint32_t settle)
 {
     uint32_t spins = 0;
     while (!(prism_read(PRISM_REG_FIFO_STATUS_B) & PRISM_FIFO_EMPTY))
         if (++spins > POLL_LIMIT)
-            return 0;
-    delay_cycles(200);
+            return false;
+    delay_cycles(settle);
+    return true;
+}
+
+/* End the RX frame; the RX DMA drains what A still holds (it only bursts
+   at A's almost-full level).  Returns the RX DMA status after its
+   interrupt, 0 on a timeout */
+static uint32_t rx_end(void)
+{
     DMA_STATUS_REG = DMA_ST_END;
-    for (spins = 0; spins < POLL_LIMIT; spins++) {
+    for (uint32_t spins = 0; spins < POLL_LIMIT; spins++) {
         uint32_t st = DMA_STATUS_REG;
         if (st & DMA_ST_IRQ)
             return st;
     }
     return 0;
+}
+
+static uint32_t rx_frame_end(void)
+{
+    return wait_b_drained(200) ? rx_end() : 0;
 }
 
 int main(void)
@@ -346,6 +389,53 @@ int main(void)
     check("copy 5 received", st != 0 && DMA_ST_HEAD(st) == 0 && !(st & DMA_ST_OVF), st);
     DMA_STATUS_REG = DMA_ST_IRQ;
     check_ring("copy 5 ring slot 1", 1, 2044 - 64, SEED_A, DMA_FRAME_START + 64, 64, SEED_B, 0);
+
+    /* 6. the RX DMA on an SRAM FIFO: A on SRAM[0] in RX mode, B the flop FIFO
+       in TX mode; the host pushes a 1500-byte frame into B, the chroma loops
+       it into A, and the RX DMA bursts from A while it holds SRAM_AF_BYTES
+       or more, then drains the rest at the frame end */
+    prism_write(PRISM_REG_CTRL, 0);
+    DMA_STATUS_REG = DMA_ST_SET_TAIL | (0u << 8);                 /* slot 1 consumed: both free */
+    prism_write(PRISM_REG_CFG0, chroma_fifo_loop_ctrlReg | PRISM_CFG_FIFO_SRAM);   /* A: RX on SRAM[0] */
+    prism_write(PRISM_REG_CFG1, SRAM_AF_LEVEL << 20);
+    prism_write(PRISM_REG_CFG0_B, PRISM_CFG_FIFO_DIR_TX);         /* B: TX flop FIFO, the host pushes */
+    prism_write(PRISM_REG_FIFO_STATUS, 0);                        /* flush both */
+    prism_write(PRISM_REG_FIFO_STATUS_B, 0);
+    prism_write(PRISM_REG_CTRL, PRISM_CTRL_ENABLE);
+    v = push_b(1500, SEED_C);
+    check("frame 6 pushed", v == 0, v);
+    /* every byte is in A now; the bursts stop once A holds less than the
+       almost-full level, so A keeps between one burst below it and it */
+    v = wait_b_drained(4000) ? fifo_a_count() : 0xFFFFFFFFu;
+    check("frame 6 SRAM A settled below its almost-full level", v >= SRAM_AF_BYTES - RX_BURST_BYTES &&
+          v < SRAM_AF_BYTES, v);
+    st = rx_end();
+    check("frame 6 received", st != 0 && DMA_ST_HEAD(st) == 1 && !(st & DMA_ST_OVF), st);
+    DMA_STATUS_REG = DMA_ST_IRQ;
+    check_ring("frame 6 ring slot 0", 0, 1500, SEED_C, 0, 0, 0, 0);
+    v = fifo_a_count();
+    check("frame 6 SRAM A empty", v == 0, v);
+
+    /* 7. full duplex on the two SRAMs: the TX DMA fills B on SRAM[1] with a
+       maximum-size frame while the chroma loops it into A on SRAM[0] and the
+       RX DMA drains A into ring slot 1 */
+    prism_write(PRISM_REG_CTRL, 0);
+    DMA_STATUS_REG = DMA_ST_SET_TAIL | (1u << 8);                 /* slot 0 consumed */
+    prism_write(PRISM_REG_CFG0_B, B_TX);                          /* B: TX on SRAM[1] */
+    prism_write(PRISM_REG_FIFO_STATUS_B, 0);
+    prism_write(PRISM_REG_CTRL, PRISM_CTRL_ENABLE);
+    tx_start(SLOT_SRC_A, 2044, TXDMA_SKIP);
+    st = tx_wait();
+    v = fifo_a_count();                     /* without the RX DMA draining alongside, A would hold ~2 KB */
+    check("frame 7 TX DMA done", (st & TXDMA_ST_DONE) && TXDMA_ST_LEFT(st) == 0, st);
+    check("frame 7 RX DMA drained A during the copy", v < 2044 - 512, v);
+    TXDMA_REG = TXDMA_ACK;
+    st = rx_frame_end();
+    check("frame 7 received", st != 0 && DMA_ST_HEAD(st) == 0 && !(st & DMA_ST_OVF), st);
+    DMA_STATUS_REG = DMA_ST_IRQ;
+    check_ring("frame 7 ring slot 1", 1, 2044, SEED_A, DMA_FRAME_START, 0, 0, 0);
+    v = fifo_a_count() | fifo_b_count();
+    check("frame 7 both SRAM FIFOs empty", v == 0, v);
 
     DMA_CFG_REG = 0;
     prism_write(PRISM_REG_CTRL, 0);
