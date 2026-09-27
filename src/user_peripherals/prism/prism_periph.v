@@ -192,6 +192,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     input             dma_shard,      // 0 = FIFO A, 1 = FIFO B
     input             dma_chain,      // FIFO A drains into FIFO B by itself
     input             dma_hw_end,     // the receiving shard's host interrupt ends frames (and is not a host IRQ)
+    output            dma_crc_ok,     // the receiving shard's crc_ok (the DMA latches it at the frame end)
 
     // TX DMA tap (prism_txdma.v sits next to TinyQV): bytes pushed into
     // shard 1's FIFO (FIFO B, the unfractured TX FIFO) while it is the SRAM
@@ -199,6 +200,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     input     [7:0]   txd_data,
     input             txd_push,
     output            txd_room,       // that SRAM FIFO has room for a burst (32 bytes)
+    input             txd_ring,       // TX ring on: shard 1's host interrupt ends its frames (not a host IRQ)
+    input             txd_start,      // TX ring: toggle shard 1's host_in[0] (start the next frame)
+    output            txd_frame_end,  // shard 1's OUT_HOST_INTERRUPT rising: the frame is out
 
     // State Information Table interface (CFGMEM macros in peripherals.v)
     output    [3:0]   sit_addr_a,
@@ -465,7 +469,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     endfunction
     wire [32*SHARDS-1:0] fifo32_v;      // the RX word registers
     wire [14*SHARDS-1:0] fifo_count_v;
-    wire [SHARDS-1:0]    fifo_empty_v, fifo_full_v, fifo_af_v, host_irq_pulse_v;
+    wire [SHARDS-1:0]    fifo_empty_v, fifo_full_v, fifo_af_v, host_irq_pulse_v, crc_ok_v;
     // DMA chain mode (DMA_CFG[7]): FIFO A drains into FIFO B by itself, so
     // the two 16-byte FIFOs act as one 32-byte one for the DMA, which then
     // reads B (shard select 1); the frame end still comes from shard 0, the
@@ -1154,8 +1158,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                     // shard's INT_CLR byte with bit 7 set, by the host_in
                     // toggle write, or by disabling the PRISM.
                     if ((halt_s && !halt_r) ||
-                        (exec && out_s[OUT_HOST_INTERRUPT] && !host_irq_r && !(dma_end_s && dma_hw_end)))
-                        irq <= 1'b1;                            // (the DMA takes the pulse as a frame end instead)
+                        (exec && out_s[OUT_HOST_INTERRUPT] && !host_irq_r && !(dma_end_s && dma_hw_end) &&
+                         !(s == SHARDS-1 && txd_ring)))
+                        irq <= 1'b1;                            // (a DMA takes the pulse as a frame end instead)
                     else if (!prism_enable ||
                              (byte_wr && address == (s == 0 ? REG_INT_CLR0 : REG_INT_CLR1) && data_in[7]) ||
                              (byte_wr && win && shard_off == SH_TOGGLE))
@@ -1164,8 +1169,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                     // host_in
                     if (prism_wr && win && shard_off == SH_HOST)
                         host_in <= data_in[1:0];
-                    else if (byte_wr && win && shard_off == SH_TOGGLE)
-                        host_in[0] <= ~host_in[0];
+                    else if ((byte_wr && win && shard_off == SH_TOGGLE) || (s == SHARDS-1 && txd_start))
+                        host_in[0] <= ~host_in[0];              // (the TX ring starts shard 1's frames the same way)
 
                     // count2 compare register
                     if (word_wr && win && shard_off == SH_COUNTS)
@@ -1490,6 +1495,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             assign fifo_full_v[s]         = fifo_full;
             assign fifo_af_v[s]           = fifo_af;
             assign host_irq_pulse_v[s]    = exec & out_s[OUT_HOST_INTERRUPT] & !host_irq_r;
+            assign crc_ok_v[s]            = crc_ok;
             assign comm_v     [8*s +: 8]  = comm;
             if (s == 0)
             begin : XOP
@@ -1528,6 +1534,10 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     assign dma_avail4    = (dma_chain ? dma_count_sum : fifo_count_v[14*dma_shard +: 14]) >= 14'd4;
     assign dma_af        = fifo_af_v[dma_shard];
     assign dma_frame_end = dma_chain ? host_irq_pulse_v[0] : host_irq_pulse_v[dma_shard];
+    assign dma_crc_ok    = dma_chain ? crc_ok_v[0] : crc_ok_v[dma_shard];
+
+    // TX ring (prism_txdma.v): shard 1's end of frame
+    assign txd_frame_end = host_irq_pulse_v[SHARDS-1];
 
     // =============================================================
     // Output pins: shard 0 wins a pin it claims, otherwise shard 1

@@ -159,6 +159,7 @@ Common block 0x000-0x0FF:
 | 0x24 | INT_STATUS (read): [1:0] shard interrupts, [3:2] semaphore as seen by shard 0 / shard 1 |
 | (0x8000020 / 0x8000024) | DMA_CFG / DMA_STATUS of the RX DMA are TinyQV internal registers, not PRISM ones, section 4y |
 | (0x8000028) | TXDMA of the TX DMA, a TinyQV internal register too, section 4y.1 |
+| (0x800002C / 0x8000034) | TXRING_CFG / TXRING_STATUS of the TX DMA's ring, TinyQV internal registers, section 4y.2 |
 | 0x30 | DEBUG_DOUT (exists) |
 | 0x34 | DECISION (exists) |
 | 0x38 | OUT_DATA (exists) |
@@ -360,11 +361,15 @@ burst starts when the FIFO reaches its almost-full level (CFG1[23:20])
 or when a frame ends; the last one to three bytes of a frame go out as
 byte writes.
 
-Ring: 2^K slots of 2 KB from a 2 KB-aligned base in RAM B.  Bytes 0-1 of
-a slot are the frame length (bit 15: the frame was cut at 2044 bytes),
-2-3 zero, the frame from byte 4 (word aligned).  The engine fills slot
-`head`; at the frame end it writes the length, advances head and raises
-interrupt 10.  Software owns `tail`; a frame that starts while
+Ring: 2^K slots of 2 KB from a 2 KB-aligned base in RAM B.  Word 0 of a
+slot is the frame's header: [10:0] the frame length (frame + FCS), [15]
+the frame was cut at 2040 bytes, [16] crc_ok (since 2026-09-27: the
+receiving shard's FLAGS crc_ok, latched when the frame ended, so the host
+does not race the next frame's CRC clear), the rest zero.  Word 1 is left
+alone (see 4y.2: 55 55 55 D5 written there makes the slot a TX slot) and
+the frame starts at byte 8 (since 2026-09-27; it was byte 4).  The engine
+fills slot `head`; at the frame end it writes the header, advances head
+and raises interrupt 10.  Software owns `tail`; a frame that starts while
 `(head + 1) mod 2^K == tail` is consumed and dropped with the overflow
 flag set.  Frame end: the receiving shard's OUT_HOST_INTERRUPT (the
 eth_rx chroma raises it after the last byte) with DMA_CFG[3], which then
@@ -378,6 +383,18 @@ drains B (shard select 1, B's almost-full level as the trigger) and the
 frame end comes from shard 0.  The two 16-byte FIFOs act as one 32-byte
 one and bursts are 16 bytes: at 10 Mb/s the port is busy about 15 % of
 the time, the CPU's stall budget.
+
+Receive on the flop FIFO.  The engine closes a frame when the FIFO next
+reads empty after the frame-end pulse, not after a byte count.  On a
+16-byte flop FIFO that is a few hundred clocks, well inside 10BASE-T's
+minimum spacing (96-bit gap + 64-bit preamble = 16 us, ~1000 clocks), and
+back-to-back frames keep their boundaries (ethring_verify injects three at
+the minimum gap).  An SRAM FIFO in RX mode also works with the engine
+(txdma_verify cases 6 and 7), but its almost-full level counts free space
+in 64-byte units, so bursts start 1088 bytes in and up to ~1 KB is still
+queued at a frame end: the next frame's first bytes would be appended to
+the previous slot.  Receive frames on the flop FIFO until the engine gets a
+frame-boundary mark.
 
 Test: `make dma_verify` (programs/dma_verify + test_dma_verify.py), chain
 mode with the PRISM disabled: the program pushes bytes into FIFO A (TX
@@ -419,10 +436,10 @@ TXDMA (0x8000028, word access; interrupt 11 while done and enabled):
 |------|-------|------|
 | [11:0] | frame length in bytes (0-2048) | bytes still to push |
 | [23:12] | slot: RAM B address 0x1800000 + slot * 2048 | slot |
-| [24] | skip the slot header: the frame starts at slot byte 4, the RX DMA's slot format (so a received frame can go back out as it is; at most 2044 bytes) | skip |
+| [24] | skip the slot header: the copy starts at slot byte 4 (an RX slot with 55 55 55 D5 in its word 1 and the header's length as the copy length sends a received frame back out; at most 2044 bytes) | skip |
 | [25] | interrupt enable | interrupt enable |
 | [30] | acknowledge: clear done | done |
-| [31] | start a copy with these settings (ignored while busy) | busy |
+| [31] | start a copy with these settings (ignored while busy or while the TX ring is on, 4y.2) | busy |
 
 The host does not push FIFO B itself while a copy runs, and chain mode
 (which pushes B from A) does not run with it.
@@ -437,6 +454,72 @@ and the 2044 bytes left go through the loopback into the other ring slot.
 In the RTL simulation the test also checks the arbiter: whenever both DMAs
 ask for a free port the RX DMA gets it, and an RX request never waits more
 than one TX burst plus a CPU transaction.
+
+### 4y.2 TX ring and per-frame RX status (2026-09-27)
+
+With one copy at a time, the next frame can go into FIFO B only after the
+chroma has sent the current one (eth_tx ends a frame when the FIFO runs
+empty), so the host's turnaround sets the gap: ~5000 clocks from a frame's
+interrupt to the next start with the code in flash (ethtx_verify), eight
+times the 9.6 us minimum.  The TX ring moves that sequencing into the
+engine.  It works with any transmitting chroma that ends its frame on an
+empty FIFO and raises its host interrupt then, with no chroma change.
+
+The ring is 2^K slots of RAM B in the RX DMA's slot format: word 0 holds
+the byte count L, and the engine sends the L bytes from slot byte 4.  For
+eth_tx (whose first four preamble bytes come from its K0) the host writes
+55 55 55 D5 into word 1 and the frame, without its FCS, from byte 8, with
+L = frame + 4.  A slot the RX DMA filled has the frame at byte 8 too and
+L = frame + FCS = frame + 4, so writing 55 55 55 D5 into its spare word 1
+is all it takes to forward it: the ring sends the preamble tail and the
+frame and stops before the received FCS (eth_tx appends a new one).  (A
+first version pushed the prefix from a 32-bit register and had a drop-FCS
+option; routing did not close with it, see below, and TinyQV writing the
+prefix as data does the same job.)  For each slot from `tail` to `head` the
+engine reads L, copies, and starts the chroma by toggling shard 1's
+host_in[0] once the inter-frame gap since the previous frame's end has
+passed and 16 words (or all of them) are in.  Shard 1's host interrupt
+then ends the frame: it goes to the engine instead of the host (like the
+RX DMA's hw_end), `tail` advances, the frame-sent flag rises (interrupt 11
+when enabled), the gap timer starts and the next frame is copied at once.
+New nets across the tile: the start strobe, shard 1's end-of-frame pulse,
+the ring-on level and the RX DMA's crc_ok (the RX status below).
+
+| Register | Bits |
+|----------|------|
+| TXRING_CFG (0x800002C, read / write) | [0] enable (0 resets head, tail and the flag; a copy under way still finishes, flush FIFO B), [3:1] K: 2^K slots, K = 1..4, [6] interrupt enable, [17:8] inter-frame gap in clocks, [27:20] base in RAM B (2 KB units: slot i at 0x1800000 + (base + i) * 2048) |
+| TXRING_STATUS (0x8000034) | write: [3:0] -> head when [24] (fill slot head, then advance it), [16] clears the frame-sent flag; read: [3:0] head, [11:8] tail, [16] frame sent, [17] a frame on its way |
+
+TXDMA's single copies are ignored while the ring is on.  RX status: the
+RX DMA writes the slot header as a word and bit 16 is the receiving
+shard's crc_ok at the frame end (section 4y).
+
+Tests (fractured: eth_rx on shard 0 with the flop FIFO A and the RX DMA,
+eth_tx on shard 1 with FIFO B on SRAM[1]; the bench closes the wire from
+uo_out[1] / uo_out[2] to ui_in[3]):
+`make ethtx_verify` (TX from PSRAM with single copies: minimum, odd,
+maximum frames and a streamed start, decoded on the line),
+`make ethloop_verify` (PSRAM to wire to PSRAM, including an echo of a
+received slot) and `make ethring_verify` (32 KB bench PSRAMs,
+SIM_RAM_BITS=15: six frames queued with one head write go out 578-674
+clocks apart against the 576-clock minimum, none of shard 1's interrupts
+reach the host, every frame lands with crc_ok; three frames injected at
+the minimum gap, the middle one with a wrong FCS, land in their own slots
+with crc_ok 1 / 0 / 1; a received slot forwarded through the ring by
+writing its word 1 comes back identical, FCS included).
+
+Area and routing: the first ring (prefix register, drop-FCS, 8-bit head /
+tail, 12-bit base) made the TX engine 952 cells / 178 flops against 412 /
+86 without the ring, and its harden (runs/txring) did not route: GRT
+overflow 14.3 k against 10.6 k, detailed routing stuck at 400-900
+violations, Metal4 shorts to the power stripes over SRAM[1].  The ring as
+described here (prefix as data, 4-bit head / tail, 8-bit base) is 757
+cells / 132 flops.  At 40 um and 30 um mouth keep-outs it placed with
+~28 % inflation and GRT overflow 17.6 k / 18.0 k; at 60 um (runs/
+txring2_ko60, the width of section 4z.6) it placed with 3.6 %, GRT 15.0 k,
+detailed routing clean at pass 22, and signed off with DRC, LVS and
+antennas clean and typical-corner setup +0.10 ns (the QSPI clock output,
+not the ring; the worst internal path has +0.94 ns).
 
 ## 4c. Host software (item 11, Phase 5)
 

@@ -18,6 +18,7 @@ from test_util import reset
 CLK_PERIOD_NS = 15.624                 # 64 MHz
 DEBUG_UART_BIT_NS = CLK_PERIOD_NS * 16 # debug UART is 4 Mbaud at 64 MHz
 CHAR_TIMEOUT_NS = 40_000_000           # 40 ms of silence = program is stuck
+FRAME_START = 8                        # the RX DMA puts the frame at slot byte 8
 
 FRAME1 = [(0x11 + i * 7 + (i >> 5)) & 0xFF for i in range(70)]   # frame_byte(0x11, i)
 
@@ -72,15 +73,16 @@ async def test_dma_verify(dut):
     assert not failures, f"program reported failures: {failures}"
     assert "fail=0" in lines[-1]
 
-    # Slot 1 holds frame 5 (1500 bytes of frame_byte(0x55, i)) at the end;
-    # slot 0 holds the empty frame 4.  Look at the PSRAM model itself.
+    # Slot 1 holds frame 5 (1500 bytes of frame_byte(0x55, i), from slot
+    # byte 8: word 0 is the header, word 1 spare) at the end; slot 0 holds
+    # the empty frame 4.  Look at the PSRAM model itself.
     try:
         slot1 = 2048
         length = ram_b_byte(dut, slot1) | (ram_b_byte(dut, slot1 + 1) << 8)
         assert length == 1500, f"slot 1 length {length}"
-        for i in (0, 1, 2, 3, 1019, 1020, 1021, 1499):
+        for i in (0, 1, 2, 3, 1015, 1016, 1017, 1499):
             exp = (0x55 + i * 7 + (i >> 5)) & 0xFF
-            got = ram_b_byte(dut, slot1 + 4 + i)
+            got = ram_b_byte(dut, slot1 + FRAME_START + i)
             assert got == exp, f"slot 1 byte {i}: {got:#x} != {exp:#x}"
         length0 = ram_b_byte(dut, 0) | (ram_b_byte(dut, 1) << 8)
         assert length0 == 0, f"slot 0 length {length0}"

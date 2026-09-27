@@ -47,7 +47,7 @@
 #define DMA_ST_HEAD(v)          ((v) & 0xffu)
 #define DMA_ST_TAIL(v)          (((v) >> 8) & 0xffu)
 #define DMA_SLOT                2048u
-#define DMA_FRAME_START         4u
+#define DMA_FRAME_START         8u              /* the frame starts at slot byte 8 (word 1 is spare) */
 
 #define RAM_B                   ((volatile uint8_t *)0x1800000u)
 #define RAM_B32                 ((volatile uint32_t *)0x1800000u)

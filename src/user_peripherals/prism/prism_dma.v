@@ -21,13 +21,19 @@
 // its next memory access for the length of a burst.
 //
 // Ring.  RAM B holds 2^K slots of 2 KB from a 2 KB-aligned base.  Slot
-// bytes 0-1 hold the frame length (bit 15: the frame did not fit and was
-// cut at 2044 bytes), bytes 2-3 are zero, the frame starts at byte 4 so
-// its words are word aligned.  The engine fills slot head; at the frame
-// end it writes the length, advances head and raises its interrupt
-// (TinyQV interrupt 10).  Software owns tail: a slot is free again once
-// tail has passed it.  A frame that starts while the ring is full
-// (head + 1 == tail) is consumed and dropped, with the overflow flag set.
+// word 0 is the frame's header: [10:0] its length (frame + FCS; bit 15:
+// the frame did not fit and was cut at 2040 bytes), [16] crc_ok, the
+// receiving shard's FLAGS crc_ok (its CRC matched CRC_EXPECTED) latched
+// when the frame ended, so the host needs no race with the next frame's
+// CRC clear.  Word 1 is left alone: writing 55 55 55 D5 there turns the
+// slot into a TX ring slot (prism_txdma.v sends the header's length in
+// bytes from byte 4, which then is the preamble tail and the frame
+// without its FCS).  The frame starts at byte 8, word aligned.  The
+// engine fills slot head; at the frame end it writes the header, advances
+// head and raises its interrupt (TinyQV interrupt 10).  Software owns
+// tail: a slot is free again once tail has passed it.  A frame that
+// starts while the ring is full (head + 1 == tail) is consumed and
+// dropped, with the overflow flag set.
 //
 // Frame end.  The receiving shard's OUT_HOST_INTERRUPT (the eth_rx chroma
 // raises it after a frame's last byte), or a write of DMA_STATUS[31].
@@ -40,7 +46,7 @@
 //           from shard 0), see prism_periph.v
 // DMA_STATUS (0x8000024, word)
 //   read:  [7:0] head  [15:8] tail  [16] irq  [17] overflow  [18] busy
-//          [19] dropping  [30:20] slot offset of the next byte (4 = empty)
+//          [19] dropping  [30:20] slot offset of the next byte (8 = empty)
 //   write: [15:8] -> tail when [24]; [16] clears irq; [17] clears
 //          overflow; [31] ends the current frame
 // =======================================================
@@ -66,6 +72,7 @@ module prism_dma
     input  wire         fifo_avail4,        // at least four more bytes are coming
     input  wire         fifo_af,            // the FIFO reached its almost-full level
     input  wire         frame_end_pulse,    // the receiving shard's OUT_HOST_INTERRUPT rising
+    input  wire         crc_ok,             // the receiving shard's FLAGS crc_ok
     output wire         fifo_pop,           // take fifo_head this clock
     output wire         enable,
     output wire         shard_sel,
@@ -83,7 +90,7 @@ module prism_dma
     input  wire         mem_ready
 );
 
-    localparam [10:0] FRAME_START = 11'd4;             // first frame byte of a slot
+    localparam [10:0] FRAME_START = 11'd8;             // first frame byte of a slot (word 1 is spare)
     localparam [10:0] LAST_WORD   = 11'd2044;          // highest offset a word may start at
     localparam [10:0] LAST_BYTE   = 11'd2047;          // highest offset a byte may take
 
@@ -99,6 +106,7 @@ module prism_dma
     reg         frame_pending;                          // a frame end waits to be flushed
     reg         dropping;                               // this frame is consumed, not written
     reg         trunc;                                  // this frame overflowed its slot
+    reg         frame_crc;                              // crc_ok when the frame ended
     reg  [3:0]  burst;                                  // words done in the open burst
     reg  [31:0] word;                                   // bytes assembled from the tap, byte k at [8k+7:8k]
     reg  [2:0]  nbytes;                                 // how many of them (0-4)
@@ -136,10 +144,10 @@ module prism_dma
     wire [11:0] slot_hi = cfg[22:11] + {4'h0, head};
     assign mem_req      = (state != S_IDLE);
     assign mem_addr     = {2'b11, slot_hi, (state == S_LEN) ? 11'd0 : offset};   // 0x1800000 | base | slot | offset
-    assign mem_wdata    = (state == S_LEN) ? {16'h0, trunc, 4'h0, offset - FRAME_START} : word;
+    assign mem_wdata    = (state == S_LEN) ? {15'h0, frame_crc, trunc, 4'h0, offset - FRAME_START} : word;
     assign mem_write_n  = (state == S_WORD) ? 2'b10 :
                           (state == S_TAIL) ? 2'b00 :
-                          (state == S_LEN)  ? 2'b01 : 2'b11;
+                          (state == S_LEN)  ? 2'b10 : 2'b11;
     assign mem_continue = (state == S_WORD) & more;
 
     assign st_rd = {1'b0, offset, dropping, (state != S_IDLE), ovf, irq, tail, head};
@@ -157,6 +165,7 @@ module prism_dma
             frame_pending <= 1'b0;
             dropping      <= 1'b0;
             trunc         <= 1'b0;
+            frame_crc     <= 1'b0;
             burst         <= 4'd0;
             word          <= 32'h0;
             nbytes        <= 3'd0;
@@ -180,7 +189,10 @@ module prism_dma
                 if (wdata[17]) ovf  <= 1'b0;
             end
             if (cfg_en & ((cfg[3] & frame_end_pulse) | (st_wr & wdata[31])))
+            begin
                 frame_pending <= 1'b1;
+                frame_crc     <= crc_ok;
+            end
 
             // the word register fills from the tap
             if (fifo_pop)

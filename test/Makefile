@@ -31,13 +31,16 @@ clean:
 # RISC-V program tests: build test/programs/<name> into <name>.hex and run it
 # on the RTL through test_prog.mk (simulated QSPI flash + 2 PSRAMs).
 #   make cfgmem_verify
-PROGRAMS = cfgmem_verify sdk_check dma_verify txdma_verify ethtx_verify ethloop_verify
+PROGRAMS = cfgmem_verify sdk_check dma_verify txdma_verify ethtx_verify ethloop_verify ethring_verify
 
 .PHONY: $(PROGRAMS) $(PROGRAMS:%=%-hex)
 
 $(PROGRAMS:%=%-hex):
 	$(MAKE) -C programs/$(@:%-hex=%)
 
+# ethring_verify needs 16 RAM B slots (32 KB PSRAMs)
+ethring_verify: SIM_RAM_BITS = 15
+
 $(PROGRAMS): %: %-hex
 	make -f test_prog.mk clean
-	make -f test_prog.mk PROG=$@
+	make -f test_prog.mk PROG=$@ $(if $(SIM_RAM_BITS),SIM_RAM_BITS=$(SIM_RAM_BITS))

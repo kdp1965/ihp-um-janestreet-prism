@@ -17,14 +17,15 @@
  *   4. loopback: 1500 bytes from slot 3 -> FIFO B -> the fifo_loop chroma
  *      (unfractured, B to A) -> FIFO A -> the RX DMA -> ring slot 0, both
  *      DMAs running at once, crossing a PSRAM page
- *   5. flow control: 2044 bytes from slot 2 fill FIFO B; a second copy of 64
+ *   5. flow control: 2040 bytes from slot 2 fill FIFO B; a second copy of 64
  *      bytes from slot 3 waits for room; 64 bytes popped let it finish; the
- *      2044 bytes left go through the loopback into ring slot 1
+ *      2040 bytes left go through the loopback into ring slot 1 (a full slot:
+ *      the RX DMA puts the frame at byte 8)
  *   6. the RX DMA on an SRAM FIFO: FIFO A on SRAM[0], B the flop FIFO; the
  *      host pushes a 1500-byte frame into B, the chroma loops it into A and
  *      the RX DMA drains A into ring slot 0, bursting from 1088 bytes in
  *   7. full duplex on the two SRAMs: the TX DMA fills B on SRAM[1] with a
- *      2044-byte frame from slot 2 while the chroma loops it into A on
+ *      2040-byte frame from slot 2 while the chroma loops it into A on
  *      SRAM[0] and the RX DMA drains A into ring slot 1
  */
 #include <stdint.h>
@@ -62,7 +63,9 @@ extern const uint32_t chroma_fifo_loop_pinmuxReg;
 #define DMA_ST_END              (1u << 31)
 #define DMA_ST_HEAD(v)          ((v) & 0xffu)
 #define DMA_SLOT                2048u
-#define DMA_FRAME_START         4u
+#define SKIP_START              4u              /* TXDMA skip: the copy starts at slot byte 4 */
+#define RX_FRAME_START          8u              /* the RX DMA puts the frame at slot byte 8 */
+#define MAX_FRAME               2040u           /* the most an RX slot holds */
 
 #define RAM_B                   ((volatile uint8_t *)0x1800000u)
 #define RAM_B32                 ((volatile uint32_t *)0x1800000u)
@@ -260,7 +263,7 @@ static void check_ring(const char *name, uint32_t slot,
     check(name, len == n0 + n1, len);
     for (uint32_t i = 0; i < n0 + n1; i++) {
         uint8_t exp = (i < n0) ? slot_byte(seed0, first0 + i) : slot_byte(seed1, first1 + i - n0);
-        uint8_t got = p[DMA_FRAME_START + i];
+        uint8_t got = p[RX_FRAME_START + i];
         if (got != exp) {
             errors++;
             mismatch(&lines, i, exp, got);
@@ -333,7 +336,7 @@ int main(void)
     TXDMA_REG = TXDMA_ACK;
     st = TXDMA_REG;
     check("copy 1 acknowledged", !(st & TXDMA_ST_DONE), st);
-    pop_check_b("copy 1 bytes", 70, SEED_A, DMA_FRAME_START);
+    pop_check_b("copy 1 bytes", 70, SEED_A, SKIP_START);
     v = fifo_b_count();
     check("copy 1 FIFO B empty", v == 0, v);
 
@@ -364,31 +367,31 @@ int main(void)
     st = rx_frame_end();
     check("copy 4 received", st != 0 && DMA_ST_HEAD(st) == 1 && !(st & DMA_ST_OVF), st);
     DMA_STATUS_REG = DMA_ST_IRQ;
-    check_ring("copy 4 ring slot 0", 0, 1500, SEED_B, DMA_FRAME_START, 0, 0, 0);
+    check_ring("copy 4 ring slot 0", 0, 1500, SEED_B, SKIP_START, 0, 0, 0);
 
-    /* 5. flow control, chroma stopped: 2044 bytes fill B; 64 more wait for room */
+    /* 5. flow control, chroma stopped: 2040 bytes fill B; 64 more wait for room */
     prism_write(PRISM_REG_CTRL, 0);
     DMA_STATUS_REG = DMA_ST_SET_TAIL | (1u << 8);                 /* slot 0 is free again */
-    tx_start(SLOT_SRC_A, 2044, TXDMA_SKIP);
+    tx_start(SLOT_SRC_A, MAX_FRAME, TXDMA_SKIP);
     st = tx_wait();
-    check("copy 5a done", (st & TXDMA_ST_DONE) && fifo_b_count() == 2044, st);
+    check("copy 5a done", (st & TXDMA_ST_DONE) && fifo_b_count() == MAX_FRAME, st);
     TXDMA_REG = TXDMA_ACK;
     tx_start(SLOT_SRC_B, 64, 0);
     delay_cycles(4000);
     st = TXDMA_REG;
     check("copy 5b waits for room", (st & TXDMA_ST_BUSY) && TXDMA_ST_LEFT(st) == 64 &&
-          fifo_b_count() == 2044, st);
-    pop_check_b("copy 5a first 64 bytes", 64, SEED_A, DMA_FRAME_START);    /* back in TX: room */
+          fifo_b_count() == MAX_FRAME, st);
+    pop_check_b("copy 5a first 64 bytes", 64, SEED_A, SKIP_START);         /* back in TX: room */
     st = tx_wait();
     check("copy 5b done", (st & TXDMA_ST_DONE) && TXDMA_ST_LEFT(st) == 0, st);
     v = fifo_b_count();
-    check("copy 5 FIFO B count", v == 2044, v);
+    check("copy 5 FIFO B count", v == MAX_FRAME, v);
     TXDMA_REG = TXDMA_ACK;
     prism_write(PRISM_REG_CTRL, PRISM_CTRL_ENABLE);               /* drain B through the loopback */
     st = rx_frame_end();
     check("copy 5 received", st != 0 && DMA_ST_HEAD(st) == 0 && !(st & DMA_ST_OVF), st);
     DMA_STATUS_REG = DMA_ST_IRQ;
-    check_ring("copy 5 ring slot 1", 1, 2044 - 64, SEED_A, DMA_FRAME_START + 64, 64, SEED_B, 0);
+    check_ring("copy 5 ring slot 1", 1, MAX_FRAME - 64, SEED_A, SKIP_START + 64, 64, SEED_B, 0);
 
     /* 6. the RX DMA on an SRAM FIFO: A on SRAM[0] in RX mode, B the flop FIFO
        in TX mode; the host pushes a 1500-byte frame into B, the chroma loops
@@ -424,16 +427,16 @@ int main(void)
     prism_write(PRISM_REG_CFG0_B, B_TX);                          /* B: TX on SRAM[1] */
     prism_write(PRISM_REG_FIFO_STATUS_B, 0);
     prism_write(PRISM_REG_CTRL, PRISM_CTRL_ENABLE);
-    tx_start(SLOT_SRC_A, 2044, TXDMA_SKIP);
+    tx_start(SLOT_SRC_A, MAX_FRAME, TXDMA_SKIP);
     st = tx_wait();
     v = fifo_a_count();                     /* without the RX DMA draining alongside, A would hold ~2 KB */
     check("frame 7 TX DMA done", (st & TXDMA_ST_DONE) && TXDMA_ST_LEFT(st) == 0, st);
-    check("frame 7 RX DMA drained A during the copy", v < 2044 - 512, v);
+    check("frame 7 RX DMA drained A during the copy", v < MAX_FRAME - 512, v);
     TXDMA_REG = TXDMA_ACK;
     st = rx_frame_end();
     check("frame 7 received", st != 0 && DMA_ST_HEAD(st) == 0 && !(st & DMA_ST_OVF), st);
     DMA_STATUS_REG = DMA_ST_IRQ;
-    check_ring("frame 7 ring slot 1", 1, 2044, SEED_A, DMA_FRAME_START, 0, 0, 0);
+    check_ring("frame 7 ring slot 1", 1, MAX_FRAME, SEED_A, SKIP_START, 0, 0, 0);
     v = fifo_a_count() | fifo_b_count();
     check("frame 7 both SRAM FIFOs empty", v == 0, v);
 

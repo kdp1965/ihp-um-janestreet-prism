@@ -24,6 +24,8 @@ module tt_um_pettit_js_prism (
     localparam PERI_DMA_CFG = 4'h8;             // 0x8000020: PRISM RX DMA configuration (prism_dma.v)
     localparam PERI_DMA_STATUS = 4'h9;          // 0x8000024: its ring head / tail and flags
     localparam PERI_TXDMA = 4'hA;               // 0x8000028: PRISM TX DMA command / status (prism_txdma.v)
+    localparam PERI_TXRING_CFG = 4'hB;          // 0x800002C: its TX ring configuration
+    localparam PERI_TXRING_STATUS = 4'hD;       // 0x8000034: the ring's head / tail and frame-sent flag
     localparam PERI_DEBUG = 4'hC;
     localparam PERI_USER = 4'hF;
 
@@ -153,14 +155,15 @@ module tt_um_pettit_js_prism (
     wire        dma_mem_grant;
     wire        dma_mem_ready;
     wire  [7:0] dma_head;
-    wire        dma_empty, dma_drained, dma_avail4, dma_af, dma_frame_end;
+    wire        dma_empty, dma_drained, dma_avail4, dma_af, dma_frame_end, dma_crc_ok;
     wire        dma_pop, dma_en, dma_shard, dma_chain, dma_hw_end, dma_irq;
     wire [31:0] dma_cfg_rd, dma_st_rd;
     wire        dma_cfg_wr = (write_n == 2'b10) && connect_peripheral == PERI_DMA_CFG;
     wire        dma_st_wr  = (write_n == 2'b10) && connect_peripheral == PERI_DMA_STATUS;
 
-    // The PRISM's TX DMA (prism_txdma.v): a frame from a PSRAM B slot into
-    // FIFO B (SRAM[1]); the same kind of byte-serial tap, the other way
+    // The PRISM's TX DMA (prism_txdma.v): frames from PSRAM B slots into
+    // FIFO B (SRAM[1]); the same kind of byte-serial tap, the other way, and
+    // for its TX ring a start strobe to shard 1 and shard 1's end of frame
     wire        txd_mem_req;
     wire [24:0] txd_mem_addr;
     wire  [1:0] txd_mem_read_n;
@@ -169,8 +172,11 @@ module tt_um_pettit_js_prism (
     wire [31:0] txd_mem_rdata;
     wire  [7:0] txd_data;
     wire        txd_push, txd_room, txd_irq;
-    wire [31:0] txd_rd;
-    wire        txd_wr = (write_n == 2'b10) && connect_peripheral == PERI_TXDMA;
+    wire        txd_ring, txd_start, txd_frame_end;
+    wire [31:0] txd_rd, txr_cfg_rd, txr_st_rd;
+    wire        txd_wr     = (write_n == 2'b10) && connect_peripheral == PERI_TXDMA;
+    wire        txr_cfg_wr = (write_n == 2'b10) && connect_peripheral == PERI_TXRING_CFG;
+    wire        txr_st_wr  = (write_n == 2'b10) && connect_peripheral == PERI_TXRING_STATUS;
 
     // The memory port's second master is shared by the two engines.  The
     // owner is picked while the port is free, RX first, and keeps it until
@@ -292,10 +298,14 @@ module tt_um_pettit_js_prism (
         .dma_shard     ( dma_shard     ),
         .dma_chain     ( dma_chain     ),
         .dma_hw_end    ( dma_hw_end    ),
+        .dma_crc_ok    ( dma_crc_ok    ),
 
         .txd_data      ( txd_data      ),
         .txd_push      ( txd_push      ),
-        .txd_room      ( txd_room      )
+        .txd_room      ( txd_room      ),
+        .txd_ring      ( txd_ring      ),
+        .txd_start     ( txd_start     ),
+        .txd_frame_end ( txd_frame_end )
     );
 
     prism_dma i_dma (
@@ -312,6 +322,7 @@ module tt_um_pettit_js_prism (
         .fifo_avail4     ( dma_avail4       ),
         .fifo_af         ( dma_af           ),
         .frame_end_pulse ( dma_frame_end    ),
+        .crc_ok          ( dma_crc_ok       ),
         .fifo_pop        ( dma_pop          ),
         .enable          ( dma_en           ),
         .shard_sel       ( dma_shard        ),
@@ -331,12 +342,19 @@ module tt_um_pettit_js_prism (
         .clk             ( clk              ),
         .rst_n           ( rst_peri_n       ),
         .reg_wr          ( txd_wr           ),
+        .ring_cfg_wr     ( txr_cfg_wr       ),
+        .ring_st_wr      ( txr_st_wr        ),
         .wdata           ( data_to_write    ),
         .rd              ( txd_rd           ),
+        .ring_cfg_rd     ( txr_cfg_rd       ),
+        .ring_st_rd      ( txr_st_rd        ),
         .irq             ( txd_irq          ),
         .fifo_data       ( txd_data         ),
         .fifo_push       ( txd_push         ),
         .fifo_room       ( txd_room         ),
+        .ring_on         ( txd_ring         ),
+        .chroma_start    ( txd_start        ),
+        .frame_end       ( txd_frame_end    ),
         .mem_req         ( txd_mem_req      ),
         .mem_addr        ( txd_mem_addr     ),
         .mem_read_n      ( txd_mem_read_n   ),
@@ -362,6 +380,8 @@ module tt_um_pettit_js_prism (
             PERI_DMA_CFG:     data_from_read = dma_cfg_rd;
             PERI_DMA_STATUS:  data_from_read = dma_st_rd;
             PERI_TXDMA:       data_from_read = txd_rd;
+            PERI_TXRING_CFG:  data_from_read = txr_cfg_rd;
+            PERI_TXRING_STATUS: data_from_read = txr_st_rd;
             PERI_USER:        data_from_read = peri_data_out;
             default:          data_from_read = 32'hFFFF_FFFF;
         endcase

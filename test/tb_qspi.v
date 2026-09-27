@@ -85,5 +85,8 @@ module tb_qspi ();
   );
 
   defparam qspi.INIT_FILE = `PROG_FILE;
+`ifdef SIM_RAM_BITS
+  defparam qspi.RAM_BITS = `SIM_RAM_BITS;     // PSRAM size per chip: 2^n bytes (default 8 KB)
+`endif
 
 endmodule

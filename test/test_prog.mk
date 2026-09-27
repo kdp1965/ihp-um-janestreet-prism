@@ -12,6 +12,10 @@ PROJECT_SOURCES = project.v peri*.v tinyQV/cpu/*.v tinyQV/peri/uart/uart_tx.v us
 
 VERILOG_SOURCES += sim_qspi.v
 COMPILE_ARGS +=  -DPROG_FILE=\"$(PROG_FILE)\"
+# SIM_RAM_BITS=n: 2^n-byte PSRAMs instead of 8 KB (programs that need more RAM B slots)
+ifneq ($(SIM_RAM_BITS),)
+COMPILE_ARGS +=  -DSIM_RAM_BITS=$(SIM_RAM_BITS)
+endif
 
 # The PRISM's SRAM FIFOs and the PDK's behavioural models for them, shared
 # by the RTL, synthesis and gate-level builds: the tile netlist keeps the

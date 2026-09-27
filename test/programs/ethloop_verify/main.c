@@ -9,12 +9,12 @@
  * Both chromas run fractured: eth_rx in bank A (shard 0), eth_tx in bank B
  * (shard 1).  The RX DMA ends each frame on eth_rx's host interrupt (DMA_CFG
  * hw_end: no bit for two bit times) and writes it to a two-slot ring at the
- * bottom of RAM B, the frame from slot byte 4 and its length (FCS included)
- * in bytes 0-1; the TX sources are RAM B slots 2 and 3, 55 55 55 D5 in bytes
- * 0-3 and the frame from byte 4 (see ethtx_verify).  RX uses the flop FIFO:
- * with the RX DMA bursting from 8 bytes it closes every frame within a few
- * hundred clocks, long before the next frame (an SRAM FIFO would not, see
- * the frame-boundary note in docs 4y.1).
+ * bottom of RAM B, its header (length with the FCS, crc_ok) in word 0 and
+ * the frame from byte 8; the TX sources are RAM B slots 2 and 3, 55 55 55
+ * D5 in bytes 0-3 and the frame from byte 4 (see ethtx_verify).  RX uses
+ * the flop FIFO: with the RX DMA bursting from 8 bytes it closes every
+ * frame within a few hundred clocks, long before the next frame (an SRAM
+ * FIFO would not, see "Receive on the flop FIFO" in docs 4y).
  *
  * The program compares every received frame with its source slot word by
  * word and checks eth_rx's crc_ok (FLAGS[10]: the CRC32 residue over frame
@@ -26,8 +26,9 @@
  *   3. a maximum frame (1514 bytes), started while the TX DMA is still
  *      copying it, so both DMAs run while it is on the wire
  *                                            slot 2 -> ring slot 0
- *   4. echo: ring slot 0 sent again as it is, word 0 rewritten to
- *      55 55 55 D5 and the length field as the copy length (the FCS stays
+ *   4. echo: ring slot 0 sent again as it is: 55 55 55 D5 into its spare
+ *      word 1 and a copy with skip (from byte 4) of the length field's
+ *      bytes, which are the preamble tail and the frame (the FCS stays
  *      behind; eth_tx appends a new one)    ring slot 0 -> ring slot 1
  */
 #include <stdint.h>
@@ -49,6 +50,7 @@ extern const uint32_t chroma_eth_rx_pinmuxReg;
 #define TXDMA_LEN(n)            ((n) & 0xfffu)
 #define TXDMA_SLOT(s)           (((s) & 0xfffu) << 12)
 #define TXDMA_ACK               (1u << 30)
+#define TXDMA_SKIP              (1u << 24)
 #define TXDMA_START             (1u << 31)
 #define TXDMA_ST_DONE           (1u << 30)
 #define TXDMA_ST_BUSY           (1u << 31)
@@ -66,6 +68,8 @@ extern const uint32_t chroma_eth_rx_pinmuxReg;
 #define DMA_ST_SET_TAIL         (1u << 24)
 #define DMA_ST_HEAD(v)          ((v) & 0xffu)
 #define DMA_LEN_TRUNC           (1u << 15)
+#define DMA_HDR_CRC_OK          (1u << 16)
+#define RX_FRAME_START          8u              /* the RX DMA puts the frame at slot byte 8 */
 
 #define RAM_B                   ((volatile uint8_t *)0x1800000u)
 #define RAM_B32                 ((volatile uint32_t *)0x1800000u)
@@ -213,12 +217,12 @@ static uint32_t rx_landed(void)
 /* Send n frame bytes from slot `src` (55 55 55 D5 in front of them): copy,
    start (whole or once STREAM_START bytes are in), wait for the frame to
    leave and for the RX DMA to land it; the RX DMA status, 0 on a failure */
-static uint32_t loop_frame(const char *name, uint32_t src, uint32_t n, bool stream)
+static uint32_t loop_frame(const char *name, uint32_t src, uint32_t n, bool stream, bool skip)
 {
     uint32_t st, left = 0;
     bool started;
 
-    TXDMA_REG = TXDMA_START | TXDMA_SLOT(src) | TXDMA_LEN(4 + n);
+    TXDMA_REG = TXDMA_START | (skip ? TXDMA_SKIP : 0) | TXDMA_SLOT(src) | TXDMA_LEN(4 + n);
     if (stream) {
         started = wait_fifo_b(STREAM_START);
         prism_write_byte(SH1(PRISM_SH_TOGGLE), 0);
@@ -241,21 +245,22 @@ static uint32_t loop_frame(const char *name, uint32_t src, uint32_t n, bool stre
     return rx;
 }
 
-/* Compare ring slot `slot` with the n frame bytes at byte 4 of slot `src`
-   (words, then the tail) and check its length field and eth_rx's crc_ok */
-static void check_ring(const char *name, uint32_t slot, uint32_t src, uint32_t n)
+/* Compare ring slot `slot`'s frame (from byte 8) with the n bytes at byte
+   `src_off` of slot `src` (words, then the tail) and check its header
+   (length = frame + FCS, crc_ok) and eth_rx's live crc_ok */
+static void check_ring(const char *name, uint32_t slot, uint32_t src, uint32_t src_off, uint32_t n)
 {
-    volatile uint32_t *r = RAM_B32 + slot * SLOT_WORDS;
-    volatile uint32_t *s = RAM_B32 + src * SLOT_WORDS;
-    uint32_t len = r[0] & 0xffffu;
+    volatile uint32_t *r = RAM_B32 + slot * SLOT_WORDS + RX_FRAME_START / 4;
+    volatile uint32_t *s = RAM_B32 + src * SLOT_WORDS + src_off / 4;
+    uint32_t hdr = RAM_B32[slot * SLOT_WORDS];
     uint32_t flags = prism_read(PRISM_REG_FLAGS);
     uint32_t errors = 0, lines = 0;
 
     dputs(name);
-    check(" length (frame + FCS)", len == n + 4, len);
+    check(" length (frame + FCS)", (hdr & 0xffffu) == n + 4, hdr);
     dputs(name);
-    check(" crc_ok", (flags & FLAG_CRC_OK) != 0, prism_read(PRISM_REG_CRC));
-    for (uint32_t w = 1; w <= n / 4; w++) {
+    check(" crc_ok", (hdr & DMA_HDR_CRC_OK) && (flags & FLAG_CRC_OK), prism_read(PRISM_REG_CRC));
+    for (uint32_t w = 0; w < n / 4; w++) {
         if (r[w] != s[w]) {
             errors++;
             if (lines++ < MAX_MISMATCH_LINES) {
@@ -270,7 +275,7 @@ static void check_ring(const char *name, uint32_t slot, uint32_t src, uint32_t n
         }
     }
     for (uint32_t i = n & ~3u; i < n; i++)
-        if (RAM_B[slot * DMA_SLOT + 4 + i] != RAM_B[src * DMA_SLOT + 4 + i])
+        if (RAM_B[slot * DMA_SLOT + RX_FRAME_START + i] != RAM_B[src * DMA_SLOT + src_off + i])
             errors++;
     dputs(name);
     check(" matches its source", errors == 0, errors);
@@ -339,38 +344,40 @@ int main(void)
     /* 1. a minimum frame -> ring slot 0 */
     fill_frame(SRC_A, 60, 0x11);
     announce(60, 0x11);
-    st = loop_frame("frame 1 (60 bytes)", SRC_A, 60, false);
+    st = loop_frame("frame 1 (60 bytes)", SRC_A, 60, false, false);
     check("frame 1 in ring slot 0", DMA_ST_HEAD(st) == 1, st);
-    check_ring("frame 1", 0, SRC_A, 60);
+    check_ring("frame 1", 0, SRC_A, 4, 60);
     DMA_STATUS_REG = DMA_ST_SET_TAIL | (1u << 8);                   /* slot 0 consumed */
 
     /* 2. an odd length -> ring slot 1 */
     fill_frame(SRC_B, 101, 0x22);
     announce(101, 0x22);
-    st = loop_frame("frame 2 (101 bytes)", SRC_B, 101, false);
+    st = loop_frame("frame 2 (101 bytes)", SRC_B, 101, false, false);
     check("frame 2 in ring slot 1", DMA_ST_HEAD(st) == 0, st);
-    check_ring("frame 2", 1, SRC_B, 101);
+    check_ring("frame 2", 1, SRC_B, 4, 101);
     DMA_STATUS_REG = DMA_ST_SET_TAIL | (0u << 8);                   /* slot 1 consumed */
 
     /* 3. a maximum frame, streamed: TX DMA, RX DMA and the line all at once */
     fill_frame(SRC_A, 1514, 0x33);
     announce(1514, 0x33);
-    st = loop_frame("frame 3 (1514 bytes)", SRC_A, 1514, true);
+    st = loop_frame("frame 3 (1514 bytes)", SRC_A, 1514, true, false);
     check("frame 3 in ring slot 0", DMA_ST_HEAD(st) == 1, st);
-    check_ring("frame 3", 0, SRC_A, 1514);
+    check_ring("frame 3", 0, SRC_A, 4, 1514);
     DMA_STATUS_REG = DMA_ST_SET_TAIL | (1u << 8);                   /* slot 0 released (still read below) */
 
-    /* 4. echo ring slot 0: word 0 = 55 55 55 D5, copy length = the length
-          field (4 header bytes + the frame, the old FCS left behind) */
+    /* 4. echo ring slot 0: its spare word 1 = 55 55 55 D5, a copy with skip
+          of the length field's bytes (the preamble tail + the frame; the
+          old FCS left behind) */
     len = RAM_B32[0] & 0x7ffu;                                      /* frame + FCS */
-    RAM_B32[0] = ETH_PREAMBLE_TAIL;
+    RAM_B32[1] = ETH_PREAMBLE_TAIL;
     announce(len - 4, 0x33);
-    st = loop_frame("echo (ring slot 0)", 0, len - 4, false);
+    st = loop_frame("echo (ring slot 0)", 0, len - 4, false, true);
     check("echo in ring slot 1", DMA_ST_HEAD(st) == 0, st);
-    check_ring("echo", 1, 0, len - 4);
+    check_ring("echo", 1, 0, RX_FRAME_START, len - 4);
     v = 0;
     for (uint32_t i = 0; i < 4; i++)                                /* the FCS bytes behind the frame */
-        v |= (uint32_t)(RAM_B[DMA_SLOT + len + i] ^ RAM_B[len + i]) << (8 * i);
+        v |= (uint32_t)(RAM_B[DMA_SLOT + RX_FRAME_START + len - 4 + i] ^
+                        RAM_B[RX_FRAME_START + len - 4 + i]) << (8 * i);
     check("echo FCS = frame 3 FCS", v == 0, v);
     DMA_STATUS_REG = DMA_ST_SET_TAIL | (0u << 8);
 
