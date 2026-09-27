@@ -63,7 +63,12 @@ module tinyQV_peripherals (
     input         dma_en,
     input         dma_shard,
     input         dma_chain,
-    input         dma_hw_end
+    input         dma_hw_end,
+
+    // The PRISM's TX DMA tap (prism_txdma.v, next to TinyQV): bytes into FIFO B
+    input   [7:0] txd_data,
+    input         txd_push,
+    output        txd_room
 );
 
     // Registered data out to TinyQV
@@ -437,6 +442,10 @@ module tinyQV_peripherals (
         .dma_shard     ( dma_shard     ),
         .dma_chain     ( dma_chain     ),
         .dma_hw_end    ( dma_hw_end    ),
+
+        .txd_data      ( txd_data      ),
+        .txd_push      ( txd_push      ),
+        .txd_room      ( txd_room      ),
 
         // CFGMEM interface
         .sit_addr_a ( prism_sit_addr_a  ),

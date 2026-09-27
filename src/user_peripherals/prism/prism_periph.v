@@ -193,6 +193,13 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     input             dma_chain,      // FIFO A drains into FIFO B by itself
     input             dma_hw_end,     // the receiving shard's host interrupt ends frames (and is not a host IRQ)
 
+    // TX DMA tap (prism_txdma.v sits next to TinyQV): bytes pushed into
+    // shard 1's FIFO (FIFO B, the unfractured TX FIFO) while it is the SRAM
+    // FIFO on SRAM[1] in TX mode, one per clock
+    input     [7:0]   txd_data,
+    input             txd_push,
+    output            txd_room,       // that SRAM FIFO has room for a burst (32 bytes)
+
     // State Information Table interface (CFGMEM macros in peripherals.v)
     output    [3:0]   sit_addr_a,
     output    [3:0]   sit_addr_b,
@@ -768,8 +775,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             //                TX (fifo_dir = 1) host pushes by writing / FSM pops into comm
             wire                      mv_push = (s == SHARDS-1) & mv;          // chain: B takes A's head
             wire                      mv_pop  = (s == 0) & mv;                 //        A gives it up
-            wire                      f_push  = mv_push | (fifo_dir ? (fifo_wr | fsm_push) : fifo_op);
-            wire  [7:0]               f_pdata = mv_push ? fifo_head_v[7:0] :
+            // TX DMA: B takes the tap's byte (TX mode only; the host does not push
+            // B while a copy runs, and the chain does not run with it)
+            wire                      txd_push_s = (s == SHARDS-1) & txd_push & fifo_dir;
+            wire                      f_push  = mv_push | txd_push_s | (fifo_dir ? (fifo_wr | fsm_push) : fifo_op);
+            wire  [7:0]               f_pdata = mv_push    ? fifo_head_v[7:0] :
+                                                txd_push_s ? txd_data :
                                                 fifo_dir ? (fifo_wr ? data_in[7:0] : push_w[7:0]) : push_src;
             wire                      f_pop   = mv_pop | (dma_on & dma_pop) | (fifo_dir ? fifo_op : (host_pop | fsm_pop));
 
@@ -916,6 +927,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             // compared here so only the count crosses from the SRAM side
             assign fifo_ae    = fifo_sram ? (sram_count_v[14*SI +: 14] <= {4'h0, cfg1[16 +: 4], 6'b0}) : lf_ae;
             assign fifo_af    = fifo_sram ? (sram_count_v[14*SI +: 14] >= (SRAM_BYTES - {4'h0, cfg1[20 +: 4], 6'b0})) : lf_af;
+            // TX DMA: a burst (32 bytes) starts only while B is the SRAM FIFO
+            // in TX mode with room for all of it, so the tap never waits
+            if (s == SHARDS-1)
+            begin : TXD_ROOM
+                assign txd_room = fifo_sram & fifo_dir & (sram_count_v[14*SI +: 14] <= SRAM_BYTES - 14'd32);
+            end
             assign sram_sel_v[s]          = fifo_sram;
             assign sram_push_v[s]         = f_push;
             assign sram_pdata_v[8*s +: 8] = f_pdata;

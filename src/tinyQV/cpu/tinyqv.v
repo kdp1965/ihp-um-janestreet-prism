@@ -20,16 +20,19 @@ module tinyQV (
     input         data_ready,  // Transaction complete/data request can be modified.
     input  [31:0] data_in,
 
-    // A second master on the QSPI memory port (the PRISM's RX DMA): a burst
-    // of RAM writes issued while the CPU has no memory transaction in
-    // flight.  The CPU halts on its next memory access until dma_req drops.
+    // A second master on the QSPI memory port (the PRISM's RX and TX DMAs,
+    // arbitrated in project.v): a burst of RAM writes or reads issued while
+    // the CPU has no memory transaction in flight.  The CPU halts on its
+    // next memory access until dma_req drops.
     input         dma_req,      // hold while the burst has more transfers
     input  [24:0] dma_addr,
     input  [31:0] dma_wdata,
     input   [1:0] dma_write_n,  // 00 = 8-bit, 01 = 16-bit, 10 = 32-bit
+    input   [1:0] dma_read_n,   // the same for a read; one of the two is 11
     input         dma_continue, // another transfer at the next address follows
     output        dma_grant,    // the DMA owns the port
     output        dma_ready,    // this transfer is done
+    output [31:0] dma_rdata,    // a read's data, with dma_ready
 
     // Interrupt requests: Bottom 2 bits trigger on rising edge, next fourteen are a status
     input  [15:0] interrupt_req,
@@ -103,6 +106,7 @@ module tinyQV (
   end
   assign dma_grant = dma_active;
   assign dma_ready = dma_active && mem_data_ready;
+  assign dma_rdata = mem_data_from_read;
 
   wire [24:0] mem_data_addr     = dma_active ? dma_addr     : qv_data_addr[24:0];
   wire [31:0] mem_data_to_write = dma_active ? dma_wdata    : qv_data_to_write;
@@ -112,7 +116,7 @@ module tinyQV (
   assign qv_data_from_read = is_mem ? mem_data_from_read : data_in;
 
   assign mem_data_write_n = dma_active ? dma_write_n : (is_mem ? qv_data_write_n : 2'b11);
-  assign mem_data_read_n  = dma_active ? 2'b11       : (is_mem ? qv_data_read_n  : 2'b11);
+  assign mem_data_read_n  = dma_active ? dma_read_n  : (is_mem ? qv_data_read_n  : 2'b11);
 
   assign data_addr = qv_data_addr;
   assign data_write_n =       !is_mem ? qv_data_write_n       : 2'b11;

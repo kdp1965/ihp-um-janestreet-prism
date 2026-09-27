@@ -23,6 +23,7 @@ module tt_um_pettit_js_prism (
     localparam PERI_DEBUG_UART_STATUS = 4'h7;
     localparam PERI_DMA_CFG = 4'h8;             // 0x8000020: PRISM RX DMA configuration (prism_dma.v)
     localparam PERI_DMA_STATUS = 4'h9;          // 0x8000024: its ring head / tail and flags
+    localparam PERI_TXDMA = 4'hA;               // 0x8000028: PRISM TX DMA command / status (prism_txdma.v)
     localparam PERI_DEBUG = 4'hC;
     localparam PERI_USER = 4'hF;
 
@@ -158,8 +159,45 @@ module tt_um_pettit_js_prism (
     wire        dma_cfg_wr = (write_n == 2'b10) && connect_peripheral == PERI_DMA_CFG;
     wire        dma_st_wr  = (write_n == 2'b10) && connect_peripheral == PERI_DMA_STATUS;
 
-    // Interrupt requests; the DMA's frame interrupt is 10
-    wire [15:0] interrupt_req = {peri_interrupts[15:11], peri_interrupts[10] | dma_irq, peri_interrupts[9:2], ui_in_sync[1:0]};
+    // The PRISM's TX DMA (prism_txdma.v): a frame from a PSRAM B slot into
+    // FIFO B (SRAM[1]); the same kind of byte-serial tap, the other way
+    wire        txd_mem_req;
+    wire [24:0] txd_mem_addr;
+    wire  [1:0] txd_mem_read_n;
+    wire        txd_mem_continue;
+    wire        txd_mem_ready;
+    wire [31:0] txd_mem_rdata;
+    wire  [7:0] txd_data;
+    wire        txd_push, txd_room, txd_irq;
+    wire [31:0] txd_rd;
+    wire        txd_wr = (write_n == 2'b10) && connect_peripheral == PERI_TXDMA;
+
+    // The memory port's second master is shared by the two engines.  The
+    // owner is picked while the port is free, RX first, and keeps it until
+    // its request drops (one burst, at most 8 words), so an RX burst waits
+    // for at most one TX burst.
+    wire        port_req, port_grant, port_ready, port_continue;
+    wire [24:0] port_addr;
+    wire  [1:0] port_write_n, port_read_n;
+    reg         txd_own;
+    always @(posedge clk) begin
+        if (!rst_reg_n)
+            txd_own <= 1'b0;
+        else if (!port_grant)
+            txd_own <= txd_mem_req & !dma_mem_req;
+    end
+    assign port_req      = port_grant ? (txd_own ? txd_mem_req : dma_mem_req) : (dma_mem_req | txd_mem_req);
+    assign port_addr     = txd_own ? txd_mem_addr     : dma_mem_addr;
+    assign port_write_n  = txd_own ? 2'b11            : dma_mem_write_n;
+    assign port_read_n   = txd_own ? txd_mem_read_n   : 2'b11;
+    assign port_continue = txd_own ? txd_mem_continue : dma_mem_continue;
+    assign dma_mem_grant = port_grant & !txd_own;
+    assign dma_mem_ready = port_ready & !txd_own;
+    assign txd_mem_ready = port_ready & txd_own;
+
+    // Interrupt requests; the RX DMA's frame interrupt is 10, the TX DMA's 11
+    wire [15:0] interrupt_req = {peri_interrupts[15:12], peri_interrupts[11] | txd_irq, peri_interrupts[10] | dma_irq,
+                                 peri_interrupts[9:2], ui_in_sync[1:0]};
 
     tinyQV i_tinyqv(
         .clk(clk),
@@ -174,13 +212,15 @@ module tt_um_pettit_js_prism (
         .data_ready(data_ready),
         .data_in(data_from_read),
 
-        .dma_req(dma_mem_req),
-        .dma_addr(dma_mem_addr),
+        .dma_req(port_req),
+        .dma_addr(port_addr),
         .dma_wdata(dma_mem_wdata),
-        .dma_write_n(dma_mem_write_n),
-        .dma_continue(dma_mem_continue),
-        .dma_grant(dma_mem_grant),
-        .dma_ready(dma_mem_ready),
+        .dma_write_n(port_write_n),
+        .dma_read_n(port_read_n),
+        .dma_continue(port_continue),
+        .dma_grant(port_grant),
+        .dma_ready(port_ready),
+        .dma_rdata(txd_mem_rdata),
 
         .interrupt_req(interrupt_req),
         .time_pulse(time_pulse),
@@ -251,7 +291,11 @@ module tt_um_pettit_js_prism (
         .dma_en        ( dma_en        ),
         .dma_shard     ( dma_shard     ),
         .dma_chain     ( dma_chain     ),
-        .dma_hw_end    ( dma_hw_end    )
+        .dma_hw_end    ( dma_hw_end    ),
+
+        .txd_data      ( txd_data      ),
+        .txd_push      ( txd_push      ),
+        .txd_room      ( txd_room      )
     );
 
     prism_dma i_dma (
@@ -283,6 +327,24 @@ module tt_um_pettit_js_prism (
         .mem_ready       ( dma_mem_ready    )
     );
 
+    prism_txdma i_txdma (
+        .clk             ( clk              ),
+        .rst_n           ( rst_peri_n       ),
+        .reg_wr          ( txd_wr           ),
+        .wdata           ( data_to_write    ),
+        .rd              ( txd_rd           ),
+        .irq             ( txd_irq          ),
+        .fifo_data       ( txd_data         ),
+        .fifo_push       ( txd_push         ),
+        .fifo_room       ( txd_room         ),
+        .mem_req         ( txd_mem_req      ),
+        .mem_addr        ( txd_mem_addr     ),
+        .mem_read_n      ( txd_mem_read_n   ),
+        .mem_continue    ( txd_mem_continue ),
+        .mem_ready       ( txd_mem_ready    ),
+        .mem_rdata       ( txd_mem_rdata    )
+    );
+
     always @(*) begin
         if ({addr[27:6], addr[1:0]} == 24'h800000) 
             connect_peripheral = addr[5:2];
@@ -299,6 +361,7 @@ module tt_um_pettit_js_prism (
             PERI_DEBUG_UART_STATUS: data_from_read = {31'h0, debug_uart_tx_busy};
             PERI_DMA_CFG:     data_from_read = dma_cfg_rd;
             PERI_DMA_STATUS:  data_from_read = dma_st_rd;
+            PERI_TXDMA:       data_from_read = txd_rd;
             PERI_USER:        data_from_read = peri_data_out;
             default:          data_from_read = 32'hFFFF_FFFF;
         endcase

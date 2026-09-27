@@ -158,6 +158,7 @@ Common block 0x000-0x0FF:
 | 0x20 | ID word |
 | 0x24 | INT_STATUS (read): [1:0] shard interrupts, [3:2] semaphore as seen by shard 0 / shard 1 |
 | (0x8000020 / 0x8000024) | DMA_CFG / DMA_STATUS of the RX DMA are TinyQV internal registers, not PRISM ones, section 4y |
+| (0x8000028) | TXDMA of the TX DMA, a TinyQV internal register too, section 4y.1 |
 | 0x30 | DEBUG_DOUT (exists) |
 | 0x34 | DECISION (exists) |
 | 0x38 | OUT_DATA (exists) |
@@ -385,6 +386,57 @@ the DMA lands a 70-byte frame (bursts and a tail), drops one against a
 full ring, lands a 5-byte one, an empty one and a 1500-byte one that
 crosses a PSRAM page while the CPU writes RAM B between the bursts, and
 the guard half of RAM B stays untouched.
+
+### 4y.1 TX DMA from PSRAM B into FIFO B (2026-09-26)
+
+The other direction: the host builds (or receives) a frame in a 2 KB slot
+of PSRAM B and hands it to the transmitting chroma without pushing its
+bytes.  `prism_txdma.v` copies one slot into FIFO B, shard 1's FIFO, which
+must be the SRAM FIFO on SRAM[1] (CFG0[31]) in TX mode.  FIFO B is the TX
+FIFO of the unfractured chromas (USB LS, fifo_loop: A receives, B
+transmits), and either shard can run a fractured transmitter (the
+Manchester recoverer and the SRAM FIFO exist per shard), so the
+transmitter goes on shard 1 and the RX DMA drains FIFO A.
+
+Like the RX engine it sits next to TinyQV in `project.v` with a byte-serial
+tap to the PRISM (the byte, a push strobe and a room flag: 10 nets).  It
+reads 32-bit words in bursts of up to 8 inside one QSPI transaction, never
+across a 1 KB page, and starts a burst only while FIFO B has room for all
+of it (at least 32 free bytes), so the push side never holds the PSRAM's
+CS low; the bytes go into the SRAM FIFO one per clock (its byte front end
+takes a push every clock and writes SRAM[1] every fourth; the latch FIFO,
+which needs a gap between pushes, is never used).  Between bursts the port
+is free for the CPU and the RX DMA.
+
+Arbitration: `tinyqv.v`'s DMA master port (now with `dma_read_n` /
+`dma_rdata`) is shared by the two engines.  `project.v` picks the owner
+while the port is free, the RX DMA first, and the owner keeps it until its
+request drops, so a waiting RX burst goes after at most one TX burst.
+
+TXDMA (0x8000028, word access; interrupt 11 while done and enabled):
+
+| Bits | Write | Read |
+|------|-------|------|
+| [11:0] | frame length in bytes (0-2048) | bytes still to push |
+| [23:12] | slot: RAM B address 0x1800000 + slot * 2048 | slot |
+| [24] | skip the slot header: the frame starts at slot byte 4, the RX DMA's slot format (so a received frame can go back out as it is; at most 2044 bytes) | skip |
+| [25] | interrupt enable | interrupt enable |
+| [30] | acknowledge: clear done | done |
+| [31] | start a copy with these settings (ignored while busy) | busy |
+
+The host does not push FIFO B itself while a copy runs, and chain mode
+(which pushes B from A) does not run with it.
+
+Test: `make txdma_verify` (programs/txdma_verify + test_txdma_verify.py):
+copies of 70 bytes behind a slot header and 5 bytes from slot byte 0 into
+FIFO B, popped back and compared; a zero-length copy; a loopback of 1500
+bytes through the fifo_loop chroma (unfractured, B to A) and the RX DMA
+into a ring slot with both DMAs on the port; flow control: 2044 bytes fill
+FIFO B, a further 64-byte copy waits for room until 64 bytes are popped,
+and the 2044 bytes left go through the loopback into the other ring slot.
+In the RTL simulation the test also checks the arbiter: whenever both DMAs
+ask for a free port the RX DMA gets it, and an RX request never waits more
+than one TX burst plus a CPU transaction.
 
 ## 4c. Host software (item 11, Phase 5)
 
