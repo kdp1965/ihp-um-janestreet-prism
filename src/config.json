@@ -14,6 +14,8 @@
   "CLOCK_PERIOD": 14,
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
   "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,
+  "//rsz": "Timing repair on global-route parasitics (runs/txdma_rsz, 2026-09-27): the post-CTS repair works on placement estimates and signs the slow corner off at +0.2 ns, but the routed wires then cost this tile 6 ns there, and with the TX DMA's extra routing the typical corner missed by 0.82 ns (a weak gate driving a long wire after the FIFO head). This step's repair (148 buffers, 285 upsizes, +0.3 % area) and its own re-placement / re-route gave typ +0.56, slow -5.29 (better than rtl16's -5.78) and a detailed route clean at pass 59 instead of 77; it takes about 50 min on one core. Keep-out width and placement density were not the lever (30/35/45/60 um, 55 % all worse or no better).",
+  "RUN_POST_GRT_RESIZER_TIMING": true,
   "RUN_LINTER": 1,
   "LINTER_INCLUDE_PDK_MODELS": 1,
   "SYNTH_STRATEGY": "AREA 0",
