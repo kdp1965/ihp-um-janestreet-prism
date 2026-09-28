@@ -57,7 +57,7 @@ module chroma_i2c_slave
    localparam [0:0]  SHIFT_DIR          = 1'b0;   // MSB first
    localparam [0:0]  SHIFT_24_EN        = 1'b0;
    localparam [0:0]  COUNT32            = 1'b0;
-   localparam [0:0]  COUNT2_DEC         = 1'b0;
+   localparam [0:0]  COUNT3_EN          = 1'b0;  // pin_out[3] is count3's second command bit (was the count2 decrement enable)
    localparam [0:0]  LATCH2             = 1'b1;   // OUT_LATCH enabled (flag2 = read in progress)
    localparam [0:0]  COUNT_UP           = 1'b0;
    localparam [0:0]  WRAP_PRELOAD       = 1'b0;
@@ -135,7 +135,8 @@ module chroma_i2c_slave
    // =======================================================
    reg            latch_flag;     // OUT_LATCH: flag2 <= flag2_val
    reg            fifo_op;        // OUT_FIFO_WR_RD: push comm into A / pop B into comm
-   reg            count2_clear;
+   reg            count2_inc;     // OUT_COUNT2_INC
+   reg            count2_dec;     // OUT_COUNT2_DEC (with inc: clear count2)
    reg            host_irq;
    reg            push_pop;       // OUT_FIFO_PUSH_POP: 1 = FIFO B
    reg            comm_load;      // OUT_COMM_LOAD: comm <= K[ksel]
@@ -144,7 +145,8 @@ module chroma_i2c_slave
 
    assign out_data[4]          = latch_flag;
    assign out_data[5]          = fifo_op;
-   assign out_data[11]         = count2_clear;
+   assign out_data[9]          = count2_inc;
+   assign out_data[10]         = count2_dec;
    assign out_data[14]         = host_irq;
    assign out_data[15]         = push_pop;
    assign out_data[16]         = comm_load;
@@ -172,7 +174,8 @@ module chroma_i2c_slave
 
       latch_flag     = 1'b0;
       fifo_op        = 1'b0;
-      count2_clear   = 1'b0;
+      count2_inc     = 1'b0;
+      count2_dec     = 1'b0;
       host_irq       = 1'b0;
       push_pop       = 1'b0;
       comm_load      = 1'b0;
@@ -184,7 +187,7 @@ module chroma_i2c_slave
       ctrl_reg       = {FIFO_SRAM, COMM_LOAD_K, FLAG_LATCH, SHIFT_IN_COND,
                         CRC_SRC_OUT, CRC_XOR_OUT, CRC_INIT_ONES, SEMA_SET_WINS, FIFO_DIR_TX,
                         CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE,
-                        WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC,
+                        WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT3_EN,
                         COUNT32, SHIFT_24_EN, SHIFT_DIR, SHIFT_EN, LATCH_IN_OUT, CLR_NOT_LOAD, 4'h0, SHIFT_IN_SEL};
 
       case (curr_state)
@@ -194,7 +197,8 @@ module chroma_i2c_slave
             if ((sda ^ in_prev0) && scl && !sda)
             begin
                comm_load    = 1'b1;                // comm <= K0 = 0, shift count 0
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                latch_flag   = 1'b1;                // flag2 <= 0: rising-edge sampling
                next_state   = STATE_ADDR_WAIT;
             end
@@ -248,7 +252,8 @@ module chroma_i2c_slave
             else if (!scl)
             begin
                comm_load    = 1'b1;                // write: comm <= 0, shift count 0
-               count2_clear = 1'b1;                // and the edge count
+               count2_inc   = 1'b1;                // and the edge count
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                next_state   = STATE_DATA_A;
             end
          end
@@ -260,14 +265,16 @@ module chroma_i2c_slave
             begin
                fifo_op      = 1'b1;                // comm <= FIFO B
                push_pop     = 1'b1;
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                next_state   = STATE_TX_WAIT;
             end
             else
             begin
                comm_load    = 1'b1;                // comm <= K1 = 0xFF
                ksel0        = 1'b1;
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                next_state   = STATE_TX_WAIT;
             end
          end
@@ -303,7 +310,8 @@ module chroma_i2c_slave
             else
             begin
                comm_load    = 1'b1;                // repeated START
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                latch_flag   = 1'b1;
                next_state   = STATE_ADDR_WAIT;
             end
@@ -337,14 +345,16 @@ module chroma_i2c_slave
             begin
                fifo_op      = 1'b1;
                push_pop     = 1'b1;
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                next_state   = STATE_TX_WAIT;
             end
             else if (!scl)
             begin
                comm_load    = 1'b1;
                ksel0        = 1'b1;
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                next_state   = STATE_TX_WAIT;
             end
          end

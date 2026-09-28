@@ -40,5 +40,5 @@ chroma_encoder = [
    0x00000014, 0x00000000, 0x1c015430, 0x00000015, 
    0x00000020, 0x00000000, 0x3c00ac10, 0x00000018, 
 ]
-chroma_encoder_ctrlReg = 0x00003000
+chroma_encoder_ctrlReg = 0x00002000
 chroma_encoder_pinmuxReg = 0x001FFFFF

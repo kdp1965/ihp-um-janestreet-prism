@@ -49,7 +49,7 @@ module chroma_uart_tx
    localparam [0:0]  SHIFT_DIR          = 1'b1;  // LSB first
    localparam [0:0]  SHIFT_24_EN        = 1'b0;  // comm (8-bit) shifts
    localparam [0:0]  COUNT32            = 1'b0;
-   localparam [0:0]  COUNT2_DEC         = 1'b0;
+   localparam [0:0]  COUNT3_EN          = 1'b0;  // pin_out[3] is count3's second command bit (was the count2 decrement enable)
    localparam [0:0]  LATCH2             = 1'b0;
    localparam [0:0]  COUNT_UP           = 1'b0;
    localparam [0:0]  WRAP_PRELOAD       = 1'b0;
@@ -160,7 +160,7 @@ module chroma_uart_tx
       pinmux_reg     = PINMUX;
       ctrl_reg       = {4'h0, CRC_SRC_OUT, CRC_XOR_OUT, CRC_INIT_ONES, SEMA_SET_WINS, FIFO_DIR_TX,
                         CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE,
-                        WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC,
+                        WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT3_EN,
                         COUNT32, SHIFT_24_EN, SHIFT_DIR, SHIFT_EN, LATCH_IN_OUT, CLR_NOT_LOAD, 4'h0, SHIFT_IN_SEL};
 
       case (curr_state)

@@ -18,15 +18,15 @@ From `changes.md` item 12, with the spares filled in as suggestions.
 | 0 | pin_out[0] | muxable to uo_out[7:1] |
 | 1 | pin_out[1] | muxable to uo_out[7:1] |
 | 2 | pin_out[2] | muxable to uo_out[7:1] |
-| 3 | pin_out[3] | muxable to uo_out[7:1] |
+| 3 | pin_out[3] | muxable to uo_out[7:1]; with CFG0[12] also count3's second command bit (4b.1) |
 | 4 | OUT_LATCH | re-capture the in_prev flops selected by the firing tree (edge-detect ack); also usable in the default word for free-running capture |
 | 5 | OUT_FIFO_WR_RD | FIFO push of comm (RX mode) / pop into comm (TX mode), per CFG0 fifo_dir (Phase 4) |
 | 6 | OUT_COUNT1_INC_DEC | count1 step, direction from config (count up / down) |
 | 7 | OUT_COUNT1_CLEAR_LOAD | clear, or load from preload, per config |
 | 8 | OUT_SHIFT | shift the 24/32-bit or the 8-bit shifter (config selects which) |
-| 9 | OUT_COUNT2_INC | |
-| 10 | OUT_COUNT2_DEC | |
-| 11 | OUT_COUNT2_CLEAR | |
+| 9 | OUT_COUNT2_INC | alone: count2 + 1; with bit 10: clear count2 (4b.1) |
+| 10 | OUT_COUNT2_DEC | alone: count2 - 1; with bit 9: clear |
+| 11 | OUT_COUNT3 | count3 command bit 0: alone + 1; with pin_out[3] under CFG0[12]: limit <= comm (4b.1; was OUT_COUNT2_CLEAR) |
 | 12 | OUT_CRC_CLEAR | reset CRC to init value (counter mode: preset the count, 0 or all ones) |
 | 13 | OUT_CRC_UPDATE | feed the shifter's current bit (or byte) into the CRC (counter mode: count + 1) |
 | 14 | OUT_HOST_INTERRUPT | set the shard's sticky interrupt flag once per assertion (edge-detected in the peripheral, not re-armed every clock the state persists); two interrupt lines to the host, one per shard |
@@ -64,7 +64,7 @@ features take 16 and up.
 | 24 | sema_in | sticky semaphore set by the other shard's OUT_SEMA_SET, cleared by this shard's OUT_SEMA_CLEAR (same-cycle winner = CFG0[24]); implemented Phase 2 |
 | 25 | other_shard_halt | the other shard is halted (debugger); implemented Phase 2 |
 | 26-27 | FIFO B flag slots E / F | shard 0 unfractured: two of shard 1's FIFO flags, selects CFG1[29:28] / [31:30]; 0 otherwise |
-| 28-31 | slots, default 0 | input slots (4h): CFG2[31:16], same menu |
+| 28-31 | slots | input slots (4h): CFG2[31:16], same menu; defaults: 28 the timer 2 tick (4l), 29 count3 >= its limit (4b.1), 30-31 0 |
 
 Note on the trees: tree 0 reads muxes 0-2, tree 1 reads 3-5, cond 0 reads
 muxes 1 and 4, cond 1 reads 3 and 5 (RTL wiring, matched by the cfg).
@@ -87,7 +87,7 @@ CFG0 (existing layout, extended):
 | 9 | shift_dir | 0 = MSB first, 1 = LSB first |
 | 10 | shift_wide | 0 = 8-bit comm shifter, 1 = 24/32-bit shifter (was shift_24_en) |
 | 11 | count_width | 0 = 24-bit, 1 = 32-bit (item 3; was fifo_24) |
-| 12 | count2_dec_en | |
+| 12 | count3_en | pin_out[3] is count3's second command bit (4b.1).  Was count2_dec_en: the sky25a PRISM shared the decrement output with the uo_out[6] pin; the decrement has had its own output since item 12 and needs no enable |
 | 13 | latch_en | OUT_LATCH enable (was latch3) |
 | 24 | sema_set_wins | semaphore set beats clear in the same cycle (else clear wins) |
 | 14 | count_up | count1 counts up (item 3) |
@@ -184,7 +184,7 @@ registers only:
 | +0x0C | COUNT1 (24/32-bit; read = count, write = load) |
 | +0x10 | COUNTS packed: byte 0 COUNT2, byte 1 COMPARE, byte 2 COMM, byte 3 {comm_count[2:0], shift_count[4:0]} (RO); word or byte writes load the first three |
 | +0x14 | HOST_IN[1:0]; byte +0x15 write = toggle host_in[0] and clear the interrupt |
-| +0x18 | FLAGS (RO): count1_term, count1_wrap, count2_cmp, count2_eq_comm, shift_term, shift_data, latched_in[1:0] |
+| +0x18 | FLAGS (RO): count1_term, count1_wrap, count2_cmp, count2_eq_comm, shift_term, shift_data, latched_in[1:0], [8] fifo empty, [9] full, [10] crc_ok, [11] sampler pending, [12] count3 >= limit |
 | +0x1C | CFG1: `in_prev` pin selects, FIFO thresholds (later; the input sync mode landed in CFG0[19:18]) |
 | +0x20 | FIFO data (byte lane 0) |
 | +0x24 | FIFO status: count[21:8], word bytes[7:6], push busy[5], word full[4], almost_full[3], almost_empty[2], full[1], empty[0]; write = flush (the 32-bit word registers too) |
@@ -200,7 +200,8 @@ registers only:
 | +0x4C | CONST_TAB: the 16x8 latch FIFO as addressable constants, section 4n: [0] enable (OUT_COMM_LOAD loads the row at the 4-bit index; {OUT_K_SEL1, OUT_K_SEL0} = how the index moves on each load: 0 clear, 1 + 1, 2 + add_to_idx [10:8], 3 = idx_load [7:4], or + idx_load with [1]), [2] post (the row before the move; default after), [19:16] the index (a write sets it, reads back live) |
 | +0x48 | TRACE_CTRL: write [0] arm (flushes the SRAM FIFO), [1] stop; read [0] armed, [1] running, [2] done, [3] big, [4] active.  Entry (16 bits) = [4:0] SI, [10:5] LUT mux inputs, [11] tree 0 matched, [12] tree 1 taken, [13] executing; the traced SRAM's FIFO then serves the entries as bytes through +0x20 of the window that reads that SRAM (count = FIFO bytes / 2) |
 | +0x54 | FIFO32: 32-bit FIFO access with CFG3[11], section 4b: TX a word write pushes its four bytes low byte first; RX a read takes the assembled word |
-| +0x58-0x7C | spare |
+| +0x58 | COUNT3: [7:0] count3, [15:8] its limit (byte lanes 0-1 writable; a disable clears the count, not the limit), section 4b.1 |
+| +0x5C-0x7C | spare |
 
 The SDK (`prism.h`, item 11) then needs only a base per shard and the
 common block; the per-config remap is the base addresses plus a feature
@@ -325,6 +326,43 @@ clear again.  `chroma_fifo_loop` (unit test) moves bytes from B (TX) to A
 Chromas: `chroma_spislave` pushes received bytes into the RX FIFO and runs
 a CRC8 over the received bits; `chroma_uart_tx` is an 8N1 transmitter fed
 from the TX FIFO that appends the CRC8 on request.
+
+### 4b.1 count2 commands and a third counter, count3 (2026-09-27)
+
+A second 8-bit counter kept coming up (the CRC register's counter mode
+was the first answer; the CAN evaluation needed one again), and it
+costs no STEW bits: count2 never increments and decrements in the same
+clock, so its two strobes carry all three commands and output 11 is free.
+
+count2: OUT_COUNT2_INC alone = + 1, OUT_COUNT2_DEC alone = - 1, both =
+clear.  The sampler's count2 + 1 (CFG3[25]) is added after this decode,
+so an FSM decrement in the same clock cancels it instead of turning into
+a clear.  CFG0[12] no longer gates the decrement.
+
+count3 (one per shard, `prism_datapath.v`): an 8-bit counter that counts
+up only, with an 8-bit limit.  Its command is {pin_out[3], output 11}
+(pin_out[3] only with CFG0[12]): 01 = + 1, 10 = clear, 11 = limit <= comm.
+count3 >= limit is input 29's slot default (CFG2 code 0) and FLAGS[12].
+Counting up is what makes the load useful: clear, take a length from the
+data into the limit, count, and the flag rises after exactly that many
+steps (at once for a length of 0).  Uses: length-prefixed messages (SMBus
+block reads, Modbus byte counts, USB descriptors, BLE AD elements),
+host-described transfer lengths (9-bit SPI, JTAG scans), durations from
+a FIFO.  COUNT3 (+0x58) = {limit, count3}, byte lanes 0 and 1 writable;
+a disable clears the count and keeps the limit.  Without CFG0[12]
+pin_out[3] is a plain pin and output 11 alone still counts up.
+
+Chromas: every `count2_clear` became `count2_inc` + `count2_dec` (the
+encoder, which set CFG0[12] to enable its decrement, now leaves it
+clear).  All 17 recompiled tables were checked against the previous ones:
+jumps, muxes and LUTs identical, outputs different only where bit 11 set
+bits 9 and 10.  Test: `chroma_count3` pops command bytes from its FIFO
+and decodes their low three bits (count2 + 1 / - 1 / clear, count3 + 1 /
+clear / limit, a 201-clock decrement window, an interrupt);
+`test_count3` checks the commands, the limit from the data (the flag on
+exactly the fifth step of a length of 5), the register, CFG0[12] off, a
+sampler step inside the decrement window (net 0 per edge) and shard 1's
+own count3.
 
 ## 4y. RX DMA into PSRAM B (2026-09-23)
 

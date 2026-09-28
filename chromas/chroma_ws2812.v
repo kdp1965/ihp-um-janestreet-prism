@@ -106,7 +106,7 @@ module chroma_ws2812
    localparam [2:0]  UO6_SRC  = PIN_OFF;
    localparam [2:0]  UO7_SRC  = PIN_OFF;
    localparam [20:0] PINMUX    = {UO7_SRC, UO6_SRC, UO5_SRC, UO4_SRC, UO3_SRC, UO2_SRC, UO1_SRC};
-   localparam [0:0]  COUNT2_DEC         = 1'b0;  // No count2 decrement
+   localparam [0:0]  COUNT3_EN          = 1'b0;  // pin_out[3] is count3's second command bit (was the count2 decrement enable)
    localparam [0:0]  LATCH2             = 1'b1;  // Use prism_out[5] as input latch enable
 
    localparam integer   PIN_DATA    = 0;
@@ -136,7 +136,6 @@ module chroma_ws2812
    reg            count1_dec;
    reg            count1_load;
    reg            count2_inc;
-   reg            count2_clear;
    reg            shift_en;
    wire           count2_eq_comm;
 
@@ -166,7 +165,6 @@ module chroma_ws2812
    assign out_data[8]          = shift_en;          // OUT_SHIFT
    assign out_data[9]          = count2_inc;        // OUT_COUNT2_INC
    assign out_data[10]         = count2_dec;        // OUT_COUNT2_DEC
-   assign out_data[11]         = count2_clear;      // OUT_COUNT2_CLEAR
    assign out_data[14]         = host_irq;          // OUT_HOST_INTERRUPT
    assign out_data[16]         = comm_load;         // OUT_COMM_LOAD
    // out_data[5], [13:12], [15], [20:17] unused by this chroma (left unmapped)
@@ -204,7 +202,6 @@ module chroma_ws2812
       count1_dec     = 1'b0;
       count1_load    = 1'b0;
       count2_inc     = 1'b0;
-      count2_clear   = 1'b0;
       shift_en       = 1'b0;
       host_irq       = 1'b0;
       latch_out      = 1'b0;
@@ -214,7 +211,7 @@ module chroma_ws2812
       pinmux_reg     = PINMUX;
       cond_out[0]    = 1'b0;
       ctrl_reg       = {4'h0, CRC_SRC_OUT, CRC_XOR_OUT, CRC_INIT_ONES, SEMA_SET_WINS, FIFO_DIR_TX,
-                        CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE, WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC,
+                        CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE, WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT3_EN,
                         COUNT32, SHIFT_24_EN, SHIFT_DIR, SHIFT_EN, LATCH_IN_OUT, CLR_NOT_LOAD, 4'h0, SHIFT_IN_SEL};
 
       // Use cond_out to reflect host-in so we can latch it and 
@@ -276,8 +273,8 @@ module chroma_ws2812
             if (shift_in_data == 1'b0)
             begin
                // Clear the count2 counter and go send T0_LOW
-               count2_clear = 1'b1;
-               count2_inc = 1'b0;
+               count2_inc   = 1'b1;             // inc + dec = clear count2
+               count2_dec   = 1'b1;
 
                // Go check the shift_coun
                next_state = STATE_SEND_T0_LOW;
@@ -301,8 +298,8 @@ module chroma_ws2812
             if (count2_equal)
             begin
                // Clear count2 counter
-               count2_clear = 1'b1;
-               count2_inc = 1'b0;
+               count2_inc   = 1'b1;             // inc + dec = clear count2
+               count2_dec   = 1'b1;
 
                // Go send T1LOW period
                next_state = STATE_SEND_T1_LOW;
@@ -321,8 +318,8 @@ module chroma_ws2812
                shift_en = 1'b1;
 
                // Clear the counter
-               count2_clear = 1'b1;
-               count2_inc = 1'b0;
+               count2_inc   = 1'b1;             // inc + dec = clear count2
+               count2_dec   = 1'b1;
 
                // Go check the shift count
                next_state = STATE_CHECK_SHIFT_COUNT;
@@ -341,8 +338,8 @@ module chroma_ws2812
                shift_en = 1'b1;
 
                // Clear the counter
-               count2_clear = 1'b1;
-               count2_inc = 1'b0;
+               count2_inc   = 1'b1;             // inc + dec = clear count2
+               count2_dec   = 1'b1;
 
                // Go check the shift count
                next_state = STATE_CHECK_SHIFT_COUNT;

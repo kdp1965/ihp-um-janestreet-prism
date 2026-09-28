@@ -60,7 +60,7 @@ module chroma_eth_tx
    localparam [0:0]  WRAP_PRELOAD   = 1'd0;  // count1 wraps to preload
    localparam [0:0]  COUNT_UP       = 1'd0;  // count1 counts up (0 = down)
    localparam [0:0]  LATCH2         = 1'd0;  // use prism_out[2] as input latch enable
-   localparam [0:0]  COUNT2_DEC     = 1'd0;  // count2 decrement enable
+   localparam [0:0]  COUNT3_EN      = 1'd0;  // pin_out[3] is count3's second command bit (was the count2 decrement enable)
    localparam [0:0]  COUNT32        = 1'd0;  // 32-bit count1 (0 = 24-bit)
    localparam [0:0]  SHIFT_24_EN    = 1'd0;  // wide shifter (count1) instead of comm
    localparam [0:0]  SHIFT_DIR      = 1'd1;  // 1 = shift right (LSB first, newest bit at the top)
@@ -71,7 +71,7 @@ module chroma_eth_tx
    localparam [31:0] CTRL           = {FIFO_SRAM, COMM_LOAD_K, FLAG_LATCH, SHIFT_IN_COND,
                                        CRC_SRC_OUT, CRC_XOR_OUT, CRC_INIT_ONES, SEMA_SET_WINS, FIFO_DIR_TX,
                                        CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE,
-                                       WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC, COUNT32, SHIFT_24_EN,
+                                       WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT3_EN, COUNT32, SHIFT_24_EN,
                                        SHIFT_DIR, SHIFT_EN, LATCH_IN_OUT, CLR_NOT_LOAD, 4'h0, SHIFT_IN_SEL};
    // uo_out[1] = cond_out[0] (TXD), uo_out[2] = pin_out[0] (TX_EN)
    // uo_out[7:1] sources, 3 bits per pin: pin_out[k], cond_out[k], the
@@ -132,7 +132,7 @@ module chroma_eth_tx
    reg count1_load;            // OUT_COUNT1_CLEAR_LOAD
    reg shift;                  // OUT_SHIFT
    reg count2_inc;             // OUT_COUNT2_INC
-   reg count2_clear;           // OUT_COUNT2_CLEAR
+   reg count2_dec;             // OUT_COUNT2_DEC (with inc: clear count2)
    reg crc_clear;              // OUT_CRC_CLEAR
    reg crc_update;             // OUT_CRC_UPDATE
    reg host_irq;               // OUT_HOST_INTERRUPT
@@ -145,7 +145,7 @@ module chroma_eth_tx
    assign out_data[7]  = count1_load;
    assign out_data[8]  = shift;
    assign out_data[9]  = count2_inc;
-   assign out_data[11] = count2_clear;
+   assign out_data[10] = count2_dec;
    assign out_data[12] = crc_clear;
    assign out_data[13] = crc_update;
    assign out_data[14] = host_irq;
@@ -176,7 +176,7 @@ module chroma_eth_tx
       count1_load  = 1'b0;
       shift        = 1'b0;
       count2_inc   = 1'b0;
-      count2_clear = 1'b0;
+      count2_dec   = 1'b0;
       crc_clear    = 1'b0;
       crc_update   = 1'b0;
       host_irq     = 1'b0;
@@ -193,7 +193,8 @@ module chroma_eth_tx
             if (host0 != in_prev0)            // frame: first preamble byte from K0
             begin
                comm_load    = 1'b1;
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                count1_load  = 1'b1;
                next_state   = ST_A_H1;
             end
@@ -255,7 +256,8 @@ module chroma_eth_tx
             begin
                count1_load  = 1'b1;
                fifo_pop     = 1'b1;          // first FIFO byte (preamble / SFD)
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                next_state   = ST_B_H1;
             end
          end
@@ -366,7 +368,8 @@ module chroma_eth_tx
             begin
                count1_load  = 1'b1;
                load_crc     = 1'b1;          // FCS byte 0 (the CRC is complete)
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                next_state   = ST_F_H1;
             end
          end
@@ -420,7 +423,8 @@ module chroma_eth_tx
             else if (count1_zero && count2_cmp)
             begin
                count1_load  = 1'b1;
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                next_state   = ST_IDL;
             end
          end

@@ -127,7 +127,7 @@ module chroma_gpio24
    localparam [2:0]  UO6_SRC  = PIN_OFF;
    localparam [2:0]  UO7_SRC  = PIN_OUT1;
    localparam [20:0] PINMUX    = {UO7_SRC, UO6_SRC, UO5_SRC, UO4_SRC, UO3_SRC, UO2_SRC, UO1_SRC};
-   localparam [0:0]  COUNT2_DEC         = 1'b0;  // No count2 decrement
+   localparam [0:0]  COUNT3_EN          = 1'b0;  // pin_out[3] is count3's second command bit (was the count2 decrement enable)
    localparam [0:0]  LATCH2             = 1'b0;  // Use prism_out[2] as input latch enable
 
    reg   [2:0]    curr_state, next_state;
@@ -157,7 +157,6 @@ module chroma_gpio24
    reg            count1_dec;
    reg            count1_load;
    reg            count2_inc;
-   reg            count2_clear;
    reg            shift_en;
 
    wire           shift_clk_in;
@@ -187,7 +186,6 @@ module chroma_gpio24
    assign out_data[8]          = shift_en;          // OUT_SHIFT
    assign out_data[9]          = count2_inc;        // OUT_COUNT2_INC
    assign out_data[10]         = count2_dec;        // OUT_COUNT2_DEC
-   assign out_data[11]         = count2_clear;      // OUT_COUNT2_CLEAR
    assign out_data[14]         = host_irq;          // OUT_HOST_INTERRUPT
    assign out_data[16]         = comm_load;         // OUT_COMM_LOAD
    // out_data[5], [13:12], [15], [20:17] unused by this chroma (left unmapped)
@@ -229,7 +227,6 @@ module chroma_gpio24
       count1_dec     = 1'b0;
       count1_load    = 1'b0;
       count2_inc     = 1'b0;
-      count2_clear   = 1'b0;
       shift_en       = 1'b0;
       host_irq       = 1'b0;
       latch_out      = 1'b0;
@@ -239,7 +236,7 @@ module chroma_gpio24
       pinmux_reg     = PINMUX;
       gpio_store     = 1'b0;
       ctrl_reg       = {4'h0, CRC_SRC_OUT, CRC_XOR_OUT, CRC_INIT_ONES, SEMA_SET_WINS, FIFO_DIR_TX,
-                        CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE, WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC,
+                        CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE, WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT3_EN,
                         COUNT32, SHIFT_24_EN, SHIFT_DIR, SHIFT_EN, LATCH_IN_OUT, CLR_NOT_LOAD, 4'h0, SHIFT_IN_SEL};
 
       // =========================================================

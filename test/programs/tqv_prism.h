@@ -88,7 +88,7 @@
 #define PRISM_SH_COMM           0x12    /* byte */
 #define PRISM_SH_HOST           0x14    /* host_in[1:0] */
 #define PRISM_SH_TOGGLE         0x15    /* byte write: toggle host_in[0], clear IRQ */
-#define PRISM_SH_FLAGS          0x18    /* RO datapath flags: [10] crc_ok [9] fifo_full [8] fifo_empty ... */
+#define PRISM_SH_FLAGS          0x18    /* RO datapath flags: [12] count3 >= limit [10] crc_ok [9] fifo_full [8] fifo_empty ... */
 #define PRISM_SH_CFG1           0x1c    /* [15:0] in_prev sources (4 x input number), [19:16] FIFO
                                            almost-empty level, [23:20] almost-full level, [31:24] FIFO
                                            flag selects for inputs 20 / 21 / 26 / 27 (2 bits each) */
@@ -106,6 +106,7 @@
 #define PRISM_SH_CTAB           0x4c    /* constant table: the latch FIFO as addressable constants */
 #define PRISM_SH_COMM_PINS      0x50
 #define PRISM_SH_FIFO32         0x54    /* 32-bit FIFO push / pop (CFG3[11]) */
+#define PRISM_SH_COUNT3         0x58    /* [7:0] count3 (counts up), [15:8] its limit; byte lanes writable */
 
 /* Shard 0 shortcuts */
 #define PRISM_REG_CFG0          (PRISM_SHARD_BASE(0) + PRISM_SH_CFG0)
@@ -141,7 +142,7 @@
 #define PRISM_CFG_SHIFT_DIR     (1u << 9)
 #define PRISM_CFG_SHIFT_WIDE    (1u << 10)
 #define PRISM_CFG_COUNT32       (1u << 11)
-#define PRISM_CFG_COUNT2_DEC_EN (1u << 12)
+#define PRISM_CFG_COUNT3_EN     (1u << 12)   /* pin_out[3] is count3's second command bit (was COUNT2_DEC_EN) */
 #define PRISM_CFG_LATCH_EN      (1u << 13)
 #define PRISM_CFG_COUNT_UP      (1u << 14)
 #define PRISM_CFG_WRAP_PRELOAD  (1u << 15)

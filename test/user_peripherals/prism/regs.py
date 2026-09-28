@@ -81,6 +81,8 @@ FIFO_ST_WORD_FULL = 1 << 4  # 32-bit mode: the RX word register holds a complete
 FIFO_ST_PUSH_BUSY = 1 << 5  # 32-bit mode: the TX push machine is still feeding a word in
 def FIFO_ST_WORD_BYTES(st): return 4 if st & FIFO_ST_WORD_FULL else (st >> 6) & 3   # bytes in the RX word register
 REG_FIFO32  = 0x154       # 32-bit FIFO access (CFG3_FIFO32): write pushes four bytes, read takes a complete word
+REG_COUNT3  = 0x158       # byte lanes: +0 count3 (counts up only), +1 its limit (the FSM loads it from comm)
+REG_LIMIT3  = 0x159
 REG_CRC_POLY= 0x128
 REG_CRC     = 0x12C       # read value, write preset
 REG_CRC_EXP = 0x130
@@ -190,12 +192,14 @@ def trace_outputs(e, chroma):
     return stew_field(stew, STEW_OUT_POS[leg])
 
 CFG_FIFO_DIR_TX = 1 << 23
+CFG_COUNT3_EN   = 1 << 12   # pin_out[3] is count3's second command bit (was the count2 decrement enable)
 CFG_COMM_LOAD_K = 1 << 30   # OUT_COMM_LOAD loads K[{out20, out18}] from CONST
 CFG_MSHIFT_EN   = 1 << 2    # comm shifts {out20, out18} + 1 bits per OUT_SHIFT (PIO-like)
 CFG_SHIFT_DIR_LSB = 1 << 9  # shifter LSB first
 CFG_FIFO_SRAM   = 1 << 31   # this shard's FIFO is its SRAM FIFO
 FLAG_CRC_OK     = 1 << 10   # FLAGS: CRC value == CRC_EXPECTED
 FLAG_SMP_PENDING = 1 << 11  # FLAGS: sampler edge not yet consumed by the FSM (OUT_SHIFT / OUT_LATCH)
+FLAG_COUNT3     = 1 << 12   # FLAGS: count3 >= its limit (input 29's slot default too)
 
 # ---- debugger ---------------------------------------------------------------
 DBG_HALT_REQ   = 0x00001

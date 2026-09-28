@@ -63,6 +63,11 @@
 //                     [24] restart the count on entry into state [29:25] (next SI == it, current SI != it):
 //                     a retriggerable timeout with no STEW bits; [30] one-shot: after its tick the timer
 //                     waits for the next entry instead of running on
+//     +0x58  COUNT3   [7:0] count3, [15:8] its limit (byte lanes 0-1 writable; a disable clears the count,
+//                     not the limit).  count3 counts up only; command = {pin_out[3] if CFG0[12], output 11}:
+//                     01 = + 1, 10 = clear, 11 = limit <= comm (a length from the data); input 29 (slot
+//                     default) and FLAGS[12] = count3 >= limit.  Without CFG0[12] pin_out[3] stays a pin
+//                     and output 11 alone counts up.
 //     +0x54  FIFO32   32-bit FIFO access (CFG3[11]).  TX: a word write pushes its four bytes, low byte
 //                     first, one every fourth clock (FIFO_STATUS[5] busy meanwhile; a write while busy is
 //                     dropped, so poll it when the FIFO can be full).  RX: a pop machine takes four bytes
@@ -97,7 +102,8 @@
 //
 // CFG0 bits (chroma ctrl_reg; the datapath ones are decoded in prism_datapath.v):
 //     1:0  shift_in_sel      6 clr_not_load     7 latch_in_out    8 shift_en
-//     9    shift_dir        10 shift_wide      11 count32        12 count2_dec_en
+//     9    shift_dir        10 shift_wide      11 count32        12 count3_en (pin_out[3] is count3's
+//          second command bit; was count2_dec_en, whose output the sky25a PRISM shared with a pin)
 //     13   latch_en         14 count_up        15 wrap_preload   16 shift_load_one
 //     17   comm_load_one    19:18 in_sync_sel (0 = 2 flops, 1 = 1 flop, 2/3 = raw pins)
 //     21:20 crc_mode (0 off, 1 = 8, 2 = 16, 3 = 32 bits)   22 crc_reflect
@@ -115,7 +121,8 @@
 // Output bits (changes.md item 12):
 //     0-3  pin_out[3:0]        4  OUT_LATCH             5  OUT_FIFO_WR_RD (Phase 4)
 //     6    OUT_COUNT1_INC_DEC  7  OUT_COUNT1_CLEAR_LOAD 8  OUT_SHIFT
-//     9    OUT_COUNT2_INC     10  OUT_COUNT2_DEC       11  OUT_COUNT2_CLEAR
+//     9    OUT_COUNT2_INC     10  OUT_COUNT2_DEC (both = clear count2)
+//     11   OUT_COUNT3 (count3 command, with pin_out[3] under CFG0[12]; see COUNT3)
 //     12   OUT_CRC_CLEAR      13  OUT_CRC_UPDATE       14  OUT_HOST_INTERRUPT
 //     15   OUT_SEMA_CLEAR (fractured) / OUT_FIFO_PUSH_POP (unfractured, shard 0: which FIFO bit 5 strobes)
 //     16   OUT_COMM_LOAD      17  OUT_LOAD_CRC (selected shifter <= CRC; through comm one byte per load)
@@ -139,7 +146,8 @@
 //     20   FIFO flag slot E (default empty)   21 FIFO flag slot F (default full)
 //     22   crc_ok (counter mode: count >= compare)   23 count1_wrap   24 sema_in   25 other_shard_halt
 //     26   FIFO B flag slot E   27 FIFO B flag slot F (shard 0, unfractured; else 0)
-//     28    timer2 tick (slot default; CFG2 may select something else)   31:29 spare
+//     28    timer2 tick (slot default; CFG2 may select something else)
+//     29    count3 >= limit (slot default)   31:30 spare
 //
 // CFG1 (per shard):
 //     3:0 / 7:4 / 11:8 / 15:12  in_prev[0..3] source: PRISM input number of the
@@ -231,9 +239,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     localparam  OUT_COUNT1_INC_DEC    = 6;
     localparam  OUT_COUNT1_CLEAR_LOAD = 7;
     localparam  OUT_SHIFT             = 8;
-    localparam  OUT_COUNT2_INC        = 9;
+    localparam  OUT_COUNT2_INC        = 9;      // with OUT_COUNT2_DEC in the same clock: clear
     localparam  OUT_COUNT2_DEC        = 10;
-    localparam  OUT_COUNT2_CLEAR      = 11;
+    localparam  OUT_COUNT3            = 11;     // count3 command bit (pin_out[3] the other, CFG0[12])
     localparam  OUT_CRC_CLEAR         = 12;
     localparam  OUT_CRC_UPDATE        = 13;
     localparam  OUT_HOST_INTERRUPT    = 14;
@@ -251,6 +259,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                                               // shift_in_sel .. shift_in_sel + 3 (PIO-like, 4n)
     localparam  CFG_LATCH_IN_OUT      = 7;
     localparam  CFG_SHIFT_WIDE        = 10;
+    localparam  CFG_COUNT3_EN         = 12;   // pin_out[3] is count3's second command bit, not a pin
     localparam  CFG_LATCH_EN          = 13;
     localparam  CFG_IN_SYNC_SEL       = 18;   // [19:18]
     localparam  CFG_CRC_MODE          = 20;   // [21:20]
@@ -296,6 +305,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     localparam [6:0] SH_CTAB    = 7'h4C;    // constant table: the latch FIFO as addressable constants
     localparam [6:0] SH_COMM_PINS = 7'h50;  // multi-bit shift: comm bit per uo_out pin with pinmux code 6
     localparam [6:0] SH_FIFO32  = 7'h54;    // 32-bit FIFO push / pop (CFG3[11])
+    localparam [6:0] SH_COUNT3  = 7'h58;    // count3 and its limit
     localparam       CT_EN        = 0;      // CONST_TAB bits
     localparam       CT_LOAD_ADDS = 1;      // index mode 3 adds idx_load instead of loading it
     localparam       CT_POST      = 2;      // load the row before the index moves
@@ -354,6 +364,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     wire [32*SHARDS-1:0] preload_v;
     wire [32*SHARDS-1:0] count1_v;
     wire [32*SHARDS-1:0] counts_v;
+    wire [16*SHARDS-1:0] count3_v;          // {limit3, count3} per shard
     wire [32*SHARDS-1:0] flags_v;
     wire [32*SHARDS-1:0] cfg1_v;
     wire [32*SHARDS-1:0] cfg2_v;
@@ -615,10 +626,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             reg                       sema;
             wire [31:0]               count1;
             wire  [7:0]               count2;
+            wire  [7:0]               count3, limit3;
             wire  [7:0]               comm;
             wire  [4:0]               shift_count;
             wire  [2:0]               comm_count;
             wire                      count1_wrap, count1_term, count2_cmp, count2_eq_comm, shift_term, shift_data;
+            wire                      count3_cmp;
             wire  [6:0]               pin_in;
             wire  [1:0]               sync_sel = cfg0[CFG_IN_SYNC_SEL +: 2];
             wire [PRISM_INPUTS-1:0]   in_s;
@@ -857,6 +870,21 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                             sync_sel == 2'd1 ? ui_in_1ff[6:0] :
                                                ui_in_raw[6:0];
 
+            // count2 commands: OUT_COUNT2_INC alone = + 1, OUT_COUNT2_DEC alone
+            // = - 1, both = clear.  The sampler's + 1 (CFG3[25]) joins after
+            // the decode, so an FSM decrement in the same clock cancels it
+            // instead of turning into a clear.
+            wire                      c2_inc_o = out_s[OUT_COUNT2_INC];
+            wire                      c2_dec_o = out_s[OUT_COUNT2_DEC];
+            wire                      c2_clear = c2_inc_o & c2_dec_o;
+            wire                      c2_smp   = smp_edge & cfg3[CFG3_SMP_CNT2];
+            wire                      c2_inc   = !c2_clear & ((c2_inc_o & !c2_dec_o) | (c2_smp & !c2_dec_o));
+            wire                      c2_dec   = !c2_clear & c2_dec_o & !c2_smp;
+            // count3 commands: {pin_out[3] with CFG0[12], OUT_COUNT3} = 01 + 1,
+            // 10 clear, 11 limit <= comm
+            wire                      c3_hi    = out_s[3] & cfg0[CFG_COUNT3_EN];
+            wire                      c3_lo    = out_s[OUT_COUNT3];
+
             prism_datapath i_dp
             (
                 .clk              ( clk                                ),
@@ -866,9 +894,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                 .o_count1_step    ( out_s[OUT_COUNT1_INC_DEC]          ),
                 .o_count1_clrload ( out_s[OUT_COUNT1_CLEAR_LOAD] | (smp_edge & cfg3[CFG3_SMP_TIMER]) ),
                 .o_shift          ( out_s[OUT_SHIFT]             | (smp_edge & cfg3[CFG3_SMP_SHIFT]) ),
-                .o_count2_inc     ( out_s[OUT_COUNT2_INC]        | (smp_edge & cfg3[CFG3_SMP_CNT2])  ),
-                .o_count2_dec     ( out_s[OUT_COUNT2_DEC]              ),
-                .o_count2_clear   ( out_s[OUT_COUNT2_CLEAR]            ),
+                .o_count2_inc     ( c2_inc                             ),
+                .o_count2_dec     ( c2_dec                             ),
+                .o_count2_clear   ( c2_clear                           ),
+                .o_count3_inc     ( c3_lo & !c3_hi                     ),
+                .o_count3_clear   ( c3_hi & !c3_lo                     ),
+                .o_count3_limit   ( c3_hi &  c3_lo                     ),
                 .o_comm_load      ( out_s[OUT_COMM_LOAD]               ),
                 .o_fifo_pop       ( out_s[OUT_FIFO_WR_RD] & pop_dir    ),
                 .fifo_data        ( pop_head                           ),
@@ -890,8 +921,15 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                 .wr_comm          ( win && ((word_wr && shard_off == SH_COUNTS) ||
                                             (byte_wr && shard_off == SH_COUNTS + 7'd2)) ),
                 .wr_comm_data     ( word_wr ? data_in[23:16] : data_in[7:0] ),
+                .wr_count3        ( (word_wr || byte_wr) && win && shard_off == SH_COUNT3 ),
+                .wr_count3_data   ( data_in[7:0]                       ),
+                .wr_limit3        ( win && ((word_wr && shard_off == SH_COUNT3) ||
+                                            (byte_wr && shard_off == SH_COUNT3 + 7'd1)) ),
+                .wr_limit3_data   ( word_wr ? data_in[15:8] : data_in[7:0] ),
                 .count1           ( count1                             ),
                 .count2           ( count2                             ),
+                .count3           ( count3                             ),
+                .limit3           ( limit3                             ),
                 .comm             ( comm                               ),
                 .shift_count      ( shift_count                        ),
                 .comm_count       ( comm_count                         ),
@@ -899,6 +937,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                 .count1_term      ( count1_term                        ),
                 .count2_cmp       ( count2_cmp                         ),
                 .count2_eq_comm   ( count2_eq_comm                     ),
+                .count3_cmp       ( count3_cmp                         ),
                 .shift_term       ( shift_term                         ),
                 .shift_data       ( shift_data                         )
             );
@@ -1032,7 +1071,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             for (sl = 0; sl < 4; sl = sl + 1)
             begin : SLOTS
                 assign in_s[16+sl] = slot_val(cfg2[4*sl +: 4],    in_prev[sl], in_prev, comm, comm_match, flag2, event_valid);
-                assign in_s[28+sl] = slot_val(cfg2[16+4*sl +: 4], (sl == 0) ? timer2_tick : 1'b0,
+                assign in_s[28+sl] = slot_val(cfg2[16+4*sl +: 4], (sl == 0) ? timer2_tick :
+                                                                   (sl == 1) ? count3_cmp  : 1'b0,
                                               in_prev, comm, comm_match, flag2, event_valid);
             end
 
@@ -1477,7 +1517,8 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             assign preload_v[32*s +: 32] = preload;
             assign count1_v [32*s +: 32] = count1;
             assign counts_v [32*s +: 32] = {comm_count, shift_count, comm, compare, count2};
-            assign flags_v  [32*s +: 32] = {20'h0, smp_pending, crc_ok, fifo_full, fifo_empty,
+            assign count3_v [16*s +: 16] = {limit3, count3};
+            assign flags_v  [32*s +: 32] = {19'h0, count3_cmp, smp_pending, crc_ok, fifo_full, fifo_empty,
                                             latched_in, shift_data, shift_term, count2_eq_comm,
                                             count2_cmp, count1_wrap, count1_term};
             assign cfg1_v    [32*s +: 32] = cfg1;
@@ -1764,6 +1805,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                 SH_CTAB:    reg_word = ctab_v   [32*shard_sel +: 32];
                 SH_COMM_PINS: reg_word = comm_pins_v[32*shard_sel +: 32];
                 SH_FIFO32:  reg_word = fifo32_v[32*shard_sel +: 32];
+                SH_COUNT3:  reg_word = {16'h0, count3_v[16*shard_sel +: 16]};
                 default:    reg_word = 32'h0;
             endcase
         end

@@ -59,7 +59,7 @@ module chroma_eth_rx
    localparam [0:0]  WRAP_PRELOAD   = 1'd0;  // count1 wraps to preload
    localparam [0:0]  COUNT_UP       = 1'd0;  // count1 counts up (0 = down)
    localparam [0:0]  LATCH2         = 1'd0;  // use prism_out[2] as input latch enable
-   localparam [0:0]  COUNT2_DEC     = 1'd0;  // count2 decrement enable
+   localparam [0:0]  COUNT3_EN      = 1'd0;  // pin_out[3] is count3's second command bit (was the count2 decrement enable)
    localparam [0:0]  COUNT32        = 1'd0;  // 32-bit count1 (0 = 24-bit)
    localparam [0:0]  SHIFT_24_EN    = 1'd0;  // wide shifter (count1) instead of comm
    localparam [0:0]  SHIFT_DIR      = 1'd1;  // 1 = shift right (LSB first, newest bit at the top)
@@ -70,7 +70,7 @@ module chroma_eth_rx
    localparam [31:0] CTRL           = {FIFO_SRAM, COMM_LOAD_K, FLAG_LATCH, SHIFT_IN_COND,
                                        CRC_SRC_OUT, CRC_XOR_OUT, CRC_INIT_ONES, SEMA_SET_WINS, FIFO_DIR_TX,
                                        CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE,
-                                       WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC, COUNT32, SHIFT_24_EN,
+                                       WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT3_EN, COUNT32, SHIFT_24_EN,
                                        SHIFT_DIR, SHIFT_EN, LATCH_IN_OUT, CLR_NOT_LOAD, 4'h0, SHIFT_IN_SEL};
    // no output pins driven
    // uo_out[7:1] sources, 3 bits per pin: pin_out[k], cond_out[k], the
@@ -113,7 +113,7 @@ module chroma_eth_rx
    reg count1_load;            // OUT_COUNT1_CLEAR_LOAD
    reg shift;                  // OUT_SHIFT (consumes the bit)
    reg count2_inc;             // OUT_COUNT2_INC
-   reg count2_clear;           // OUT_COUNT2_CLEAR
+   reg count2_dec;             // OUT_COUNT2_DEC (with inc: clear count2)
    reg crc_clear;              // OUT_CRC_CLEAR
    reg crc_update;             // OUT_CRC_UPDATE
    reg host_irq;               // OUT_HOST_INTERRUPT
@@ -124,7 +124,7 @@ module chroma_eth_rx
    assign out_data[7]  = count1_load;
    assign out_data[8]  = shift;
    assign out_data[9]  = count2_inc;
-   assign out_data[11] = count2_clear;
+   assign out_data[10] = count2_dec;
    assign out_data[12] = crc_clear;
    assign out_data[13] = crc_update;
    assign out_data[14] = host_irq;
@@ -153,7 +153,7 @@ module chroma_eth_rx
       count1_load  = 1'b0;
       shift        = 1'b0;
       count2_inc   = 1'b0;
-      count2_clear = 1'b0;
+      count2_dec   = 1'b0;
       crc_clear    = 1'b0;
       crc_update   = 1'b0;
       host_irq     = 1'b0;
@@ -184,7 +184,8 @@ module chroma_eth_rx
             if (comm7 && comm6)               // 1, 1: the SFD just ended
             begin
                crc_clear    = 1'b1;
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                next_state   = ST_DWAIT;
             end
             else
@@ -214,7 +215,8 @@ module chroma_eth_rx
             if (count2_cmp)                   // eight bits: push the byte
             begin
                fifo_push    = 1'b1;
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                next_state   = ST_DWAIT;
             end
             else

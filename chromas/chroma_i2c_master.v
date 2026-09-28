@@ -59,7 +59,7 @@ module chroma_i2c_master
    localparam [0:0]  SHIFT_DIR          = 1'b0;   // MSB first
    localparam [0:0]  SHIFT_24_EN        = 1'b0;   // comm (8-bit) shifts
    localparam [0:0]  COUNT32            = 1'b0;
-   localparam [0:0]  COUNT2_DEC         = 1'b0;
+   localparam [0:0]  COUNT3_EN          = 1'b0;  // pin_out[3] is count3's second command bit (was the count2 decrement enable)
    localparam [0:0]  LATCH2             = 1'b1;   // OUT_LATCH enabled (stores the read-phase flag)
    localparam [0:0]  COUNT_UP           = 1'b0;
    localparam [0:0]  WRAP_PRELOAD       = 1'b0;
@@ -152,7 +152,7 @@ module chroma_i2c_master
    reg            count1_load;
    reg            shift_en;
    reg            count2_inc;
-   reg            count2_clear;
+   reg            count2_dec;     // OUT_COUNT2_DEC (with inc: clear count2)
    reg            host_irq;
    reg            push_pop;       // OUT_FIFO_PUSH_POP: 1 = FIFO B (pop), 0 = FIFO A (push)
    reg            comm_load;      // OUT_COMM_LOAD: comm <= K0
@@ -165,7 +165,7 @@ module chroma_i2c_master
    assign out_data[7]          = count1_load;       // OUT_COUNT1_CLEAR_LOAD
    assign out_data[8]          = shift_en;          // OUT_SHIFT
    assign out_data[9]          = count2_inc;        // OUT_COUNT2_INC
-   assign out_data[11]         = count2_clear;      // OUT_COUNT2_CLEAR
+   assign out_data[10]         = count2_dec;
    assign out_data[14]         = host_irq;          // OUT_HOST_INTERRUPT
    assign out_data[15]         = push_pop;          // OUT_FIFO_PUSH_POP
    assign out_data[16]         = comm_load;         // OUT_COMM_LOAD
@@ -197,7 +197,7 @@ module chroma_i2c_master
       count1_load    = 1'b0;
       shift_en       = 1'b0;
       count2_inc     = 1'b0;
-      count2_clear   = 1'b0;
+      count2_dec     = 1'b0;
       host_irq       = 1'b0;
       push_pop       = 1'b0;
       comm_load      = 1'b0;
@@ -208,7 +208,7 @@ module chroma_i2c_master
       ctrl_reg       = {FIFO_SRAM, COMM_LOAD_K, FLAG_LATCH, SHIFT_IN_COND,
                         CRC_SRC_OUT, CRC_XOR_OUT, CRC_INIT_ONES, SEMA_SET_WINS, FIFO_DIR_TX,
                         CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE,
-                        WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC,
+                        WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT3_EN,
                         COUNT32, SHIFT_24_EN, SHIFT_DIR, SHIFT_EN, LATCH_IN_OUT, CLR_NOT_LOAD, 4'h0, SHIFT_IN_SEL};
 
       case (curr_state)
@@ -216,7 +216,8 @@ module chroma_i2c_master
          begin
             if (host0)
             begin
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                count1_load  = 1'b1;
                latch_flag   = 1'b1;                // read phase flag <= 0
                next_state   = STATE_START1;

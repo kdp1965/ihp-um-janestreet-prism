@@ -47,5 +47,5 @@ const uint32_t chroma_encoder[] =
 };
 const uint32_t chroma_encoder_count   = 128;
 const uint32_t chroma_encoder_width   = 128;
-const uint32_t chroma_encoder_ctrlReg = 0x00003000;
+const uint32_t chroma_encoder_ctrlReg = 0x00002000;
 const uint32_t chroma_encoder_pinmuxReg = 0x001FFFFF;

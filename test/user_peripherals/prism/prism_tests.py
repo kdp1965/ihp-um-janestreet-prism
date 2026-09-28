@@ -29,6 +29,7 @@ from user_peripherals.prism.chroma_usb_ls import *
 from user_peripherals.prism.chroma_eth_tx import *
 from user_peripherals.prism.chroma_eth_rx import *
 from user_peripherals.prism.chroma_counter import *
+from user_peripherals.prism.chroma_count3 import *
 
 
 # =============================================================================
@@ -1619,6 +1620,166 @@ class CounterTest(PrismTest):
         await tqv.write_byte_reg(REG_HOST, 0x00)
         await tqv.write_word_reg(REG_CFG1, 0)
         dut.ui_in[2].value = 0
+        await bench.disable()
+
+
+class Count3Test(PrismTest):
+    ''' count2's two-bit commands (OUT_COUNT2_INC alone + 1, OUT_COUNT2_DEC
+        alone - 1, both clear) and the per-shard count3: it counts up only,
+        its command is {pin_out[3] with CFG0[12], OUT_COUNT3} = 01 + 1,
+        10 clear, 11 limit <= comm, and count3 >= limit is input 29 (slot
+        default) and FLAGS[12].  The count3 chroma pops command bytes from
+        its FIFO and decodes their low three bits (5 = the whole byte is the
+        limit); uo_out[1] shows input 29.  Also: the COUNT3 register (byte
+        lanes; a disable clears the count and keeps the limit), CFG0[12]
+        off (pin_out[3] a plain pin, output 11 alone counts up), a sampler
+        count2 + 1 cancelling an FSM decrement in the same clock, and
+        shard 1's own count3. '''
+    name = "count2 command encoding and count3 (an up counter with a limit from the data)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        dut.ui_in[3].value = 0
+        await tqv.write_word_reg(REG_FIFO_ST, 0)                 # flush
+        await tqv.write_word_reg(REG_CFG2, 0x765)                # inputs 16-18 = comm[0..2]; 29 stays count3 >= limit
+        await tqv.write_word_reg(REG_PRELOAD, 200)               # op 6: 201 clocks of count2 - 1
+        await bench.load_chroma(chroma_count3, chroma_count3_ctrlReg, chroma_count3_pinmuxReg)
+        await self.clocks(20)
+
+        m = {"c2": 0, "c3": 0, "lim": 0, "mode": True}
+
+        async def ops(*cmds):
+            for c in cmds:
+                await tqv.write_byte_reg(REG_FIFO, c)
+                op = c & 7
+                if op == 0:
+                    m["c2"] = (m["c2"] + 1) & 0xFF
+                elif op == 1:
+                    m["c2"] = (m["c2"] - 1) & 0xFF
+                elif op == 2:
+                    m["c2"] = 0
+                elif op == 3 or (op == 5 and not m["mode"]):     # output 11 alone
+                    m["c3"] = (m["c3"] + 1) & 0xFF
+                elif op == 4 and m["mode"]:
+                    m["c3"] = 0
+                elif op == 5:
+                    m["lim"] = c
+            for _ in range(50):
+                if await tqv.read_word_reg(REG_FIFO_ST) & 1:     # empty: the last one is being decoded
+                    break
+            await self.clocks(10)
+
+        async def check(what):
+            c2 = await tqv.read_byte_reg(REG_COUNT2)
+            assert c2 == m["c2"], f"{what}: count2 {c2} expected {m['c2']}"
+            w = await tqv.read_word_reg(REG_COUNT3)
+            exp = (m["lim"] << 8) | m["c3"]
+            assert w == exp, f"{what}: COUNT3 {w:#06x} expected {exp:#06x}"
+            ge = m["c3"] >= m["lim"]
+            flags = await tqv.read_word_reg(REG_FLAGS)
+            assert bool(flags & FLAG_COUNT3) == ge, f"{what}: FLAGS {flags:#x}, count3 >= limit should be {ge}"
+            pin = (int(dut.uo_out.value) >> 1) & 1
+            assert pin == ge, f"{what}: uo_out[1] {pin} (input 29), count3 >= limit should be {ge}"
+
+        self.log("count2: inc alone + 1, dec alone - 1, both clear; 8-bit wrap both ways")
+        await check("start")
+        await ops(0, 0, 0)
+        await check("+3")
+        await ops(1)
+        await check("-1")
+        await ops(2)
+        await check("clear")
+        await ops(1)
+        await check("wrap down")
+        await ops(0)
+        await check("wrap up")
+
+        self.log("count3 counts up; the limit comes from the command byte (comm)")
+        await ops(3, 3, 3, 3, 3)
+        await check("count3 5, limit 0")
+        await ops(0x3D)                                          # op 5: limit = 0x3D
+        await check("limit 0x3D")
+        await ops(4)
+        await check("count3 cleared")
+        await ops(0x05)                                          # a length of 5 from the data
+        for k in range(1, 6):
+            await ops(3)
+            await check(f"step {k} of 5")                        # the flag rises on exactly the fifth
+
+        self.log("COUNT3 register: word and byte writes; a disable clears the count, not the limit")
+        await tqv.write_word_reg(REG_COUNT3, 0x2010)
+        m["c3"], m["lim"] = 0x10, 0x20
+        await check("word write")
+        await tqv.write_byte_reg(REG_COUNT3, 0x33)
+        await tqv.write_byte_reg(REG_LIMIT3, 0x30)
+        m["c3"], m["lim"] = 0x33, 0x30
+        await check("byte writes")
+        assert await tqv.read_byte_reg(REG_LIMIT3) == 0x30
+        await tqv.write_byte_reg(REG_LIMIT3, 0)
+        m["lim"] = 0
+        await check("limit 0: always at or above")
+        await tqv.write_byte_reg(REG_LIMIT3, 0x30)
+        m["lim"] = 0x30
+        await bench.disable()
+        assert await tqv.read_word_reg(REG_COUNT3) == 0x3000, "a disable clears count3 and keeps the limit"
+        await bench.enable()
+        await self.clocks(10)
+        m["c2"], m["c3"] = 0, 0                                  # (count2 is cleared by the disable too)
+        await check("after the disable")
+
+        self.log("CFG0[12] off: pin_out[3] is a plain pin, output 11 alone counts up")
+        m["mode"] = False
+        await tqv.write_word_reg(REG_CFG0, chroma_count3_ctrlReg & ~CFG_COUNT3_EN)
+        await ops(3, 3)
+        await check("+2 without the mode")
+        watch = {"on": True, "pulses": 0}
+
+        async def watcher():
+            prev = 0
+            while watch["on"]:
+                await RisingEdge(dut.clk)
+                v = (int(dut.uo_out.value) >> 2) & 1
+                if v and not prev:
+                    watch["pulses"] += 1
+                prev = v
+        cocotb.start_soon(watcher())
+        await ops(4)                                             # pin_out[3] alone: a pin pulse, no clear
+        watch["on"] = False
+        await self.clocks(2)
+        assert watch["pulses"] == 1, f"pin_out[3] reached uo_out[2] {watch['pulses']} times, expected once"
+        await check("pin_out[3] alone does not clear")
+        await ops(0x45)                                          # both: just + 1, the limit stays
+        await check("both bits without the mode = + 1")
+        m["mode"] = True
+        await tqv.write_word_reg(REG_CFG0, chroma_count3_ctrlReg)
+
+        self.log("a sampler count2 + 1 in the clock of an FSM decrement cancels it")
+        await tqv.write_word_reg(REG_CFG3, CFG3_SMP_EN | CFG3_SMP_SRC(3) | CFG3_SMP_ANY | CFG3_SMP_CNT2)
+        await tqv.write_byte_reg(REG_COUNT2, 250)
+        m["c2"] = 250
+        for _ in range(2):                                       # idle: each edge is + 1
+            dut.ui_in[3].value = 1 - int(dut.ui_in[3].value)
+            await self.clocks(20)
+            m["c2"] += 1
+        await check("two sampler steps")
+        await tqv.write_byte_reg(REG_FIFO, 6)                    # 201 clocks of - 1
+        await self.clocks(30)
+        for _ in range(4):                                       # four edges inside the window
+            dut.ui_in[3].value = 1 - int(dut.ui_in[3].value)
+            await self.clocks(25)
+        await self.clocks(250)
+        m["c2"] = (m["c2"] - 201 + 4) & 0xFF                     # each edge clock nets 0 (old priority: + 1)
+        await check("decrement window with four edges")
+        await tqv.write_word_reg(REG_CFG3, 0)
+
+        self.log("shard 1 has its own count3")
+        await tqv.write_word_reg(REG_COUNT3 + SHARD1, 0x0807)
+        assert await tqv.read_word_reg(REG_COUNT3 + SHARD1) == 0x0807
+        assert not (await tqv.read_word_reg(REG_FLAGS + SHARD1) & FLAG_COUNT3)
+        await tqv.write_byte_reg(REG_LIMIT3 + SHARD1, 0x07)
+        assert await tqv.read_word_reg(REG_FLAGS + SHARD1) & FLAG_COUNT3
+        await check("shard 0 unchanged")
+        dut.ui_in[3].value = 0
         await bench.disable()
 
 

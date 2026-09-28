@@ -56,7 +56,7 @@ module chroma_onewire
    localparam [0:0]  SHIFT_DIR          = 1'b1;   // LSB first
    localparam [0:0]  SHIFT_24_EN        = 1'b0;
    localparam [0:0]  COUNT32            = 1'b0;
-   localparam [0:0]  COUNT2_DEC         = 1'b0;
+   localparam [0:0]  COUNT3_EN          = 1'b0;  // pin_out[3] is count3's second command bit (was the count2 decrement enable)
    localparam [0:0]  LATCH2             = 1'b1;   // OUT_LATCH enabled (presence into latched_in)
    localparam [0:0]  COUNT_UP           = 1'b0;
    localparam [0:0]  WRAP_PRELOAD       = 1'b0;
@@ -139,7 +139,7 @@ module chroma_onewire
    reg            count1_load;
    reg            shift_en;
    reg            count2_inc;
-   reg            count2_clear;
+   reg            count2_dec;     // OUT_COUNT2_DEC (with inc: clear count2)
    reg            host_irq;
    reg            push_pop;
    reg            comm_load;      // OUT_COMM_LOAD: comm <= K0
@@ -150,7 +150,7 @@ module chroma_onewire
    assign out_data[7]          = count1_load;
    assign out_data[8]          = shift_en;
    assign out_data[9]          = count2_inc;
-   assign out_data[11]         = count2_clear;
+   assign out_data[10]         = count2_dec;
    assign out_data[14]         = host_irq;
    assign out_data[15]         = push_pop;
    assign out_data[16]         = comm_load;
@@ -180,7 +180,7 @@ module chroma_onewire
       count1_load    = 1'b0;
       shift_en       = 1'b0;
       count2_inc     = 1'b0;
-      count2_clear   = 1'b0;
+      count2_dec     = 1'b0;
       host_irq       = 1'b0;
       push_pop       = 1'b0;
       comm_load      = 1'b0;
@@ -190,7 +190,7 @@ module chroma_onewire
       ctrl_reg       = {FIFO_SRAM, COMM_LOAD_K, FLAG_LATCH, SHIFT_IN_COND,
                         CRC_SRC_OUT, CRC_XOR_OUT, CRC_INIT_ONES, SEMA_SET_WINS, FIFO_DIR_TX,
                         CRC_REFLECT, CRC_MODE, IN_SYNC_SEL, COMM_LOAD_ONE, SHIFT_LOAD_ONE,
-                        WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT2_DEC,
+                        WRAP_PRELOAD, COUNT_UP, LATCH2, COUNT3_EN,
                         COUNT32, SHIFT_24_EN, SHIFT_DIR, SHIFT_EN, LATCH_IN_OUT, CLR_NOT_LOAD,
                         3'h0, MSHIFT_EN, SHIFT_IN_SEL};
 
@@ -207,7 +207,8 @@ module chroma_onewire
             cond_out[0] = 1'b1;
             if (t2_tick)
             begin
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                count1_load  = 1'b1;
                next_state   = STATE_PRES_WAIT;
             end
@@ -253,7 +254,8 @@ module chroma_onewire
             else if (host1)                        // a byte to read
             begin
                comm_load    = 1'b1;                // comm <= K0, first bit counted
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                count1_load  = 1'b1;
                next_state   = STATE_RD_LOW;
             end
@@ -272,13 +274,15 @@ module chroma_onewire
          begin
             if (shift_data)
             begin
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                count1_load  = 1'b1;
                next_state   = STATE_W1_LOW;
             end
             else if (!shift_data)
             begin
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                count1_load  = 1'b1;
                next_state   = STATE_W0_LOW;
             end
@@ -381,7 +385,8 @@ module chroma_onewire
             count1_dec = 1'b1;
             if (count1_zero && count2_cmp)
             begin
-               count2_clear = 1'b1;
+               count2_inc   = 1'b1;
+               count2_dec   = 1'b1;   // inc + dec = clear count2
                count1_load  = 1'b1;
                next_state   = STATE_RD_LOW;
             end

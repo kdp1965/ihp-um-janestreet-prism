@@ -12,6 +12,8 @@
 //   comm        8-bit shift register (full duplex serial byte), loadable from
 //               preload[7:0]; 3-bit shift count with the same load-to-1 option
 //   count2      8-bit up/down counter with an 8-bit compare register
+//   count3      8-bit up counter with an 8-bit limit that the FSM can load
+//               from comm (a length taken from the data), flag count3 >= limit
 //
 // One instance per shard (changes.md item 6).  All PRISM-driven updates are
 // gated by `exec` (shard enabled and not halted by the debugger); host writes
@@ -30,9 +32,12 @@ module prism_datapath
     input  wire        o_count1_step,     // OUT_COUNT1_INC_DEC
     input  wire        o_count1_clrload,  // OUT_COUNT1_CLEAR_LOAD
     input  wire        o_shift,           // OUT_SHIFT
-    input  wire        o_count2_inc,
-    input  wire        o_count2_dec,
+    input  wire        o_count2_inc,      // count2 commands, decoded in prism_periph.v
+    input  wire        o_count2_dec,      // (one of the three at a time)
     input  wire        o_count2_clear,
+    input  wire        o_count3_inc,      // count3 commands, decoded in prism_periph.v
+    input  wire        o_count3_clear,
+    input  wire        o_count3_limit,    // limit <= comm
     input  wire        o_comm_load,       // OUT_COMM_LOAD
     input  wire        o_fifo_pop,        // OUT_FIFO_WR_RD in TX mode: comm <= FIFO head
     input  wire  [7:0] fifo_data,         // FIFO head
@@ -56,10 +61,16 @@ module prism_datapath
     input  wire  [7:0] wr_count2_data,
     input  wire        wr_comm,
     input  wire  [7:0] wr_comm_data,
+    input  wire        wr_count3,
+    input  wire  [7:0] wr_count3_data,
+    input  wire        wr_limit3,
+    input  wire  [7:0] wr_limit3_data,
 
     // state
     output reg  [31:0] count1,
     output reg   [7:0] count2,
+    output reg   [7:0] count3,
+    output reg   [7:0] limit3,
     output reg   [7:0] comm,
     output reg   [4:0] shift_count,
     output reg   [2:0] comm_count,
@@ -69,6 +80,7 @@ module prism_datapath
     output wire        count1_term,       // ==0 counting down; ==preload / ==max counting up
     output wire        count2_cmp,        // count2 >= compare
     output wire        count2_eq_comm,    // count2 == comm
+    output wire        count3_cmp,        // count3 >= limit3
     output wire        shift_term,        // selected shifter's count is 0
     output wire        shift_data         // selected shifter's serial output bit
 );
@@ -79,7 +91,6 @@ module prism_datapath
     localparam CFG_SHIFT_DIR      = 9;    // 0 = MSB first (shift left), 1 = LSB first (shift right)
     localparam CFG_SHIFT_WIDE     = 10;   // 1 = count1 shifts, 0 = comm shifts
     localparam CFG_COUNT32        = 11;   // 1 = 32-bit count1, 0 = 24-bit
-    localparam CFG_COUNT2_DEC_EN  = 12;
     localparam CFG_COUNT_UP       = 14;
     localparam CFG_WRAP_PRELOAD   = 15;   // count-up rolls over at preload instead of the maximum
     localparam CFG_SHIFT_LOAD_ONE = 16;   // wide load sets shift_count to 1
@@ -91,7 +102,6 @@ module prism_datapath
     wire shift_dir      = cfg[CFG_SHIFT_DIR];
     wire shift_wide     = cfg[CFG_SHIFT_WIDE];
     wire count32        = cfg[CFG_COUNT32];
-    wire count2_dec_en  = cfg[CFG_COUNT2_DEC_EN];
     wire count_up       = cfg[CFG_COUNT_UP];
     wire wrap_preload   = cfg[CFG_WRAP_PRELOAD];
     wire shift_load_one = cfg[CFG_SHIFT_LOAD_ONE];
@@ -240,15 +250,48 @@ module prism_datapath
                 count2 <= 8'h0;
             else if (o_count2_inc)
                 count2 <= count2 + 8'd1;
-            else if (count2_dec_en && o_count2_dec)
+            else if (o_count2_dec)
                 count2 <= count2 - 8'd1;
         end
+    end
+
+    // ---------------------------------------------------------------- count3
+    // Count up only, so its command set has room for a clear and a load of
+    // the limit from comm: clear, take the length from the data, count, and
+    // count3_cmp rises after exactly that many steps (at once for 0).  The
+    // limit is a setting as well (host read / write) and survives a disable.
+    always @(posedge clk or negedge rst_n)
+    begin
+        if (!rst_n)
+            count3 <= 8'h0;
+        else if (!enable)
+            count3 <= 8'h0;
+        else if (wr_count3)
+            count3 <= wr_count3_data;
+        else if (exec)
+        begin
+            if (o_count3_clear)
+                count3 <= 8'h0;
+            else if (o_count3_inc)
+                count3 <= count3 + 8'd1;
+        end
+    end
+
+    always @(posedge clk or negedge rst_n)
+    begin
+        if (!rst_n)
+            limit3 <= 8'h0;
+        else if (wr_limit3)
+            limit3 <= wr_limit3_data;
+        else if (exec && o_count3_limit)
+            limit3 <= comm;
     end
 
     // ----------------------------------------------------------------- flags
     assign count1_term    = count_up ? count1_at_top : (count1 == 32'h0);
     assign count2_cmp     = count2 >= compare;
     assign count2_eq_comm = count2 == comm;
+    assign count3_cmp     = count3 >= limit3;
     assign shift_term     = shift_wide ? (shift_count == 5'h0) : (comm_count == 3'h0);
     assign shift_data     = shift_wide ? (shift_dir ? count1[0] : (count32 ? count1[31] : count1[23]))
                                        : (shift_dir ? comm[0]   : comm[7]);
