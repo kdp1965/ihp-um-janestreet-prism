@@ -177,6 +177,7 @@ class PrismBench:
                 dut._log.info(f"TRACE @{cyc:6d} si {last}->{cur} in={iv(core.in_data):08x} "
                               f"out={iv(core.out_data):06x} cond={iv(core.cond_out)} "
                               f"cnt1={iv(sh0.count1):06x} cnt2={iv(sh0.count2):02x} "
+                              f"cnt3={iv(sh0.count3):02x}/{iv(sh0.limit3):02x} "
                               f"lin={iv(sh0.latched_in)} ui={iv(dut.ui_in):02x}")
                 last = cur
                 n += 1

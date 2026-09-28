@@ -83,6 +83,7 @@ def FIFO_ST_WORD_BYTES(st): return 4 if st & FIFO_ST_WORD_FULL else (st >> 6) & 
 REG_FIFO32  = 0x154       # 32-bit FIFO access (CFG3_FIFO32): write pushes four bytes, read takes a complete word
 REG_COUNT3  = 0x158       # byte lanes: +0 count3 (counts up only), +1 its limit (the FSM loads it from comm)
 REG_LIMIT3  = 0x159
+REG_MASK3   = 0x15A       # byte: the comm bits a limit load clears (0 = the whole byte)
 REG_CRC_POLY= 0x128
 REG_CRC     = 0x12C       # read value, write preset
 REG_CRC_EXP = 0x130
@@ -103,6 +104,9 @@ CFG3_SMP_CNT2  = 1 << 25  #   count2 + 1
 CFG3_SMP_LATCH = 1 << 26  #   capture the in_prev flops
 CFG3_SMP_TIMER = 1 << 27  #   count1 clear / load
 CFG3_SMP_INV   = 1 << 28  # flag2 swaps rising and falling (a bidirectional protocol's two edges)
+def CFG3_SMP_PRESET(k): return (k & 3) << 12   # timer action presets count1 to PRELOAD >> k (0 = load)
+CFG3_STUFF_EN  = 1 << 14  # bit-stuff unit on count2 (receive: drop the stuff bit)
+CFG3_STUFF_TX  = 1 << 15  # ... transmit: insert it (the shifter holds, the pin shows the complement)
 REG_PRELOAD2= 0x140       # timer 2 period (24 bits): input 28 ticks every PRELOAD2 + 1 clocks; 0 = off
 T2_RELOAD    = 1 << 24    # restart the count on entry into state T2_STATE(si): retriggerable timeout
 def T2_STATE(si): return (si & 0x1f) << 25

@@ -30,6 +30,9 @@ from user_peripherals.prism.chroma_eth_tx import *
 from user_peripherals.prism.chroma_eth_rx import *
 from user_peripherals.prism.chroma_counter import *
 from user_peripherals.prism.chroma_count3 import *
+from user_peripherals.prism.chroma_can_rx import *
+from user_peripherals.prism.chroma_can_tx import *
+from user_peripherals.prism import can_model as can
 
 
 # =============================================================================
@@ -529,6 +532,16 @@ class SamplerTest(PrismTest):
         await tqv.write_word_reg(REG_CFG3, 0)                           # off: pending clears
         await self.clocks(3)
         assert not (await flags()) & FLAG_SMP_PENDING
+
+        self.log("the timer action with a phase preset: count1 <= PRELOAD >> k on the edge")
+        await tqv.write_word_reg(REG_COUNT1, 5)
+        await tqv.write_word_reg(REG_CFG3, smp(CFG3_SMP_RISE, CFG3_SMP_TIMER) | CFG3_SMP_PRESET(2))
+        dut.ui_in[CLK].value = 1
+        await self.clocks(6)
+        dut.ui_in[CLK].value = 0
+        await self.clocks(4)
+        assert await tqv.read_word_reg(REG_COUNT1) == 0x1234 >> 2, "preset = PRELOAD >> 2"
+        await tqv.write_word_reg(REG_CFG3, 0)
 
         self.log("the pending flag is consumed by an FSM shift (uart_tx)")
         await bench.disable()
@@ -1664,6 +1677,7 @@ class Count3Test(PrismTest):
                     m["c3"] = 0
                 elif op == 5:
                     m["lim"] = c
+                    m["c3"] = 0                                      # a limit load starts a new count
             for _ in range(50):
                 if await tqv.read_word_reg(REG_FIFO_ST) & 1:     # empty: the last one is being decoded
                     break
@@ -1672,7 +1686,7 @@ class Count3Test(PrismTest):
         async def check(what):
             c2 = await tqv.read_byte_reg(REG_COUNT2)
             assert c2 == m["c2"], f"{what}: count2 {c2} expected {m['c2']}"
-            w = await tqv.read_word_reg(REG_COUNT3)
+            w = await tqv.read_word_reg(REG_COUNT3) & 0xFFFF       # (byte 2 is the mask)
             exp = (m["lim"] << 8) | m["c3"]
             assert w == exp, f"{what}: COUNT3 {w:#06x} expected {exp:#06x}"
             ge = m["c3"] >= m["lim"]
@@ -1772,6 +1786,13 @@ class Count3Test(PrismTest):
         await check("decrement window with four edges")
         await tqv.write_word_reg(REG_CFG3, 0)
 
+        self.log("the mask: only a masked load (OUT_K_SEL0 with the command) clears bits")
+        await tqv.write_byte_reg(REG_MASK3, 0xF0)
+        assert (await tqv.read_word_reg(REG_COUNT3) >> 16) & 0xFF == 0xF0
+        await ops(0x45)                                          # op 5 without K_SEL0: the whole byte
+        await check("plain limit load with the mask set")
+        await tqv.write_byte_reg(REG_MASK3, 0)
+        assert (await tqv.read_word_reg(REG_COUNT3) >> 16) & 0xFF == 0
         self.log("shard 1 has its own count3")
         await tqv.write_word_reg(REG_COUNT3 + SHARD1, 0x0807)
         assert await tqv.read_word_reg(REG_COUNT3 + SHARD1) == 0x0807
@@ -1781,6 +1802,221 @@ class Count3Test(PrismTest):
         await check("shard 0 unchanged")
         dut.ui_in[3].value = 0
         await bench.disable()
+
+
+class CanRxTest(PrismTest):
+    ''' CAN 2.0A receiver chroma: standard data frames from a bus model on
+        ui_in[3] (64 clocks per bit), each pushed into the RX FIFO as
+        {SOF, ID[10:4]}, {ID[3:0], RTR, IDE, r0, DLC3}, {ID0, RTR, IDE, r0,
+        DLC} and the data bytes, acknowledged on uo_out[1] when the CRC-15 is
+        good, with the host interrupt after the EOF and the CRC register at 0
+        for a good frame.  Frames: a 3-byte one, all-zero ID with 8 zero
+        bytes (stuff bits every 5 bits), ID 0x7FF with no data, a bad CRC
+        (no ACK, CRC register not 0), 0xFF / 0x00 patterns and two frames
+        back to back with the minimum interframe space. '''
+    name = "CAN 2.0A receiver chroma"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        bus = can.CanBus(dut, rxd=3, txd=1, bit_clocks=64)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)                        # flush
+        await tqv.write_word_reg(REG_CFG1, 3)                           # in_prev0 <- input 3 (RXD)
+        await tqv.write_word_reg(REG_CFG2, (15 << 4) | (8 << 8))        # in17 = sampler pending, in18 = comm[3]
+        await tqv.write_word_reg(REG_CFG3, CFG3_SMP_EN | CFG3_SMP_SRC(3) | CFG3_SMP_FALL | CFG3_SMP_TIMER |
+                                           CFG3_SMP_PRESET(2) | CFG3_STUFF_EN)
+        await tqv.write_word_reg(REG_CONST, (19 << 24) | (15 << 16))          # K3 = 19 header bits, K2 = 15 CRC bits
+        ack_si = can.state_with_default_output(chroma_can_rx, 0)         # the ACK state drives pin_out[0]
+        await tqv.write_word_reg(REG_PRELOAD2, 78 | (1 << 24) | (ack_si << 25) | (1 << 30))   # 1.25 bits, restart on entry, one-shot
+        await tqv.write_word_reg(REG_COUNT3, 0xF0 << 16)                # limit loads keep comm[3:0] (the DLC)
+        await tqv.write_byte_reg(REG_COMPARE, 4)                        # a run of five = stuff bit next
+        await tqv.write_word_reg(REG_PRELOAD, 63)                       # one bit: the tick wraps at 63
+        await tqv.write_word_reg(REG_CRC_POLY, 0x8B32)                  # CRC-15 0x4599 in 16-bit mode
+        await tqv.write_word_reg(REG_CRC_EXP, 0)
+        await bench.load_chroma(chroma_can_rx, chroma_can_rx_ctrlReg, chroma_can_rx_pinmuxReg)
+        await self.clocks(200)
+
+        async def receive(ident, data, rtr=False, bad_crc=False, ifs=3, expect_ack=True, dlc=None):
+            acked = await bus.send(ident, data, rtr=rtr, bad_crc=bad_crc, ifs=ifs, dlc=dlc)
+            assert acked == expect_ack, f"ID {ident:#x}: ACK {acked}, expected {expect_ack}"
+            for _ in range(20):
+                if await bench.irq():
+                    break
+                await self.clocks(16)
+            assert await bench.irq(), f"ID {ident:#x}: no interrupt after the frame"
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            _, body, _ = can.frame_bits(ident, data, rtr, bad_crc, dlc)
+            exp = can.expected_bytes(body)
+            st = await tqv.read_word_reg(REG_FIFO_ST)
+            got = [await tqv.read_byte_reg(REG_FIFO) for _ in range(fifo_count(st))]
+            assert got == exp, f"ID {ident:#x}: FIFO {[hex(b) for b in got]} expected {[hex(b) for b in exp]}"
+            crc = await tqv.read_word_reg(REG_CRC)
+            assert (crc == 0) == (not bad_crc), f"ID {ident:#x}: CRC register {crc:#x}"
+
+        self.log("a 3-byte frame")
+        await receive(0x123, [0xDE, 0xAD, 0x42])
+        self.log("ID 0 with eight zero bytes: a stuff bit every five bits")
+        await receive(0x000, [0] * 8)
+        self.log("ID 0x7FF, no data (the DLC = 0 path)")
+        await receive(0x7FF, [])
+        self.log("a bad CRC: no ACK, the CRC register is not 0")
+        await receive(0x555, [1, 2, 3, 4], bad_crc=True, expect_ack=False)
+        self.log("eight bytes of 0xFF / 0x00 patterns")
+        await receive(0x2AA, [0xFF, 0x00, 0xFF, 0x00, 0xAA, 0x55, 0x0F, 0xF0])
+        self.log("two frames back to back with the minimum interframe space")
+        await receive(0x101, [0x11], ifs=3)
+        await receive(0x102, [0x22, 0x33], ifs=3)
+        await bench.disable()
+
+
+class CanTxTest(PrismTest):
+    ''' CAN 2.0A transmitter chroma: frames packed by the host into the TX
+        FIFO (19 header bits then the data, MSB first) with LIMIT3 = the bit
+        count, started by a host_in[0] toggle, go out on uo_out[2] (1 =
+        recessive) with hardware stuffing and the CRC-15; the remote node
+        (can_model.CanNode) decodes them and acknowledges, and FLAGS shows
+        F0 = acked, F1 = lost.  Frames: 3 bytes, ID 0 with eight zero bytes
+        (a stuff bit every five), no data, 0xFF / 0x00 patterns, one the node
+        does not acknowledge, and one lost in arbitration (the node drives an
+        ID bit dominant): F1, the bus released, the FIFO flushed by the host. '''
+    name = "CAN 2.0A transmitter chroma"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        node = can.CanNode(dut, rxd=3, txd=2, ack_pin=1, bit_clocks=64)
+        dut.ui_in[3].value = 1
+        await tqv.write_word_reg(REG_FIFO_ST, 0)                        # flush
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        await tqv.write_word_reg(REG_CFG1, 8 << 4)                      # in_prev1 <- host_in[0]
+        await tqv.write_word_reg(REG_CFG3, CFG3_STUFF_EN | CFG3_STUFF_TX)
+        await tqv.write_word_reg(REG_CONST, (11 << 24) | (14 << 16) | (0xFF << 8))   # K3 = 11 tail ticks, K2 = 14 (CRC bits - 1), K1 = recessive
+        await tqv.write_byte_reg(REG_COMPARE, 4)
+        await tqv.write_word_reg(REG_PRELOAD, 63)
+        await tqv.write_word_reg(REG_CRC_POLY, 0x8B32)
+        await tqv.write_byte_reg(REG_COMM, 0xFF)                        # the pin follows comm: recessive
+        await bench.load_chroma(chroma_can_tx, chroma_can_tx_ctrlReg, chroma_can_tx_pinmuxReg)
+        await self.clocks(100)
+
+        async def send(ident, data, ack=True, jam=None):
+            image, nbits = can.pack_frame(ident, data)
+            listener = cocotb.start_soon(node.receive(ack=ack, jam=jam))   # armed before the SOF
+            for b in image:
+                await tqv.write_byte_reg(REG_FIFO, b)
+            await tqv.write_byte_reg(REG_LIMIT3, nbits - 1)
+            await tqv.write_byte_reg(REG_TOGGLE, 0)                      # go
+            got = await listener
+            for _ in range(40):
+                if await bench.irq():
+                    break
+                await self.clocks(16)
+            assert await bench.irq(), f"ID {ident:#x}: no interrupt"
+            flags = await tqv.read_word_reg(REG_FLAGS)
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            return got, (flags >> 6) & 1, (flags >> 7) & 1             # acked, lost
+
+        async def check(ident, data, ack=True):
+            got, acked, lost = await send(ident, data, ack=ack)
+            assert got and not got.get("lost"), f"ID {ident:#x}: the node saw no frame: {got}"
+            if (got["ident"], got["data"], got["crc_ok"]) != (ident, data, True):
+                stuffed, _, _ = can.frame_bits(ident, data)
+                raw = got["raw"]
+                first = next((i for i in range(min(len(raw), len(stuffed))) if raw[i] != stuffed[i]), None)
+                self.log(f"expected {''.join(map(str, stuffed))}")
+                self.log(f"raw      {''.join(map(str, raw[:len(stuffed) + 4]))}  first difference at {first}")
+                assert False, f"ID {ident:#x}: node decoded {dict((k, v) for k, v in got.items() if k != 'raw')}"
+            assert acked == (1 if ack else 0) and lost == 0, f"ID {ident:#x}: flags acked {acked} lost {lost}"
+            assert (int(dut.uo_out.value) >> 2) & 1 == 1, "TXD released"
+            st = await tqv.read_word_reg(REG_FIFO_ST)
+            assert fifo_count(st) == 0, f"ID {ident:#x}: {fifo_count(st)} bytes left in the FIFO"
+            return got
+
+        self.log("a 3-byte frame, acknowledged")
+        await check(0x123, [0xDE, 0xAD, 0x42])
+        self.log("ID 0 with eight zero bytes: stuff bits inserted every five bits")
+        got = await check(0x000, [0] * 8)
+        assert got["stuffed"] > 19 + 64 + 15, "no stuff bits were inserted"
+        self.log("no data")
+        await check(0x7FF, [])
+        self.log("0xFF / 0x00 patterns")
+        await check(0x2AA, [0xFF, 0x00, 0xFF, 0x00, 0xAA, 0x55, 0x0F, 0xF0])
+        self.log("nobody acknowledges: F0 stays 0")
+        await check(0x555, [1, 2, 3, 4], ack=False)
+        self.log("lost arbitration on ID bit 4 (the node drives it dominant)")
+        got, acked, lost = await send(0x7FF, [0x11, 0x22], jam=5)      # raw bit 5 = ID bit 6 (recessive)
+        assert lost == 1 and acked == 0, f"flags acked {acked} lost {lost}"
+        await self.clocks(64)
+        assert (int(dut.uo_out.value) >> 2) & 1 == 1, "TXD released after losing"
+        await tqv.write_word_reg(REG_FIFO_ST, 0)                        # the rest of the frame: flush
+        await self.clocks(64 * 12)
+        self.log("and the next frame goes out fine")
+        await check(0x321, [0x99])
+        await bench.disable()
+        dut.ui_in[3].value = 0
+
+
+class CanLoopTest(PrismTest):
+    ''' A CAN node: the receiver chroma in shard 0 (ACK on uo_out[1]) and
+        the transmitter in shard 1 (TXD on uo_out[2]), the bus a wired AND
+        of the two on ui_in[3].  Frames sent by shard 1 land in shard 0's
+        FIFO with the ACK from shard 0 seen by shard 1 (F0), interrupts on
+        both shards. '''
+    name = "CAN node: transmitter (shard 1) to receiver (shard 0) over the bus"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        node = can.CanNode(dut, rxd=3, txd=2, ack_pin=1, bit_clocks=64)
+        dut.ui_in[3].value = 1
+        for base in (0, SHARD1):
+            await tqv.write_word_reg(REG_FIFO_ST + base, 0)
+            await tqv.write_byte_reg(REG_HOST + base, 0x00)
+            await tqv.write_byte_reg(REG_COMPARE + base, 4)
+            await tqv.write_word_reg(REG_PRELOAD + base, 63)
+            await tqv.write_word_reg(REG_CRC_POLY + base, 0x8B32)
+            await tqv.write_word_reg(REG_CRC_EXP + base, 0)
+        # receiver (shard 0)
+        await tqv.write_word_reg(REG_CFG1, 0)
+        await tqv.write_word_reg(REG_CFG2, 15 << 4)
+        await tqv.write_word_reg(REG_CFG3, CFG3_SMP_EN | CFG3_SMP_SRC(3) | CFG3_SMP_FALL | CFG3_SMP_TIMER |
+                                           CFG3_SMP_PRESET(2) | CFG3_STUFF_EN)
+        await tqv.write_word_reg(REG_CONST, (19 << 24) | (15 << 16))
+        await tqv.write_word_reg(REG_COUNT3, 0xF0 << 16)
+        ack_si = can.state_with_default_output(chroma_can_rx, 0)
+        await tqv.write_word_reg(REG_PRELOAD2, 78 | T2_RELOAD | T2_STATE(ack_si) | T2_ONESHOT)
+        # transmitter (shard 1)
+        await tqv.write_word_reg(REG_CFG1 + SHARD1, 8 << 4)
+        await tqv.write_word_reg(REG_CFG3 + SHARD1, CFG3_STUFF_EN | CFG3_STUFF_TX)
+        await tqv.write_word_reg(REG_CONST + SHARD1, (11 << 24) | (14 << 16) | (0xFF << 8))
+        await tqv.write_byte_reg(REG_COMM + SHARD1, 0xFF)
+        await bench.load_fractured(chroma_can_rx, chroma_can_rx_ctrlReg, chroma_can_rx_pinmuxReg,
+                                   chroma_can_tx, chroma_can_tx_ctrlReg, chroma_can_tx_pinmuxReg)
+        await self.clocks(100)
+
+        async def send(ident, data):
+            image, nbits = can.pack_frame(ident, data)
+            bus = cocotb.start_soon(node.mirror(64 * (19 + 8 * len(data) + 15 + 24 + 20) + 600))
+            for b in image:
+                await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+            await tqv.write_byte_reg(REG_LIMIT3 + SHARD1, nbits - 1)
+            await tqv.write_byte_reg(REG_TOGGLE + SHARD1, 0)
+            await bus
+            assert await bench.irq(IRQ0_MASK), f"ID {ident:#x}: no receive interrupt"
+            assert await bench.irq(IRQ1_MASK), f"ID {ident:#x}: no transmit interrupt"
+            flags = await tqv.read_word_reg(REG_FLAGS + SHARD1)
+            assert (flags >> 6) & 3 == 1, f"ID {ident:#x}: transmitter flags {flags:#x} (acked, not lost expected)"
+            assert await tqv.read_word_reg(REG_CRC) == 0, f"ID {ident:#x}: receiver CRC not 0"
+            _, body, _ = can.frame_bits(ident, data)
+            exp = can.expected_bytes(body)
+            st = await tqv.read_word_reg(REG_FIFO_ST)
+            got = [await tqv.read_byte_reg(REG_FIFO) for _ in range(fifo_count(st))]
+            assert got == exp, f"ID {ident:#x}: received {[hex(b) for b in got]} expected {[hex(b) for b in exp]}"
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            await tqv.write_byte_reg(REG_INT_CLR1, 0x80)
+
+        self.log("three frames from shard 1 to shard 0")
+        await send(0x123, [0xDE, 0xAD, 0x42])
+        await send(0x000, [0] * 8)
+        await send(0x7FF, [])
+        await bench.disable()
+        dut.ui_in[3].value = 0
 
 
 class Timer2Test(PrismTest):

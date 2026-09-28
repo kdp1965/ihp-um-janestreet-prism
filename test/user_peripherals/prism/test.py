@@ -20,7 +20,7 @@ from user_peripherals.prism.prism_tests import (
     RegisterTest, StewIntegrityTest, EncoderTest, Ws2812Test, Gpio24Test,
     SpiSlaveTest, UartTxTest, FifoLoopTest, SramFifoTest, EdgeTest, UsbDeviceTest, EthernetTxTest, EthernetRxTest, EthernetLoopTest, FracturedTest,
     TraceTest, Timer2Test, ConstTableTest, I2cMasterTest, SamplerTest, I2cSlaveTest, PioTest, SpiMasterTest,
-    OneWireTest, Fifo32Test, CounterTest, Count3Test)
+    OneWireTest, Fifo32Test, CounterTest, Count3Test, CanRxTest, CanTxTest, CanLoopTest)
 
 
 async def run(dut, test_class):
@@ -104,6 +104,18 @@ async def test_counter(dut):
 @cocotb.test()
 async def test_count3(dut):
     await run(dut, Count3Test)
+
+@cocotb.test()
+async def test_can_rx(dut):
+    await run(dut, CanRxTest)
+
+@cocotb.test()
+async def test_can_tx(dut):
+    await run(dut, CanTxTest)
+
+@cocotb.test()
+async def test_can_loop(dut):
+    await run(dut, CanLoopTest)
 
 @cocotb.test(skip=GATE_LEVEL)
 async def test_timer2(dut):

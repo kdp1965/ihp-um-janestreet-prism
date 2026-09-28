@@ -106,7 +106,7 @@
 #define PRISM_SH_CTAB           0x4c    /* constant table: the latch FIFO as addressable constants */
 #define PRISM_SH_COMM_PINS      0x50
 #define PRISM_SH_FIFO32         0x54    /* 32-bit FIFO push / pop (CFG3[11]) */
-#define PRISM_SH_COUNT3         0x58    /* [7:0] count3 (counts up), [15:8] its limit; byte lanes writable */
+#define PRISM_SH_COUNT3         0x58    /* [7:0] count3 (counts up), [15:8] its limit, [23:16] mask of a masked load; byte lanes writable */
 
 /* Shard 0 shortcuts */
 #define PRISM_REG_CFG0          (PRISM_SHARD_BASE(0) + PRISM_SH_CFG0)

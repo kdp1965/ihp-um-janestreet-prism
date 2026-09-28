@@ -31,13 +31,16 @@ module prism_datapath
     // PRISM outputs (raw out_data bits of this shard)
     input  wire        o_count1_step,     // OUT_COUNT1_INC_DEC
     input  wire        o_count1_clrload,  // OUT_COUNT1_CLEAR_LOAD
+    input  wire        o_count1_preset,   // sampler edge with a phase preset: count1 <= preset_data
+    input  wire [31:0] preset_data,       // (preload >> k: the tick lands a fraction of a period after the edge)
     input  wire        o_shift,           // OUT_SHIFT
     input  wire        o_count2_inc,      // count2 commands, decoded in prism_periph.v
     input  wire        o_count2_dec,      // (one of the three at a time)
     input  wire        o_count2_clear,
     input  wire        o_count3_inc,      // count3 commands, decoded in prism_periph.v
     input  wire        o_count3_clear,
-    input  wire        o_count3_limit,    // limit <= comm
+    input  wire        o_count3_limit,    // limit <= comm (K_SEL0: & ~mask; K_SEL1: the constant), and count3 <= 0
+    input  wire  [7:0] limit_k,           // the selected constant K[{K_SEL1, K_SEL0}]
     input  wire        o_comm_load,       // OUT_COMM_LOAD
     input  wire        o_fifo_pop,        // OUT_FIFO_WR_RD in TX mode: comm <= FIFO head
     input  wire  [7:0] fifo_data,         // FIFO head
@@ -65,12 +68,15 @@ module prism_datapath
     input  wire  [7:0] wr_count3_data,
     input  wire        wr_limit3,
     input  wire  [7:0] wr_limit3_data,
+    input  wire        wr_mask3,
+    input  wire  [7:0] wr_mask3_data,
 
     // state
     output reg  [31:0] count1,
     output reg   [7:0] count2,
     output reg   [7:0] count3,
     output reg   [7:0] limit3,
+    output reg   [7:0] mask3,             // comm bits a masked limit load (with OUT_K_SEL0) clears
     output reg   [7:0] comm,
     output reg   [4:0] shift_count,
     output reg   [2:0] comm_count,
@@ -162,6 +168,14 @@ module prism_datapath
                 count1_wrap <= 1'b0;
                 if (shift_wide)
                     shift_count <= shift_load_one ? 5'd1 : 5'd0;
+            end
+            else if (o_count1_preset)
+            begin
+                // Bit-clock phase reset: counting up with wrap at preload the
+                // terminal count is periodic, and an edge puts it a fraction
+                // of the period ahead (a CAN sample point 75 % into the bit)
+                count1      <= preset_data & mask;
+                count1_wrap <= 1'b0;
             end
             else if (o_load_crc && shift_wide)
             begin
@@ -270,7 +284,7 @@ module prism_datapath
             count3 <= wr_count3_data;
         else if (exec)
         begin
-            if (o_count3_clear)
+            if (o_count3_clear || o_count3_limit)     // a new limit starts a new count
                 count3 <= 8'h0;
             else if (o_count3_inc)
                 count3 <= count3 + 8'd1;
@@ -284,7 +298,16 @@ module prism_datapath
         else if (wr_limit3)
             limit3 <= wr_limit3_data;
         else if (exec && o_count3_limit)
-            limit3 <= comm;
+            limit3 <= shift_n1[1] ? limit_k :                       // OUT_K_SEL1 with the load: a constant (K2 / K3)
+                      comm & ~(shift_n1[0] ? mask3 : 8'h0);         // OUT_K_SEL0: keep only the unmasked comm bits
+    end
+
+    always @(posedge clk or negedge rst_n)
+    begin
+        if (!rst_n)
+            mask3 <= 8'h0;
+        else if (wr_mask3)
+            mask3 <= wr_mask3_data;
     end
 
     // ----------------------------------------------------------------- flags

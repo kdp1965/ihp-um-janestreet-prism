@@ -49,7 +49,7 @@ features take 16 and up.
 | bit | name | source |
 |---|---|---|
 | 0-6 | pin_in[6:0] | ui_in[6:0] via the per-shard raw / 1-flop / 2-flop select (item 13) |
-| 7 | shift_data | serial-out bit of the selected shifter |
+| 7 | shift_data | serial-out bit of the selected shifter (a stuffing transmitter: the bit on the pin, 4b.2) |
 | 8-9 | host_in[1:0] | host handshake bits |
 | 10 | count1_term | count1 == 0 counting down; count1 == preload (or natural roll-over) counting up (item 3) |
 | 11 | count2_cmp | count2 >= count2_compare |
@@ -64,7 +64,7 @@ features take 16 and up.
 | 24 | sema_in | sticky semaphore set by the other shard's OUT_SEMA_SET, cleared by this shard's OUT_SEMA_CLEAR (same-cycle winner = CFG0[24]); implemented Phase 2 |
 | 25 | other_shard_halt | the other shard is halted (debugger); implemented Phase 2 |
 | 26-27 | FIFO B flag slots E / F | shard 0 unfractured: two of shard 1's FIFO flags, selects CFG1[29:28] / [31:30]; 0 otherwise |
-| 28-31 | slots | input slots (4h): CFG2[31:16], same menu; defaults: 28 the timer 2 tick (4l), 29 count3 >= its limit (4b.1), 30-31 0 |
+| 28-31 | slots | input slots (4h): CFG2[31:16], same menu; defaults: 28 the timer 2 tick (4l), 29 count3 >= its limit (4b.1), 30 stuff unit: a stuff bit was dropped (receive) / a comm load is held (transmit), 31 a stuff bit is due (transmit), 4b.2 |
 
 Note on the trees: tree 0 reads muxes 0-2, tree 1 reads 3-5, cond 0 reads
 muxes 1 and 4, cond 1 reads 3 and 5 (RTL wiring, matched by the cfg).
@@ -193,14 +193,14 @@ registers only:
 | +0x30 | CRC expected; counter mode: the compare value |
 | +0x34 | CFG2: input slot selects for inputs 16-19 and 28-31 (4 bits each), section 4h |
 | +0x38 | CONST: K0..K3 (K3 also the comm match value), section 4h |
-| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p; [11] 32-bit FIFO access through FIFO32 (+0x54), section 4b; [10] counter mode: the CRC register is a 32-bit up / down counter with compare, section 4b |
+| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p; [11] 32-bit FIFO access through FIFO32 (+0x54), section 4b; [13:12] sampler timer preset k (count1 <= PRELOAD >> k), [14] bit-stuff unit, [15] its transmit mode, section 4b.2; [10] counter mode: the CRC register is a 32-bit up / down counter with compare, section 4b |
 | +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
 | +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
 | +0x50 | COMM_PINS: multi-bit shift lanes, section 4r: [2:0] window base b (comm[b+3:b], b = 0-4), [2k+5:2k+4] the window lane uo_out[k+1] shows when its pinmux code is 6 and CFG0[2] is set |
 | +0x4C | CONST_TAB: the 16x8 latch FIFO as addressable constants, section 4n: [0] enable (OUT_COMM_LOAD loads the row at the 4-bit index; {OUT_K_SEL1, OUT_K_SEL0} = how the index moves on each load: 0 clear, 1 + 1, 2 + add_to_idx [10:8], 3 = idx_load [7:4], or + idx_load with [1]), [2] post (the row before the move; default after), [19:16] the index (a write sets it, reads back live) |
 | +0x48 | TRACE_CTRL: write [0] arm (flushes the SRAM FIFO), [1] stop; read [0] armed, [1] running, [2] done, [3] big, [4] active.  Entry (16 bits) = [4:0] SI, [10:5] LUT mux inputs, [11] tree 0 matched, [12] tree 1 taken, [13] executing; the traced SRAM's FIFO then serves the entries as bytes through +0x20 of the window that reads that SRAM (count = FIFO bytes / 2) |
 | +0x54 | FIFO32: 32-bit FIFO access with CFG3[11], section 4b: TX a word write pushes its four bytes low byte first; RX a read takes the assembled word |
-| +0x58 | COUNT3: [7:0] count3, [15:8] its limit (byte lanes 0-1 writable; a disable clears the count, not the limit), section 4b.1 |
+| +0x58 | COUNT3: [7:0] count3, [15:8] its limit, [23:16] mask (byte lanes 0-2 writable; a disable clears the count, not the limit or the mask), section 4b.1 |
 | +0x5C-0x7C | spare |
 
 The SDK (`prism.h`, item 11) then needs only a base per shard and the
@@ -345,7 +345,11 @@ up only, with an 8-bit limit.  Its command is {pin_out[3], output 11}
 count3 >= limit is input 29's slot default (CFG2 code 0) and FLAGS[12].
 Counting up is what makes the load useful: clear, take a length from the
 data into the limit, count, and the flag rises after exactly that many
-steps (at once for a length of 0).  Uses: length-prefixed messages (SMBus
+steps (at once for a length of 0).  A masked load (OUT_K_SEL0 in the same
+clock as the limit command) takes comm & ~mask, COUNT3[23:16], for a
+length field narrower than the byte: the CAN DLC in {ID0, RTR, IDE, r0,
+DLC}.  Plain loads ignore the mask, so constants loaded through comm
+keep their value.  Uses: length-prefixed messages (SMBus
 block reads, Modbus byte counts, USB descriptors, BLE AD elements),
 host-described transfer lengths (9-bit SPI, JTAG scans), durations from
 a FIFO.  COUNT3 (+0x58) = {limit, count3}, byte lanes 0 and 1 writable;
@@ -361,8 +365,91 @@ and decodes their low three bits (count2 + 1 / - 1 / clear, count3 + 1 /
 clear / limit, a 201-clock decrement window, an interrupt);
 `test_count3` checks the commands, the limit from the data (the flag on
 exactly the fifth step of a length of 5), the register, CFG0[12] off, a
-sampler step inside the decrement window (net 0 per edge) and shard 1's
-own count3.
+sampler step inside the decrement window (net 0 per edge), the mask
+(read-back, a plain load ignoring it) and shard 1's own count3.
+
+### 4b.2 Bit clock, bit-stuff unit and limit loads (2026-09-28)
+
+Three datapath additions, all off by default, made for CAN and useful
+beyond it (they took the CAN receiver from 26 states to 12):
+
+- **A periodic bit clock with an edge phase preset.**  With CFG0 count-up
+  and wrap-at-preload, count1's terminal count is a periodic tick every
+  PRELOAD + 1 clocks that the FSM never reloads.  CFG3[13:12] = k (1-3)
+  makes the sampler's timer action preset count1 to PRELOAD >> k instead
+  of loading it, so an edge on the sampled input puts the next tick
+  1 - 2^-k of a bit later (k = 2: the CAN sample point at 75 %).  One wait
+  state per bit, and an edge that comes early simply moves the tick.
+- **A bit-stuff unit** (CFG3[14]): count2 becomes a hardware run counter of
+  the bits the shifter moves (run length - 1 against COMPARE).  Receive: an
+  OUT_SHIFT whose bit differs from the previous one after a full run is the
+  stuff bit: that clock's shift, CRC update and count3 step are cancelled,
+  and input 30 says "dropped" until the next shift so the FSM can skip its
+  byte push.  Transmit (CFG3[15]): a byte boundary's FIFO pop, CRC load or
+  comm load counts as a move too; when the bit just sent completes a run
+  the unit holds the shifter for one bit time and the pin (pinmux code 6)
+  shows the complement; input 31 says a stuff bit is due at the next move
+  (the FSM then just shifts and does no byte bookkeeping), input 30 says
+  the unit is holding a comm load (the FSM redoes it at the next tick), and
+  input 7 is the bit actually on the pin.  OUT_CRC_CLEAR restarts the run
+  (recessive before an SOF) and vetoes an event in its own clock.
+- **Limit loads**: the count3 limit command with OUT_K_SEL1 takes K2 / K3
+  directly (no staging through comm), with OUT_K_SEL0 the masked comm load
+  (section 4b.1), and every limit load also clears count3.
+
+### 4b.3 CAN 2.0A node: receiver and transmitter chromas (2026-09-28)
+
+`chromas/chroma_can_rx.v` (12 states) and `chromas/chroma_can_tx.v` (13)
+make a CAN 2.0A node when run fractured: the receiver in shard 0 with its
+ACK drive on uo_out[1] = pin_out[0] ("drive dominant"), the transmitter in
+shard 1 with TXD on uo_out[2] = the shifter's bit (1 = recessive), the bus
+on ui_in[3] (not ui_in[0]: the compiler parks unused muxes on input 0, and
+a spare mux on the RXD input recaptures in_prev0 on every jump).  A board
+ANDs the two TXDs into the transceiver.
+
+Receiver: the bit clock of 4b.2 (PRELOAD = bit - 1, sampler on input 3,
+falling edge, preset k = 2), the stuff unit in receive mode (COMPARE = 4),
+CRC-15 (0x4599) in the CRC unit's 16-bit mode as polynomial 0x8B32 with
+init 0 and expected 0 after the 15 CRC bits.  count3 counts header bits
+(K3 = 19 = SOF + 18), data bytes (the DLC from a masked load of comm,
+mask 0xF0) and CRC bits (K2 = 15); the phase is in the latched flags.
+The RX FIFO gets {SOF, ID[10:4]}, {ID[3:0], RTR, IDE, r0, DLC3}, {ID0, RTR,
+IDE, r0, DLC} and the data bytes.  A good CRC is acknowledged: dominant
+from the delimiter's tick for 1.25 bit times (timer 2, PRELOAD2 = 78,
+restart on entry into the ACK state, one-shot; the test finds that state's
+index from the compiled table); then 8 tail shifts and the interrupt, with
+the CRC register (0 = good) readable until the next SOF.
+
+Transmitter: the host packs the frame as a bit stream into the TX FIFO
+({SOF, ID[10:4]}, {ID[3:0], RTR, IDE, r0, DLC3}, {DLC[2:0], data ...}, the
+last byte padded), writes LIMIT3 = 19 + 8 * DLC - 1, has COMM = 0xFF from
+the start (the pin follows comm) and toggles host_in[0].  The bit clock is
+cleared at the start and never resynchronised; at every tick TXW compares
+the bus with the bit on the pin (recessive sent, dominant seen = lost
+arbitration or a bit error: the bus is released, F1 set, the rest of the
+frame stays in the FIFO for the host to flush) and TXA moves the shifter:
+a stuff bit if due, a byte boundary or field end (the next byte, the CRC's
+two bytes through OUT_LOAD_CRC with K2 = 14 counting its bits, the
+delimiter), or a plain bit.  The ACK slot is sampled into F0, then K3 = 11
+recessive ticks (ACK delimiter, EOF, IFS) and the interrupt.
+
+Tests (`can_model.py`: CRC-15, stuffing, a wired-AND bus driven one clock
+at a time, 64 clocks per bit, and CanNode: the remote node that syncs to
+the SOF, samples at 75 %, destuffs, decodes and acknowledges, or jams a
+bit): `test_can_rx` (frames of 3 bytes, ID 0 with eight zero bytes, no
+data, a bad CRC = no ACK, 0xFF / 0x00 patterns, two back to back at the
+minimum interframe space), `test_can_tx` (the same frames sent, one not
+acknowledged, one lost to a jammed ID bit and the next one fine) and
+`test_can_loop` (three frames from shard 1 to shard 0 over the bus, the
+ACK from shard 0 seen by shard 1).
+
+Not done: extended and remote frames, a DLC above 8, error frames and
+counters, retransmission and bus-idle detection before a start (the host
+starts it), late-edge resynchronisation.  Lessons: the compiler parks
+spare muxes on input 0; conditional outputs are per state (a `cond_out`
+set inside a branch is not what you get); a receiver's run counter must
+restart at the SOF, and a transmitter's at its start, or the previous
+frame's tail makes the SOF look like a stuff bit.
 
 ## 4y. RX DMA into PSRAM B (2026-09-23)
 
