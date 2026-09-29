@@ -2,9 +2,8 @@
 // PRISM CAN 2.0A receiver Chroma (v2, 2026-09-28: 12 states)
 //
 // Receives standard (11-bit ID) data frames and acknowledges the good
-// ones.  RXD (1 = recessive, 0 = dominant) is ui_in[3] (not ui_in[0]: the
-// compiler parks unused muxes on input 0, and a spare mux on the RXD input
-// would recapture in_prev0 on every jump); TXD is uo_out[1] = pin_out[0]
+// ones.  RXD (1 = recessive, 0 = dominant) is ui_in[3]; TXD is uo_out[1] =
+// pin_out[0]
 // meaning "drive dominant" (1 only in the ACK slot; the board inverts it
 // for a transceiver's TXD and ANDs it with a transmitter's).
 //

@@ -528,3 +528,31 @@ class OneWireSlave(Model):
                         for b in self.responses[shreg]:
                             self.tx_bits += [(b >> i) & 1 for i in range(8)]
                     shreg, nbits = 0, 0
+
+
+class UartTx(Model):
+    ''' 8N1 transmitter on ui_in[pin] (idle high) at a bit period that may be
+        fractional (a baud-rate error): send() drives start, 8 data bits LSB
+        first and a stop bit per byte, bad_stop drives the stop bit low '''
+
+    def __init__(self, dut, pin=0, period=64.0):
+        super().__init__(dut)
+        self.pin = pin
+        self.period = period
+        self.dut.ui_in[pin].value = 1
+
+    async def run(self):
+        pass
+
+    async def send(self, data, gap=0, bad_stop=False):
+        acc = 0.0
+        for byte in data:
+            bits = [0] + [(byte >> k) & 1 for k in range(8)] + [0 if bad_stop else 1]
+            for b in bits:
+                self.dut.ui_in[self.pin].value = b
+                acc += self.period
+                n = int(acc)
+                acc -= n
+                await self.clocks(n)
+            self.dut.ui_in[self.pin].value = 1
+            await self.clocks(gap)

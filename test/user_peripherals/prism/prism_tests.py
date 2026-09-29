@@ -8,7 +8,7 @@ from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge
 
 from user_peripherals.prism.regs import *
 from user_peripherals.prism.bench import PrismTest
-from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, Ws2812Slave, I2cSlave, I2cMaster, QspiSlave, OneWireSlave
+from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, UartTx, Ws2812Slave, I2cSlave, I2cMaster, QspiSlave, OneWireSlave
 from user_peripherals.prism.encoder import Encoder
 from user_peripherals.prism import usb_model as usb
 from user_peripherals.prism import eth_model as eth
@@ -32,6 +32,7 @@ from user_peripherals.prism.chroma_counter import *
 from user_peripherals.prism.chroma_count3 import *
 from user_peripherals.prism.chroma_can_rx import *
 from user_peripherals.prism.chroma_can_tx import *
+from user_peripherals.prism.chroma_uart_rx import *
 from user_peripherals.prism import can_model as can
 
 
@@ -2017,6 +2018,102 @@ class CanLoopTest(PrismTest):
         await send(0x7FF, [])
         await bench.disable()
         dut.ui_in[3].value = 0
+
+
+class UartRxTest(PrismTest):
+    ''' 8N1 receiver on ui_in[0] (chroma_uart_rx): the bit clock of 4b.2
+        re-centred by the sampler on every falling edge, bytes into the RX
+        FIFO with an interrupt each, a CRC-8 over the data bits.  Bytes at
+        the nominal rate, 5 % fast and 5 % slow, back to back, a framing
+        error (dropped), and the CRC against regs.crc_bits. '''
+    name = "UART receiver chroma (chroma_uart_rx)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        uart = UartTx(dut, pin=0, period=64.0)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await tqv.write_word_reg(REG_CFG2, 15 << 4)                     # input 17 = the sampler's pending flag
+        await tqv.write_word_reg(REG_CFG3, CFG3_SMP_EN | CFG3_SMP_SRC(0) | CFG3_SMP_FALL | CFG3_SMP_TIMER |
+                                           CFG3_SMP_PRESET(1))
+        await tqv.write_word_reg(REG_CONST, 0)
+        await tqv.write_word_reg(REG_PRELOAD, 63)                       # 64-clock bits
+        await tqv.write_word_reg(REG_CRC_POLY, 0x07)
+        await bench.load_chroma(chroma_uart_rx, chroma_uart_rx_ctrlReg, chroma_uart_rx_pinmuxReg)
+        await self.clocks(100)
+
+        async def receive(data, period=64.0, gap=0, bad_stop=False):
+            uart.period = period
+            await tqv.write_word_reg(REG_CRC, 0)
+            await uart.send(data, gap=gap, bad_stop=bad_stop)
+            await self.clocks(100)
+            st = await tqv.read_word_reg(REG_FIFO_ST)
+            got = [await tqv.read_byte_reg(REG_FIFO) for _ in range(fifo_count(st))]
+            return got
+
+        self.log("bytes at the nominal rate, with an interrupt per byte")
+        got = await receive([0x55, 0xA3, 0x00, 0xFF])
+        assert got == [0x55, 0xA3, 0x00, 0xFF], f"got {[hex(b) for b in got]}"
+        assert await bench.irq()
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        self.log("5 % fast and 5 % slow bit rates, back to back")
+        assert await receive([0x12, 0x34, 0x56], period=60.8) == [0x12, 0x34, 0x56]
+        assert await receive([0x9A, 0xBC, 0xDE], period=67.2) == [0x9A, 0xBC, 0xDE]
+        self.log("a framing error drops the byte; the next one is fine")
+        assert await receive([0x77], bad_stop=True) == []
+        assert await receive([0x88], gap=64) == [0x88]
+        self.log("the CRC-8 over the data bits, as chroma_uart_tx computes it")
+        msg = [0x31, 0x32, 0x33, 0x34]
+        assert await receive(msg) == msg
+        bits = [(b >> k) & 1 for b in msg for k in range(8)]
+        assert await tqv.read_word_reg(REG_CRC) == crc_bits(bits, 0x07, 8)
+        await tqv.write_word_reg(REG_CFG3, 0)
+        await bench.disable()
+
+
+class UartLoopTest(PrismTest):
+    ''' chroma_uart_tx in shard 0 (uo_out[1]) to chroma_uart_rx in shard 1
+        (ui_in[0], mirrored from uo_out[1] by the bench), fractured: a
+        message and its CRC-8 trailer arrive in shard 1's FIFO, and shard
+        1's CRC over the message equals the trailer. '''
+    name = "UART loopback: transmitter (shard 0) to receiver (shard 1)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        dut.ui_in[0].value = 1
+        for base in (0, SHARD1):
+            await tqv.write_word_reg(REG_FIFO_ST + base, 0)
+            await tqv.write_word_reg(REG_CRC_POLY + base, 0x07)
+            await tqv.write_word_reg(REG_CRC + base, 0)
+        await tqv.write_word_reg(REG_HOST, 0)
+        await tqv.write_word_reg(REG_PRELOAD, 62)                       # tx: 64-clock bits (period - 2)
+        await tqv.write_word_reg(REG_PRELOAD + SHARD1, 63)              # rx: bit period - 1
+        await tqv.write_word_reg(REG_CFG2 + SHARD1, 15 << 4)
+        await tqv.write_word_reg(REG_CFG3 + SHARD1, CFG3_SMP_EN | CFG3_SMP_SRC(0) | CFG3_SMP_FALL | CFG3_SMP_TIMER |
+                                                    CFG3_SMP_PRESET(1))
+        await tqv.write_word_reg(REG_CONST + SHARD1, 0)
+        await bench.load_fractured(chroma_uart_tx, chroma_uart_tx_ctrlReg, chroma_uart_tx_pinmuxReg,
+                                   chroma_uart_rx, chroma_uart_rx_ctrlReg, chroma_uart_rx_pinmuxReg)
+
+        async def mirror(clocks):
+            for _ in range(clocks):
+                dut.ui_in[0].value = (int(dut.uo_out.value) >> 1) & 1
+                await RisingEdge(dut.clk)
+        wire = cocotb.start_soon(mirror(64 * 10 * 8 + 2000))
+        msg = [0x48, 0x65, 0x6C, 0x6C, 0x6F]                            # "Hello"
+        for b in msg:
+            await tqv.write_byte_reg(REG_FIFO, b)
+        await tqv.write_word_reg(REG_HOST, 1)                           # send, then the CRC trailer
+        await wire
+        assert await bench.irq(IRQ0_MASK), "transmitter done interrupt"
+        bits = [(b >> k) & 1 for b in msg for k in range(8)]
+        trailer = crc_bits(bits, 0x07, 8)
+        st = await tqv.read_word_reg(REG_FIFO_ST + SHARD1)
+        got = [await tqv.read_byte_reg(REG_FIFO + SHARD1) for _ in range(fifo_count(st))]
+        assert got == msg + [trailer], f"received {[hex(b) for b in got]}, expected {[hex(b) for b in msg + [trailer]]}"
+        await tqv.write_word_reg(REG_HOST, 0)
+        await tqv.write_word_reg(REG_CFG3 + SHARD1, 0)
+        await bench.disable()
+        dut.ui_in[0].value = 0
 
 
 class Timer2Test(PrismTest):

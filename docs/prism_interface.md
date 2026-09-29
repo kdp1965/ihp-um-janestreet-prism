@@ -403,8 +403,10 @@ beyond it (they took the CAN receiver from 26 states to 12):
 make a CAN 2.0A node when run fractured: the receiver in shard 0 with its
 ACK drive on uo_out[1] = pin_out[0] ("drive dominant"), the transmitter in
 shard 1 with TXD on uo_out[2] = the shifter's bit (1 = recessive), the bus
-on ui_in[3] (not ui_in[0]: the compiler parks unused muxes on input 0, and
-a spare mux on the RXD input recaptures in_prev0 on every jump).  A board
+on ui_in[3].  (Until 2026-09-28 the compiler parked unused muxes on input
+0, and a spare mux on an RXD pin at input 0 recaptured in_prev0 on every
+jump; `muxes: { ..., unused: 31 }` in tinyqv32.cfg now parks them on
+input 31, which is never an in_prev source.)  A board
 ANDs the two TXDs into the transceiver.
 
 Receiver: the bit clock of 4b.2 (PRELOAD = bit - 1, sampler on input 3,
@@ -445,11 +447,30 @@ ACK from shard 0 seen by shard 1).
 
 Not done: extended and remote frames, a DLC above 8, error frames and
 counters, retransmission and bus-idle detection before a start (the host
-starts it), late-edge resynchronisation.  Lessons: the compiler parks
-spare muxes on input 0; conditional outputs are per state (a `cond_out`
+starts it), late-edge resynchronisation.  Lessons: spare muxes must not
+select an in_prev source (fixed in the compiler, see above); conditional
+outputs are per state (a `cond_out`
 set inside a branch is not what you get); a receiver's run counter must
 restart at the SOF, and a transmitter's at its start, or the previous
 frame's tail makes the SOF look like a stuff bit.
+
+### 4b.4 UART receiver chroma (2026-09-28)
+
+`chromas/chroma_uart_rx.v` (5 states) is the mirror of `chroma_uart_tx`
+and the simplest user of the bit clock of 4b.2: PRELOAD = bit period - 1,
+the sampler on ui_in[0] (falling edge, timer action, preset k = 1), so
+every start bit and every 1 -> 0 data edge re-centres the tick on the
+middle of the bit; the FSM never touches count1.  IDLE waits for the
+sampler's pending flag, START checks the start bit at its middle (comm <=
+K0 = 0 restarts the shift count, OUT_LATCH consumes the flag), DATA / DCHK
+shift eight bits LSB first with the CRC-8 (0x07) over them, STOP pushes
+the byte into the RX FIFO with an interrupt, or drops it on a framing
+error.  The CRC register accumulates in wire order, as the transmitter
+computes its trailer; the host clears it between messages.  Tests:
+`test_uart_rx` (nominal, 5 % fast and 5 % slow rates, back-to-back bytes, a
+framing error, the CRC against `crc_bits`) and `test_uart_loop`
+(chroma_uart_tx in shard 0 to chroma_uart_rx in shard 1, "Hello" plus the
+trailer received, the trailer equal to the receiver's CRC).
 
 ## 4y. RX DMA into PSRAM B (2026-09-23)
 
