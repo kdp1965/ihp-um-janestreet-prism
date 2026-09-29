@@ -58,7 +58,8 @@
 //                     shifter holds for one bit time and the pin (pinmux code 6) shows the complement of the
 //                     last bit (input 31 = holding)
 //                     Edge-clocked sampler: [16] enable, [21:17] the PRISM input whose edge clocks it,
-//                     [23:22] 0 rising / 1 falling / 2 either, and the actions on each edge with no state
+//                     [23:22] 0 rising / 1 falling / 2 either / 3 either edge of that input xor the next
+//                     one (of inputs 0-7: a Data-Strobe pair), and the actions on each edge with no state
 //                     transition: [24] shift, [25] count2 + 1, [26] capture the in_prev flops, [27] count1
 //                     clear / load; [28] flag2 inverts the edge (rising <-> falling) so one FSM flag
 //                     switches a bidirectional protocol's sampling edge; its sticky "edge pending" is
@@ -345,7 +346,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     localparam       CFG3_STUFF_TX  = 15;   //       [15] stuff unit inserts (transmit) instead of dropping (receive)
     localparam       CFG3_SMP_EN    = 16;   // edge-clocked sampler: [16] enable
     localparam       CFG3_SMP_SRC   = 17;   //       [21:17] clock input (PRISM input 0-31)
-    localparam       CFG3_SMP_EDGE  = 22;   //       [23:22] 0 rising, 1 falling, 2 either
+    localparam       CFG3_SMP_EDGE  = 22;   //       [23:22] 0 rising, 1 falling, 2 either, 3 either edge of input xor the next (Data-Strobe)
     localparam       CFG3_SMP_SHIFT = 24;   //       [24] shift on the edge
     localparam       CFG3_SMP_CNT2  = 25;   //       [25] count2 + 1 on the edge
     localparam       CFG3_SMP_LATCH = 26;   //       [26] capture the in_prev flops on the edge
@@ -667,9 +668,14 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             // Edge-clocked sampler (CFG3[27:16]): hardware actions on the
             // selected edge of one PRISM input, with no state transition
             wire                      smp_en   = cfg3[CFG3_SMP_EN];
-            wire                      smp_src  = in_s[cfg3[CFG3_SMP_SRC +: 5]];
             wire  [1:0]               smp_cfg  = cfg3[CFG3_SMP_EDGE +: 2];
-            wire  [1:0]               smp_pol  = (smp_cfg == 2'd2) ? 2'd2 :           // either edge, or the
+            // Edge code 3: the clock is the selected input xor its neighbour
+            // (the next of inputs 0-7), either edge: the bit clock of a
+            // Data-Strobe pair (SpaceWire) with D and S on adjacent pins
+            wire                      smp_ds   = (smp_cfg == 2'd3);
+            wire  [2:0]               smp_nb   = cfg3[CFG3_SMP_SRC +: 3] + 3'd1;
+            wire                      smp_src  = in_s[cfg3[CFG3_SMP_SRC +: 5]] ^ (smp_ds & in_s[{2'b00, smp_nb}]);
+            wire  [1:0]               smp_pol  = smp_cfg[1] ? 2'd2 :                  // either edge, or the
                                                  {1'b0, smp_cfg[0] ^ (cfg3[CFG3_SMP_INV] & flag2)};   // flag-swapped one
             reg                       smp_prev;
             reg                       smp_pending;               // sticky: an edge the FSM has not consumed

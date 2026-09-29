@@ -20,7 +20,7 @@ from user_peripherals.prism.prism_tests import (
     RegisterTest, StewIntegrityTest, EncoderTest, Ws2812Test, Gpio24Test,
     SpiSlaveTest, UartTxTest, FifoLoopTest, SramFifoTest, EdgeTest, UsbDeviceTest, EthernetTxTest, EthernetRxTest, EthernetLoopTest, FracturedTest,
     TraceTest, Timer2Test, ConstTableTest, I2cMasterTest, SamplerTest, I2cSlaveTest, PioTest, SpiMasterTest,
-    OneWireTest, Fifo32Test, CounterTest, Count3Test, CanRxTest, CanTxTest, CanLoopTest, UartRxTest, UartLoopTest, JtagMasterTest)
+    OneWireTest, Fifo32Test, CounterTest, Count3Test, CanRxTest, CanTxTest, CanLoopTest, UartRxTest, UartLoopTest, JtagMasterTest, SpwTxTest, SpwTxFracturedTest, SpwRxTest, SpwLoopTest)
 
 
 async def run(dut, test_class):
@@ -160,3 +160,19 @@ async def test_onewire(dut):
 @cocotb.test()
 async def test_jtag_master(dut):
     await run(dut, JtagMasterTest)
+
+@cocotb.test()
+async def test_spw_tx(dut):
+    await run(dut, SpwTxTest)
+
+@cocotb.test()
+async def test_spw_tx_fractured(dut):
+    await run(dut, SpwTxFracturedTest)
+
+@cocotb.test()
+async def test_spw_rx(dut):
+    await run(dut, SpwRxTest)
+
+@cocotb.test()
+async def test_spw_loop(dut):
+    await run(dut, SpwLoopTest)

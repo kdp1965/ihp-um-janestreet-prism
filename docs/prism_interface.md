@@ -193,7 +193,7 @@ registers only:
 | +0x30 | CRC expected; counter mode: the compare value |
 | +0x34 | CFG2: input slot selects for inputs 16-19 and 28-31 (4 bits each), section 4h |
 | +0x38 | CONST: K0..K3 (K3 also the comm match value), section 4h |
-| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either, actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p; [11] 32-bit FIFO access through FIFO32 (+0x54), section 4b; [13:12] sampler timer preset k (count1 <= PRELOAD >> k), [14] bit-stuff unit, [15] its transmit mode, section 4b.2; [10] counter mode: the CRC register is a 32-bit up / down counter with compare, section 4b |
+| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either / 3 either edge of that input xor the next of inputs 0-7 (a Data-Strobe pair, 4b.7), actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p; [11] 32-bit FIFO access through FIFO32 (+0x54), section 4b; [13:12] sampler timer preset k (count1 <= PRELOAD >> k), [14] bit-stuff unit, [15] its transmit mode, section 4b.2; [10] counter mode: the CRC register is a 32-bit up / down counter with compare, section 4b |
 | +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
 | +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
 | +0x50 | COMM_PINS: multi-bit shift lanes, section 4r: [2:0] window base b (comm[b+3:b], b = 0-4), [2k+5:2k+4] the window lane uo_out[k+1] shows when its pinmux code is 6 and CFG0[2] is set |
@@ -529,6 +529,165 @@ in three chained operations, the early end; the model also checks that
 TMS and TDI were stable the clock before every TCK rising edge.
 JTAG_HALF / JTAG_SYNC in the environment choose the half period and the
 synchroniser for the run.
+
+### 4b.6 SpaceWire transmitter chroma (2026-09-29)
+
+`chromas/chroma_spw_tx.v` (13 states: it fits one shard of the fractured
+PRISM) is the transmit half of a SpaceWire link (ECSS-E-ST-50-12C): D on
+uo_out[1] (cond_out[0]), S on uo_out[2] (cond_out[1]).  No RTL change.
+
+**Bits.**  count1 is the periodic bit clock of 4b.2 (count up, wrap at
+PRELOAD = bit period - 1) and every bit lasts exactly one period: 6 clocks
+is 10 Mb/s at 60 MHz, the rate a link starts at (10.7 at 64 MHz, inside
+the standard's 10 %).  The minimum is 5 clocks: the next character is
+chosen inside the last bit of the current one (DO, S1, S3, S4, then the
+wait for the tick).  Data-Strobe is S = D xor C with C toggling per bit;
+every character has an even number of bits, so C belongs to the state
+(S = !D on a character's even bits, S = D on its odd ones).  The pins
+are registered: D and S leave on the same clock edge, never both moving.
+
+**Characters** come from the 8-bit shifter, LSB first:
+
+| character | bits on the wire | source |
+|---|---|---|
+| FCT | P 1 0 0 | K3 = 0x03 |
+| ESC | P 1 1 1 | K1 = 0x1F (bit 4 is a mark, not sent) |
+| EOP / EEP | P 1 0 1 / P 1 1 0 | K2 = 0x0B / 0x07 |
+| data | P 0 d0 .. d7 | K0 = 0x00, then the byte popped from the FIFO |
+| NULL | ESC, FCT | C2 reads the mark as comm[2] and goes straight to the FCT |
+
+**Parity** is the CRC unit: CRC-8, not reflected, polynomial 0x80 (x^8 +
+x^7), whose register can only be 0x00 or 0x80, the parity of the bits fed.
+It is cleared after the parity bit and fed every bit after the flag, so
+crc_ok (CRC_EXPECTED = 0) says "the last character's bits were even" and
+P = crc_ok xor flag.  Bit 0 of each constant holds a copy of the flag, so
+the one LUT `crc_ok xor shift_data` makes P for every character.
+
+**What goes next**, decided per character: the FCT of a NULL; an FCT the
+host asked for (a toggle of host_in[1]); with credit, a byte from the
+FIFO; with credit and the FIFO empty, EOP on a toggle of host_in[0] (host
+interrupt); otherwise a NULL.  A request is a toggle, taken between two
+characters: a second toggle before the first was taken cancels it (wait
+two characters).
+
+**Flow control.**  count2 holds the FCTs received and not used up (credit
+= count2 >= COMPARE = 1), count3 the characters sent on the current one
+(LIMIT3 = 7: the eighth takes the FCT).  Fractured, the receiving shard
+sets the semaphore for every FCT it decodes and the sampler counts the
+semaphore's rising edges into count2 (CFG3 = SMP_EN | SMP_SRC(24) |
+SMP_RISE | SMP_CNT2) while the FSM clears the semaphore in every clock
+(sema_set_wins, so a set shows for one clock): semaphores two clocks apart
+are all counted and a decrement in the same clock cancels against the
+increment.  The transmitter never sets the semaphore the other way.
+
+Host setup: PRELOAD = 5, CONST = 0x030B1F00, CRC_POLY = 0x80, CRC_EXPECTED
+= 0, COMPARE = 1, LIMIT3 = 7, CFG1 = 8 | 9 << 4, CFG2 = 7 << 8 (input 18 =
+comm[2]), CFG3 as above.
+
+Tests: `test_spw_tx` (unfractured, the host writes the credit) and
+`test_spw_tx_fractured` (the transmitter on shard 1, `chroma_spw_fct_stub`
+on shard 0 sending bursts of semaphores) with the decoder of
+`spw_model.py`, which takes the bits from the edges of D xor S and checks
+that D and S never move together, every bit period, every parity and the
+character sequence: the NULL of the standard first, FCTs on request, data
+held without credit, the credit running out after eight characters, EOP
+with the interrupt, EEP, a burst of seven FCTs, a 40-byte packet.  Both
+pass at 5, 6 and 30 clocks per bit (SPW_BIT); 4 fails as it must.
+
+What this changes in the first assessment: parity and the counting of
+FCTs need no RTL.  The receiver is 4b.7.  The bit order of the control
+characters is my reading of the standard's figure, shared by the chromas
+and the models: check it against the document.
+
+### 4b.7 SpaceWire receiver chroma, and the sampler's Data-Strobe clock (2026-09-29)
+
+**RTL** (prism_periph.v, the only change): the sampler's edge code 3,
+unused until now, makes its clock the selected input xor the next one
+(of inputs 0-7) and takes either edge: the bit clock of a Data-Strobe
+pair with D and S on adjacent pins.  One 8:1 mux and an xor per shard.
+Lint unchanged (94 kinds); all 37 unit tests pass.
+
+`chromas/chroma_spw_rx.v` (15 states, one shard): D on ui_in[1], S on
+ui_in[2].
+
+**Bits.**  CFG3 = SMP_EN | SMP_SRC(1) | edge code 3 | SMP_TIMER | SMP_CNT2:
+every bit sets "edge pending" (input slot code 15), reloads count1 and
+adds one to count2.  The FSM's wait states have two legs, the bit
+(shift D in, feed the parity, which clears the flag) and the time-out:
+count1 counts down from PRELOAD and stops at 0, so its terminal count is
+"no bit for PRELOAD + 1 clocks", the disconnect of the standard (850 ns:
+PRELOAD = 50 at 60 MHz).  What a bit means is decided in one-clock states
+after it.  count2 counts the bits of a data character (COMPARE = 8).
+
+**Characters.**  After the parity bit and the flag, CHK checks the parity
+(the CRC unit as in 4b.6, fed every bit, odd at this point with
+CRC_EXPECTED = 0x80, then cleared) and looks at the flag (comm[7], a CFG2
+slot): a data character's eight bits go to the FIFO; a control
+character's two bits (comm[6], comm[7]) are decoded:
+
+| character | action |
+|---|---|
+| FCT | OUT_SEMA_SET: the transmitting shard's sampler counts it as credit (4b.6) |
+| ESC | the flag "after an ESC" (latched_in[1], FLAG_LATCH); the FCT that follows completes a NULL and sets no semaphore |
+| EOP / EEP | a mark in the FIFO and the host interrupt |
+
+**The FIFO stream.**  The FIFO is 8 bits wide and the end of a packet is
+a ninth value, so the stream is escaped with K3 (0xF0 in the tests): a
+data byte equal to K3 goes in twice; EOP is K3, 0x00; EEP is K3, 0x01.
+The host reads K3 and then one more byte to know which.  The latch FIFO
+shares one write bus (prism_fifo.v): two pushes of different values must
+be three clocks apart, or the first row takes the second value (the
+first version pushed the mark's two bytes in consecutive clocks and the
+FIFO held 0x00, 0x00).  Both bytes of every escape therefore go the same
+way: the first push, two clocks in MARK and MARK2, the second in PUSH2.
+
+**Errors**: wrong parity, anything but an FCT after an ESC, a data
+character after an ESC (time-codes are not taken), no bit for the
+time-out.  The leg that finds the error interrupts the host and the FSM
+stops in HALT, whose pin_out[2] marks the state in the debug status.
+The host restarts the link by disabling and enabling the PRISM, as the
+standard has both directions do after any error.  The first bit of a
+link has no time-out (count1 is held at 0 while the PRISM is disabled,
+so the host cannot give it a start value).
+
+Host setup: CFG2 = 15 | 12 << 4 | 11 << 8 | 13 << 12 (inputs 16-19: edge
+pending, comm[7], comm[6], comm == K3), CFG3 as above, CONST = 0xF0010000
+(K3 escape, K2 EEP code, K0 EOP code), CRC_POLY = 0x80, CRC_EXPECTED =
+0x80, PRELOAD = 50, COMPARE = 8.
+
+**Rates.**  The receiver passes from 4 to 30 clocks per bit (15 to 2
+Mb/s at 60 MHz), the transmitter from 5.
+
+Tests (spw_model.py gained an encoder with parity errors, time-codes,
+stop and restart): `test_spw_rx`, the receiver on shard 0 against the
+encoder with the transmitter chroma on shard 1 counting its semaphores:
+NULLs, FCTs as credit, packets with the escape value in their data,
+EEP, NULLs and an FCT inside a packet, back-to-back and empty packets,
+then each error with a restart after it (parity of a data character, of
+a control character, of a NULL; ESC then EOP; ESC then ESC; a time-code;
+the lines stopping), and a link that starts late.  `test_spw_loop`: the
+transmitter's D and S wired to the receiver's; the FCTs the host asks
+the transmitter for come back as its own credit, and with that credit
+three packets go round into the receiver's FIFO, the last one waiting
+until one more FCT has come round.
+
+Compiler notes.  (1) A state entered by INC goes back to where it came
+from when none of its legs matches (prism.v, loop_si), and the compiler
+turns an unconditional jump to the state itself into no leg at all: an
+error state reached by INC bounced between the two.  Here every error
+leg raises the interrupt itself and jumps to HALT.  (2) The default
+outputs of a state are what the INC transition carries: CHK's "else"
+(a data character) clears the parity and count2 that way, DCHK's pushes
+the first byte of a doubled escape, CDEC2's latches the EEP flag and
+loads K3.  (3) INC chains work (CHK to DCHK to MARK).  (4) Two trees
+of three inputs with a two-input conditional output do not map; the
+control decode is split so that no state needs that.
+
+Still open for a complete link: the link state machine (ErrorReset,
+Ready, Started, Connecting, Run with the 6.4 and 12.8 us timers) and
+"got NULL"; time-codes; the electrical side (LVDS).  The host has to
+restart both shards after an error, and the receiver's 15 states and the
+transmitter's 13 leave 1 and 3 of their 16 for that.
 
 ## 4y. RX DMA into PSRAM B (2026-09-23)
 
@@ -1568,7 +1727,8 @@ the completion interrupt / DONE / IDLE sequence, and the SCL period.
 
 The generalisation of the Manchester recoverer's trick: CFG3[27:16]
 names one PRISM input (any of the 32, [21:17]) and an edge polarity
-([23:22]: rising, falling, either), and on every such edge the shard's
+([23:22]: rising, falling, either; code 3, added 2026-09-29, is either
+edge of that input xor its neighbour, 4b.7), and on every such edge the shard's
 datapath performs the chosen actions with no state transition: shift
 the shifter with its configured input ([24]), count2 + 1 ([25]),
 capture all four in_prev flops ([26]), count1 clear / load ([27]).

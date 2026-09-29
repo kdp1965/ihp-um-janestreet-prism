@@ -99,6 +99,7 @@ def CFG3_SMP_SRC(n): return (n & 0x1f) << 17   # the PRISM input whose edge cloc
 CFG3_SMP_RISE  = 0 << 22
 CFG3_SMP_FALL  = 1 << 22
 CFG3_SMP_ANY   = 2 << 22
+CFG3_SMP_DS    = 3 << 22  # either edge of (the input xor the next of inputs 0-7): a Data-Strobe pair's bit clock
 CFG3_SMP_SHIFT = 1 << 24  # actions on the edge: shift the shifter
 CFG3_SMP_CNT2  = 1 << 25  #   count2 + 1
 CFG3_SMP_LATCH = 1 << 26  #   capture the in_prev flops
