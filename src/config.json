@@ -71,34 +71,37 @@
     "src/user_peripherals/cfgmem/cfgmem.v",
     "src/user_peripherals/cfgmem/cfgmem_left.v"
   ],
-  "//6x4": "6x4 (2026-09-28, Jane Street: 6x4 is the maximum tile): no SRAMs (PRISM_SRAM_FIFO=0, PRISM_NO_SRAM picks the plain LEFT16 for CFGMEMS_LEFT[1].cfgmem_lo), the two CFGMEM columns on the 44.96 um stripe grid x = -2.41 + 44.96 k: LEFT16 at k = 6 (267.35, pins at 607.67), IHP16 at k = 20 (896.79, 52 um to the right edge), a 289 um channel; density 60.  The first try (LEFT16 at k = 8, a 199 um channel) placed at congestion 1.49 with +49 % inflation.  pdngen's own grid check (step 23, PSM-0069) warns before the stripe step connects the CFGMEM rails (the 8x4 does not warn there): the IR-drop check at the end is the verdict.",
+  "//6x4": "6x4 (2026-09-28/29, Jane Street said 6x4 might be the maximum tile; Uri later: still being finalised, may stay 8x4): no SRAMs (PRISM_SRAM_FIFO=0, PRISM_NO_SRAM picks the plain LEFT16 for CFGMEMS_LEFT[1].cfgmem_lo), the two CFGMEM columns on the 44.96 um stripe grid x = -2.41 + 44.96 k: LEFT16 at k = 1 (42.55, the first grid position, pins at 382.87), IHP16 at k = 20 (896.79), a 514 um channel.  This is the l1 recipe, the best of 13 runs: Metal1 opened for routing with its own 0.5 derate and GRT_ADJUSTMENT 0.15 (LibreLane default 0.3) -> GPL 1.27 / +37 % inflation, GRT overflow 27542 (Metal2 93 %, Metal3 97 %), but detailed routing still had 70000 violations at 30 % of pass 0.  Without Metal1 every column / keep-out (0-60) / density (55, 60) / macro variant (no channels, no macros at all) placed at 1.37-1.47 with +45..65 % inflation (the 8x4: 1.33 / +4 %); the runs that were not killed died on unplaceable repair cells (DPL-0036).  The SRAM-less design is short of horizontal (Metal3) tracks on this die; it needs ~15-20 % less logic, not a floorplan.  Parked 2026-09-29.",
+  "RT_MIN_LAYER": "Metal1",
+  "GRT_ADJUSTMENT": 0.15,
+  "GRT_LAYER_ADJUSTMENTS": [0.5, 0, 0, 0, 0],
   "MACROS": {
     "CFGMEM_IHP_LEFT16": {
       "instances": {
         "i_peripherals.CFGMEMS_LEFT[0].cfgmem_lo": {
           "location": [
-            267.35,
+            42.55,
             3.78
           ],
           "orientation": "FS"
         },
         "i_peripherals.CFGMEMS_LEFT[0].cfgmem_hi": {
           "location": [
-            267.35,
+            42.55,
             257.04
           ],
           "orientation": "N"
         },
         "i_peripherals.CFGMEMS_LEFT[1].cfgmem_lo": {
           "location": [
-            267.35,
+            42.55,
             366.66
           ],
           "orientation": "FS"
         },
         "i_peripherals.CFGMEMS_LEFT[1].cfgmem_hi": {
           "location": [
-            267.35,
+            42.55,
             619.92
           ],
           "orientation": "N"
