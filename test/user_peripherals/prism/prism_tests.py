@@ -2462,6 +2462,7 @@ class EthernetTxTest(PrismTest):
         expect = [0x55] * 7 + [0xD5] + payload + eth.crc32(payload)
         got = dec.frames[0]
         assert got == expect, f"{len(got)} bytes: {[hex(x) for x in got[:12]]} .. {[hex(x) for x in got[-6:]]}"
+        assert not dec.edges[0], f"edges off the half-bit grid (phase steps): {dec.edges[0][:4]}"
         await self.clocks(BIT * 4)
         assert await bench.irq()                                              # frame done
         await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
@@ -2500,6 +2501,7 @@ class EthernetTxTest(PrismTest):
         expect = [0x55] * 7 + [0xD5] + payload + eth.crc32(payload)
         got = dec.frames[1]
         assert got == expect, f"{len(got)} bytes"
+        assert not dec.edges[1], f"edges off the half-bit grid (phase steps): {dec.edges[1][:4]}"
         await self.clocks(BIT * 4)
         assert await bench.irq()
 
@@ -2516,6 +2518,7 @@ class EthernetTxTest(PrismTest):
             await self.clocks(BIT * 8)
         assert len(dec.frames) == 3
         assert dec.frames[2] == [0x55] * 7 + [0xD5] + payload + eth.crc32(payload)
+        assert not dec.edges[2], f"edges off the half-bit grid with timer ticks: {dec.edges[2][:4]}"
         await tqv.write_word_reg(REG_PRELOAD2, 0)
         await bench.disable()
 

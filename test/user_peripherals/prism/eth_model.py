@@ -30,6 +30,8 @@ class EthDecoder:
         self.txd, self.tx_en = txd, tx_en
         self.frames = []          # list of byte lists (preamble included)
         self.pulses = 0           # link pulses seen (TX_EN high, no data)
+        self.edges = []           # per frame: the TXD edges off the half-bit grid, as (clock, bit index, offset)
+        self.edge_count = []      # per frame: TXD edges seen
         self.task = None
 
     def lines(self):
@@ -57,6 +59,8 @@ class EthDecoder:
             # the frame (TP_IDL) or is a link pulse when it is the first bit
             bits = []
             clocks = 0
+            prev = self.lines()[0]
+            edges = []                          # clock of every TXD edge while TX_EN is high
             while True:
                 first = []
                 second = []
@@ -66,6 +70,9 @@ class EthDecoder:
                     txd, en = self.lines()
                     if not en:
                         break
+                    if txd != prev:
+                        edges.append(clocks)
+                    prev = txd
                     (first if k < half else second).append(txd)
                 if len(second) < half:
                     break                       # TX_EN dropped
@@ -77,7 +84,15 @@ class EthDecoder:
             if bits:
                 data = [sum(bits[8 * k + i] << i for i in range(8)) for k in range(len(bits) // 8)]
                 self.frames.append(data)
-                self.dut._log.info(f"    ETH RX: {len(bits)} bits, {len(data)} bytes")
+                # every edge must sit on the half-bit grid of the first edge: an
+                # edge off it is a phase step (a state that cost a clock)
+                off = [(e, (e - edges[0]) // self.bit, (e - edges[0]) % half) for e in edges
+                       if (e - edges[0]) % half]
+                self.edges.append(off)
+                self.edge_count.append(len(edges))
+                self.dut._log.info(f"    ETH RX: {len(bits)} bits, {len(data)} bytes, {len(edges)} edges, "
+                                   f"{len(off)} off the {half}-clock grid"
+                                   + (f": first at bit {off[0][1]} (+{off[0][2]} clk)" if off else ""))
             else:
                 self.pulses += 1
                 self.dut._log.info(f"    ETH RX: link pulse ({clocks} clocks)")
