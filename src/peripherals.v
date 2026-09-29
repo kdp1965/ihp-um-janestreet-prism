@@ -361,7 +361,11 @@ module tinyQV_peripherals (
     );
 
     (* keep = "true" *)
+`ifdef PRISM_NO_SRAM
+    CFGMEM_IHP_LEFT16 \CFGMEMS_LEFT[1].cfgmem_lo      // no SRAM under it: the plain macro
+`else
     CFGMEM_IHP_LEFT16_SRAM \CFGMEMS_LEFT[1].cfgmem_lo
+`endif
     (
         .WE0  ( cfgmem_we_lo[1]          ),
         .EN0  ( 1'b1                     ),
