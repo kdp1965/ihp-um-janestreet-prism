@@ -556,3 +556,88 @@ class UartTx(Model):
                 await self.clocks(n)
             self.dut.ui_in[self.pin].value = 1
             await self.clocks(gap)
+
+
+class JtagTap(Model):
+    ''' JTAG target (IEEE 1149.1 TAP) for the jtag_master chroma: TCK on
+        uo_out[1], TMS on uo_out[2], TDI on uo_out[3], TDO on ui_in[2].
+        TMS and TDI are taken on TCK rising edges, TDO changes on falling
+        edges and shows the bit leaving the register in the shift states
+        (1 otherwise, as a pulled-up released pin).  A 4-bit IR (captures
+        0001) selects IDCODE (2, 32 bits, also after Test-Logic-Reset), USER
+        (3, `user_len` bits: captures its own value, update stores), LONG (4,
+        `long_len` bits, the same) and BYPASS (anything else, one bit).
+        `trail` lists the TAP states walked, `updates` the (ir, value) of
+        every Update-DR, `tcks` counts rising edges and `unstable` the rising
+        edges where TMS or TDI differed from the clock before (no setup). '''
+
+    TLR, RTI, SEL_DR, CAP_DR, SH_DR, EX1_DR, PAU_DR, EX2_DR, UPD_DR, \
+        SEL_IR, CAP_IR, SH_IR, EX1_IR, PAU_IR, EX2_IR, UPD_IR = range(16)
+    NEXT = {TLR: (RTI, TLR), RTI: (RTI, SEL_DR),
+            SEL_DR: (CAP_DR, SEL_IR), CAP_DR: (SH_DR, EX1_DR), SH_DR: (SH_DR, EX1_DR),
+            EX1_DR: (PAU_DR, UPD_DR), PAU_DR: (PAU_DR, EX2_DR), EX2_DR: (SH_DR, UPD_DR),
+            UPD_DR: (RTI, SEL_DR),
+            SEL_IR: (CAP_IR, TLR), CAP_IR: (SH_IR, EX1_IR), SH_IR: (SH_IR, EX1_IR),
+            EX1_IR: (PAU_IR, UPD_IR), PAU_IR: (PAU_IR, EX2_IR), EX2_IR: (SH_IR, UPD_IR),
+            UPD_IR: (RTI, SEL_DR)}
+    IR_LEN, IDCODE, USER, LONG = 4, 2, 3, 4
+
+    def __init__(self, dut, idcode=0x1B57A0CF, user_len=20, long_len=300, tdo=2):
+        super().__init__(dut)
+        self.idcode, self.user_len, self.long_len, self.tdo = idcode, user_len, long_len, tdo
+        self.user, self.long = 0x5A5A5, (1 << 299) | 0x123456789ABCDEF
+        self.state, self.ir = self.TLR, self.IDCODE
+        self.sr, self.sr_len = 0, 1
+        self.trail, self.updates = [], []
+        self.tcks = self.unstable = 0
+        dut.ui_in[tdo].value = 1
+
+    def _dr(self):
+        ''' (length, capture value) of the register the IR selects '''
+        if self.ir == self.IDCODE:
+            return 32, self.idcode
+        if self.ir == self.USER:
+            return self.user_len, self.user
+        if self.ir == self.LONG:
+            return self.long_len, self.long
+        return 1, 0
+
+    def _rise(self, tms, tdi):
+        s = self.state
+        if s == self.CAP_DR:
+            self.sr_len, self.sr = self._dr()
+        elif s == self.CAP_IR:
+            self.sr_len, self.sr = self.IR_LEN, 0b0001
+        elif s in (self.SH_DR, self.SH_IR):
+            self.sr = (self.sr >> 1) | (tdi << (self.sr_len - 1))
+        self.state = self.NEXT[s][tms]
+        if self.state != s:
+            self.trail.append(self.state)
+        if self.state == self.TLR:
+            self.ir = self.IDCODE
+        elif self.state == self.UPD_IR:
+            self.ir = self.sr
+        elif self.state == self.UPD_DR:
+            if self.ir == self.USER:
+                self.user = self.sr
+            elif self.ir == self.LONG:
+                self.long = self.sr
+            self.updates.append((self.ir, self.sr))
+
+    async def run(self):
+        tck_prev, pins_prev = 0, (0, 0)
+        while True:
+            await RisingEdge(self.dut.clk)
+            uo = int(self.dut.uo_out.value)
+            tck, tms, tdi = (uo >> 1) & 1, (uo >> 2) & 1, (uo >> 3) & 1
+            if tck and not tck_prev:
+                self.tcks += 1
+                if (tms, tdi) != pins_prev and self.state in (self.SH_DR, self.SH_IR):
+                    self.unstable += 1
+                elif tms != pins_prev[0]:
+                    self.unstable += 1
+                self._rise(tms, tdi)
+            elif tck_prev and not tck:
+                shifting = self.state in (self.SH_DR, self.SH_IR)
+                self.dut.ui_in[self.tdo].value = (self.sr & 1) if shifting else 1
+            tck_prev, pins_prev = tck, (tms, tdi)

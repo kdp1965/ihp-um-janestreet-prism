@@ -472,6 +472,64 @@ framing error, the CRC against `crc_bits`) and `test_uart_loop`
 (chroma_uart_tx in shard 0 to chroma_uart_rx in shard 1, "Hello" plus the
 trailer received, the trailer equal to the receiver's CRC).
 
+### 4b.5 JTAG master chroma (2026-09-29)
+
+`chromas/chroma_jtag_master.v` (14 states, unfractured: shard 0 owns both
+FIFOs, as the SPI master does) is a JTAG controller: TCK on uo_out[1]
+(pin_out[0]), TMS on uo_out[2] (cond_out[0]), TDI on uo_out[3] (the
+shifter's bit, LSB first), TDO on ui_in[2].
+
+One operation is N bits, 1 to 256.  The host writes LIMIT3 = N - 1, the
+bytes to shift out into FIFO B (shard 1's window, TX mode), sets the mode
+on host_in[1] and toggles host_in[0] (REG_TOGGLE); the bits sampled on TDO
+come back in FIFO A, one byte per byte sent, and the host interrupt marks
+the end.  count3 counts the bits, the comm shift count the bytes.
+
+| host_in[1] | COMPARE | operation |
+|---|---|---|
+| 1 | - | walk: the bytes are a TMS pattern (TDI follows it; the TAP ignores TDI outside its shift states) |
+| 0 | 0 | scan: the bytes are TDI, TMS is 0 and 1 on the last bit (Shift -> Exit1) |
+| 0 | not 0 | scan that stays: TMS 0 on the last bit too, the next operation continues the same register |
+
+Everything else is composed from these by the host: 1,1,1,1,1,0 =
+Test-Logic-Reset then Run-Test/Idle; from idle 1,0,0 = Shift-DR and 1,1,0,0
+= Shift-IR; from Exit1 1,0 = Update and idle.  A register longer than 256
+bits (or than the FIFOs hold: 16 bytes each, or the SRAM FIFO) is scanned
+in chained operations, all but the last with COMPARE != 0.  A last byte of
+k < 8 bits comes back in the top of its byte (shift right by 8 - k).  FIFO B
+running dry ends an operation early: the interrupt comes and COUNT3 holds
+the bits done.
+
+Timing: TDI and TMS change when TCK falls, TDO is taken at the end of the
+TCK-high half through the input synchroniser.  PRELOAD = half period - 1;
+with the two-flop synchroniser the half period must be 3 clocks or more
+(10 MHz TCK at 60 MHz), with one flop or raw (CFG0[19:18] = 1 / 2) 2
+clocks (15 MHz), for a target that answers within a clock; a half period
+of 1 clock samples the previous bit.  TCK stays low two more clocks
+between bytes.
+
+Host setup: CFG1 in_prev0 <- host_in[0] (8), shard 1's CFG0 = FIFO_DIR_TX,
+PRELOAD, then per operation LIMIT3, COMPARE, the mode bit, the bytes, the
+toggle.
+
+Two things the compiler taught here.  (1) A state has two jump legs and
+the INC; a waiting state with three legs is split into two states that
+alternate every clock, each seeing the timer's terminal count on every
+other clock only - the first version worked at a half period of 3 and
+hung at 2.  The last bit therefore has its own TCK-high state, chosen in
+the TCK-low state, and only the byte-boundary state (which never waits)
+uses the INC.  (2) cond_out[0] as `last && leave` beside a three-input
+branch tree does not map (four distinct inputs, section 2's mux groups):
+the scan that stays got its own state trio with TMS constant 0.
+
+`test_jtag_master` (JtagTap model in models.py: 16-state TAP, 4-bit IR,
+IDCODE, a 20-bit and a 300-bit register, BYPASS): reset, IDCODE, IR scan,
+the 20-bit register written and read back, BYPASS, the 300-bit register
+in three chained operations, the early end; the model also checks that
+TMS and TDI were stable the clock before every TCK rising edge.
+JTAG_HALF / JTAG_SYNC in the environment choose the half period and the
+synchroniser for the run.
+
 ## 4y. RX DMA into PSRAM B (2026-09-23)
 
 The idea: a received frame should reach PSRAM without the host popping

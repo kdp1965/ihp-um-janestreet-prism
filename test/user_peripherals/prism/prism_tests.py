@@ -8,7 +8,7 @@ from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge
 
 from user_peripherals.prism.regs import *
 from user_peripherals.prism.bench import PrismTest
-from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, UartTx, Ws2812Slave, I2cSlave, I2cMaster, QspiSlave, OneWireSlave
+from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, UartTx, Ws2812Slave, I2cSlave, I2cMaster, QspiSlave, OneWireSlave, JtagTap
 from user_peripherals.prism.encoder import Encoder
 from user_peripherals.prism import usb_model as usb
 from user_peripherals.prism import eth_model as eth
@@ -33,6 +33,7 @@ from user_peripherals.prism.chroma_count3 import *
 from user_peripherals.prism.chroma_can_rx import *
 from user_peripherals.prism.chroma_can_tx import *
 from user_peripherals.prism.chroma_uart_rx import *
+from user_peripherals.prism.chroma_jtag_master import *
 from user_peripherals.prism import can_model as can
 
 
@@ -3057,3 +3058,148 @@ class TraceTest(PrismTest):
         dut.ui_in[2].value = 0
         await bench.disable()
         await tqv.write_word_reg(REG_FRAC_CFG, 0)
+
+
+class JtagMasterTest(PrismTest):
+    ''' JTAG controller: TMS walks and IR / DR scans of N bits (LIMIT3)
+        from FIFO B with the TDO bits back in FIFO A, against a TAP model:
+        reset, IDCODE, an IR scan, a 20-bit register written and read
+        back (a partial last byte), BYPASS, and a 300-bit register scanned
+        in three chained operations (the first two stay in Shift-DR). '''
+    name = "jtag_master Chroma (TAP walks, IR / DR scans)"
+    HALF = int(os.environ.get("JTAG_HALF", 3))       # TCK half period in clocks
+
+    async def run(self):
+        tqv, bench, dut, HALF = self.tqv, self.bench, self.dut, self.HALF
+        T = JtagTap
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        tap = self.start(JtagTap(dut))
+        sync = int(os.environ.get("JTAG_SYNC", 0))                           # CFG0[19:18]: 0 = two flops, 1 = one, 2 = raw
+        await bench.load_chroma(chroma_jtag_master, chroma_jtag_master_ctrlReg | (sync << 18), chroma_jtag_master_pinmuxReg)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)          # FIFO B: the bytes to shift out
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+        await tqv.write_word_reg(REG_CFG1, 8)                                 # in_prev0 <- host_in[0]
+        await tqv.write_word_reg(REG_PRELOAD, HALF - 1)
+        self.mode = 0
+
+        async def op(value, nbits, walk=False, stay=False):
+            ''' One operation of `nbits`: `value` out LSB first; the TDO bits as an integer '''
+            mode = 2 if walk else 0
+            if mode != self.mode:
+                host = await tqv.read_byte_reg(REG_HOST)
+                await tqv.write_byte_reg(REG_HOST, (host & 1) | mode)         # host_in[1], [0] kept
+                self.mode = mode
+            await tqv.write_byte_reg(REG_LIMIT3, nbits - 1)
+            await tqv.write_byte_reg(REG_COMPARE, 1 if stay else 0)
+            nbytes = (nbits + 7) // 8
+            for k in range(nbytes):
+                await tqv.write_byte_reg(REG_FIFO + SHARD1, (value >> (8 * k)) & 0xFF)
+            before = tap.tcks
+            await tqv.write_byte_reg(REG_TOGGLE, 0)                           # go
+            for _ in range(nbits * 2 * HALF // 8 + 40):
+                if await bench.irq():
+                    break
+                await self.clocks(8)
+            assert await bench.irq(), f"no interrupt, state {await bench.curr_state()}"
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            assert await bench.curr_state() == 0
+            assert tap.tcks - before == nbits, f"{tap.tcks - before} TCKs for {nbits} bits"
+            count = (await tqv.read_word_reg(REG_FIFO_ST) >> 8) & 0x3FFF
+            assert count == nbytes, f"{count} bytes in FIFO A, {nbytes} expected"
+            got = 0
+            for k in range(nbytes):
+                b = await tqv.read_byte_reg(REG_FIFO)
+                if k == nbytes - 1 and nbits % 8:
+                    b >>= 8 - nbits % 8                                       # a partial byte sits at the top
+                got |= b << (8 * k)
+            return got
+
+        async def shift_dr():
+            await op(0b001, 3, walk=True)                                     # Select-DR, Capture-DR, Shift-DR
+            assert tap.state == T.SH_DR, tap.state
+
+        async def shift_ir():
+            await op(0b0011, 4, walk=True)                                    # Select-DR, Select-IR, Capture-IR, Shift-IR
+            assert tap.state == T.SH_IR, tap.state
+
+        async def to_idle():
+            await op(0b01, 2, walk=True)                                      # Update, Run-Test/Idle
+            assert tap.state == T.RTI, tap.state
+
+        async def set_ir(ir):
+            await shift_ir()
+            got = await op(ir, T.IR_LEN)
+            assert tap.state == T.EX1_IR
+            await to_idle()
+            assert tap.ir == ir
+            return got
+
+        self.log("reset: five TMS ones, then Run-Test/Idle")
+        tap.state = T.SH_DR                                                   # from anywhere
+        await op(0b011111, 6, walk=True)
+        assert tap.state == T.RTI and T.TLR in tap.trail, tap.trail
+        assert tap.ir == T.IDCODE
+
+        self.log("IDCODE: 32 bits")
+        await shift_dr()
+        got = await op(0, 32)
+        assert got == tap.idcode, hex(got)
+        assert tap.state == T.EX1_DR                                          # TMS rose on the last bit
+        await to_idle()
+
+        self.log("IR scan: USER")
+        assert await set_ir(T.USER) == 0b0001                                 # the IR's capture value
+
+        self.log("20-bit register: written, the old value comes back")
+        await shift_dr()
+        got = await op(0xABCDE, 20)
+        assert got == 0x5A5A5, hex(got)
+        await to_idle()
+        assert tap.user == 0xABCDE and tap.updates[-1] == (T.USER, 0xABCDE), tap.updates[-1:]
+        await shift_dr()
+        got = await op(0x12345, 20)
+        assert got == 0xABCDE, hex(got)
+        await to_idle()
+        assert tap.user == 0x12345
+
+        self.log("BYPASS: one bit of delay")
+        await set_ir(0xF)
+        await shift_dr()
+        got = await op(0x1A5, 9)
+        assert got == (0x1A5 << 1) & 0x1FF, hex(got)                          # the bypass bit captures 0
+        await to_idle()
+
+        self.log("300-bit register in three chained operations")
+        await set_ir(T.LONG)
+        old = tap.long
+        new = int.from_bytes(bytes((i * 37 + 11) & 0xFF for i in range(38)), 'little') & ((1 << 300) - 1)
+        await shift_dr()
+        got = await op(new & ((1 << 128) - 1), 128, stay=True)
+        assert tap.state == T.SH_DR                                           # no exit: TMS stayed low
+        got |= await op((new >> 128) & ((1 << 128) - 1), 128, stay=True) << 128
+        assert tap.state == T.SH_DR
+        got |= await op(new >> 256, 44) << 256
+        assert tap.state == T.EX1_DR
+        assert got == old, hex(got ^ old)
+        await to_idle()
+        assert tap.long == new, hex(tap.long ^ new)
+
+        self.log("FIFO B runs dry: the operation ends early")
+        await tqv.write_byte_reg(REG_HOST, (await tqv.read_byte_reg(REG_HOST) & 1) | 2)
+        self.mode = 2
+        await tqv.write_byte_reg(REG_LIMIT3, 15)
+        await tqv.write_byte_reg(REG_COMPARE, 0)
+        await tqv.write_byte_reg(REG_FIFO + SHARD1, 0x00)                     # one byte for a 16-bit walk (TMS 0: stays idle)
+        before = tap.tcks
+        await tqv.write_byte_reg(REG_TOGGLE, 0)
+        await self.clocks(16 * 2 * HALF + 60)
+        assert await bench.irq() and await bench.curr_state() == 0
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        assert tap.tcks - before == 8, tap.tcks - before
+        assert await tqv.read_byte_reg(REG_COUNT3) == 8
+        assert await tqv.read_byte_reg(REG_FIFO) == 0xFF                      # TDO released: ones
+        assert tap.state == T.RTI
+
+        assert tap.unstable == 0, f"{tap.unstable} rising edges without TMS / TDI setup"
+        await bench.disable()
