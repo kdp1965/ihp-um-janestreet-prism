@@ -642,3 +642,136 @@ class JtagTap(Model):
                 self.dut.ui_in[self.tdo].value = (self.sr & 1) if shifting else 1
             tck_prev, pins_prev = tck, (tms, tdi)
 
+
+class SwdTarget(Model):
+    ''' ARM Serial Wire Debug target (the DP of ADIv5) for the swd_host
+        chroma: SWCLK on uo_out[1], the host's SWDIO on uo_out[2] with its
+        output enable on uo_out[3], the line's level back on ui_in[2] (the
+        external buffer, and the pull-up when nobody drives).
+
+        The target takes the line on SWCLK rising edges and changes what it
+        drives on them.  A line reset is 50 or more ones; a request is start
+        1, APnDP, RnW, A2, A3, parity, stop 0, park 1; after one turnaround
+        clock the ACK (`next_ack`: 1 OK, 2 WAIT, 4 FAULT, LSB first), then on
+        OK the data with its parity: 33 bits out for a read, or after one
+        more turnaround clock 33 bits in for a write.  A request with the
+        wrong parity or framing is not answered.
+
+        DP registers: 0 DPIDR (read) / ABORT (write), 4 CTRL/STAT, 8 SELECT
+        (write) / RESEND, 12 RDBUFF.  `log` lists the transfers as
+        ('R' or 'W', AP, address, data, parity ok), `resets` counts the line
+        resets, `clocks` the rising edges, `fights` the clocks in which the
+        host drove the line while the target did, `bad` the requests not
+        answered. '''
+
+    OK, WAIT, FAULT = 1, 2, 4
+
+    def __init__(self, dut, dpidr=0x2BA01477, swclk=1, swdio=2, oe=3, line=2):
+        super().__init__(dut)
+        self.dpidr = dpidr
+        self.swclk, self.swdio, self.oe, self.line = swclk, swdio, oe, line
+        self.reg = {4: 0x00000000, 8: 0x00000000, 12: 0x00000000}
+        self.ap = {}
+        self.next_ack = self.OK
+        self.present = True
+        self.log, self.bad = [], 0
+        self.resets = self.clocks = self.fights = 0
+        self.drive = None                 # the level the target drives, None = released
+        self.ones = 0
+        self.state, self.bits = 'idle', []
+        self.out = []
+        dut.ui_in[line].value = 1
+
+    @staticmethod
+    def request(ap, read, addr):
+        ''' The request byte of a transfer '''
+        a2, a3 = (addr >> 2) & 1, (addr >> 3) & 1
+        parity = (ap + read + a2 + a3) & 1
+        return 1 | (ap << 1) | (read << 2) | (a2 << 3) | (a3 << 4) | (parity << 5) | (1 << 7)
+
+    @staticmethod
+    def parity(value):
+        return bin(value & 0xFFFFFFFF).count('1') & 1
+
+    def _read(self, ap, addr):
+        if ap:
+            return self.ap.get(addr, 0)
+        return self.dpidr if addr == 0 else self.reg.get(addr, 0)
+
+    def _rise(self, level):
+        ''' One SWCLK rising edge with `level` on the line '''
+        self.clocks += 1
+        self.ones = self.ones + 1 if level else 0
+        if self.ones == 50:
+            self.resets += 1
+            self.state, self.bits, self.out, self.drive = 'idle', [], [], None
+            return
+        if not self.present:
+            return
+        st = self.state
+        if st == 'idle':
+            if level:
+                self.state, self.bits = 'request', [1]
+        elif st == 'request':
+            self.bits.append(level)
+            if len(self.bits) == 8:
+                _, ap, rd, a2, a3, par, stop, park = self.bits
+                if par != ((ap + rd + a2 + a3) & 1) or stop != 0 or park != 1:
+                    self.bad += 1
+                    self.state = 'idle'
+                else:
+                    self.cur = (ap, rd, (a3 << 3) | (a2 << 2))
+                    self.state = 'trn1'
+        elif st == 'trn1':                         # the turnaround clock: the ACK starts here
+            ack = self.next_ack
+            self.next_ack = self.OK
+            ap, rd, addr = self.cur
+            self.out = [(ack >> k) & 1 for k in range(3)]
+            if ack == self.OK and rd:
+                value = self._read(ap, addr)
+                self.out += [(value >> k) & 1 for k in range(32)] + [self.parity(value)]
+                self.log.append(('R', ap, addr, value, True))
+            self.after = 'trn2' if ack == self.OK and not rd else 'idle'
+            self.drive = self.out.pop(0)
+            self.state = 'drive'
+        elif st == 'drive':
+            if self.out:
+                self.drive = self.out.pop(0)
+            else:
+                self.drive = None                  # released: the turnaround
+                self.state, self.bits = self.after, []
+                if self.state == 'idle':
+                    self.state = 'trn3'
+        elif st == 'trn3':                         # the turnaround clock after a read or a refusal
+            self.state = 'idle'
+        elif st == 'trn2':                         # the turnaround clock before the data of a write
+            self.state = 'write'
+        elif st == 'write':
+            self.bits.append(level)
+            if len(self.bits) == 33:
+                value = sum(b << k for k, b in enumerate(self.bits[:32]))
+                ok = self.bits[32] == self.parity(value)
+                ap, rd, addr = self.cur
+                if ok:
+                    if ap:
+                        self.ap[addr] = value
+                    elif addr in (4, 8):
+                        self.reg[addr] = value
+                self.log.append(('W', ap, addr, value, ok))
+                self.state = 'idle'
+
+    async def run(self):
+        clk_prev = 1
+        while True:
+            await RisingEdge(self.dut.clk)
+            uo = int(self.dut.uo_out.value)
+            clk, host, oe = (uo >> self.swclk) & 1, (uo >> self.swdio) & 1, (uo >> self.oe) & 1
+            if oe and self.drive is not None:
+                self.fights += 1
+            level = host if oe else (self.drive if self.drive is not None else 1)
+            if clk and not clk_prev:
+                self._rise(level)
+                level = host if oe else (self.drive if self.drive is not None else 1)
+            self.dut.ui_in[self.line].value = level
+            clk_prev = clk
+

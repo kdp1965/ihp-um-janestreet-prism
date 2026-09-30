@@ -8,7 +8,7 @@ from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge
 
 from user_peripherals.prism.regs import *
 from user_peripherals.prism.bench import PrismTest
-from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, UartTx, Ws2812Slave, I2cSlave, I2cMaster, QspiSlave, OneWireSlave, JtagTap
+from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, UartTx, Ws2812Slave, I2cSlave, I2cMaster, QspiSlave, OneWireSlave, JtagTap, SwdTarget
 from user_peripherals.prism.encoder import Encoder
 from user_peripherals.prism import usb_model as usb
 from user_peripherals.prism import eth_model as eth
@@ -37,6 +37,7 @@ from user_peripherals.prism.chroma_jtag_master import *
 from user_peripherals.prism.chroma_spw_tx import *
 from user_peripherals.prism.chroma_spw_fct_stub import *
 from user_peripherals.prism.chroma_spw_rx import *
+from user_peripherals.prism.chroma_swd_host import *
 from user_peripherals.prism import can_model as can
 from user_peripherals.prism import spw_model as spw
 
@@ -3753,4 +3754,143 @@ class SpwLinkTest(SpwRxTest):
 
         peer.stop()
         await self.unload()
+
+
+class SwdHostTest(PrismTest):
+    ''' SWD host against a target model: the line reset, DPIDR, registers
+        written and read back, a WAIT and a FAULT (no data phase), a target
+        that is not there, a write with the wrong parity, a request the
+        target does not answer; the clocks of every operation counted and
+        the line never driven from both ends. '''
+    name = "swd_host Chroma (Serial Wire Debug)"
+    HALF = int(os.environ.get("SWD_HALF", 3))        # SWCLK half period in clocks
+
+    async def run(self):
+        tqv, bench, dut, HALF = self.tqv, self.bench, self.dut, self.HALF
+        T = SwdTarget
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        target = self.start(SwdTarget(dut))
+        await tqv.write_word_reg(REG_CFG1, 8)                                 # in_prev0 <- host_in[0]
+        await tqv.write_word_reg(REG_CFG2, (10 << 4) | (11 << 8) | (12 << 12))   # inputs 17-19 = comm[5], [6], [7]: the ACK
+        await tqv.write_word_reg(REG_CONST, 0x2002FF00)                       # K3 32, K2 2, K1 0xFF
+        await tqv.write_word_reg(REG_PRELOAD, HALF - 1)
+        await tqv.write_word_reg(REG_CFG0 + SHARD1, CFG_FIFO_DIR_TX)          # FIFO B: the bytes to send
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+        sync = int(os.environ.get("SWD_SYNC", 0))                            # CFG0[19:18]: 0 = two flops, 1 = one, 2 = raw
+        await bench.load_chroma(chroma_swd_host, chroma_swd_host_ctrlReg | (sync << 18), chroma_swd_host_pinmuxReg)
+        await tqv.write_byte_reg(REG_COMM, 0xFF)                              # the line idles high
+        self.host = 0
+        await self.clocks(8)
+        uo = int(dut.uo_out.value)
+        assert (uo >> 1) & 7 == 0b111, bin(uo)                                # SWCLK high, SWDIO high and driven
+
+        async def go(nbits, clocks):
+            ''' Start what is set up and wait for its interrupt; the clocks it made '''
+            before = target.clocks
+            await tqv.write_byte_reg(REG_LIMIT3, nbits - 1)
+            await tqv.write_byte_reg(REG_TOGGLE, 0)
+            for _ in range(clocks * 2 * HALF // 8 + 60):
+                if await bench.irq():
+                    break
+                await self.clocks(8)
+            assert await bench.irq(), f"no interrupt, state {await bench.curr_state()}"
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            assert await bench.curr_state() == 0
+            assert target.fights == 0, f"the line was driven from both ends in {target.fights} clocks"
+            uo = int(dut.uo_out.value)
+            assert (uo >> 1) & 7 == 0b111, bin(uo)                            # back to idle
+            return target.clocks - before
+
+        async def raw(value, nbits):
+            await tqv.write_byte_reg(REG_COMPARE, 1)
+            for k in range((nbits + 7) // 8):
+                await tqv.write_byte_reg(REG_FIFO + SHARD1, (value >> (8 * k)) & 0xFF)
+            made = await go(nbits, nbits)
+            assert made == nbits, f"{made} clocks for {nbits} bits"
+            assert fifo_count(await tqv.read_word_reg(REG_FIFO_ST)) == 0
+
+        async def transfer(ap, read, addr, data=0, parity=None):
+            ''' (ACK, data read or None, its parity ok); the clocks are checked against the ACK '''
+            await tqv.write_byte_reg(REG_COMPARE, 0)
+            if (self.host >> 1) != read:
+                self.host = (self.host & 1) | (read << 1)
+                host = await tqv.read_byte_reg(REG_HOST)
+                await tqv.write_byte_reg(REG_HOST, (host & 1) | (read << 1))
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, T.request(ap, read, addr))
+            if not read:
+                for k in range(4):
+                    await tqv.write_byte_reg(REG_FIFO + SHARD1, (data >> (8 * k)) & 0xFF)
+                await tqv.write_byte_reg(REG_FIFO + SHARD1, T.parity(data) if parity is None else parity)
+            made = await go(8, 46)
+            got = [await tqv.read_byte_reg(REG_FIFO) for _ in range(fifo_count(await tqv.read_word_reg(REG_FIFO_ST)))]
+            ack = got[0] >> 5
+            assert made == (46 if ack == T.OK else 13), f"{made} clocks, ACK {ack}"
+            left = fifo_count(await tqv.read_word_reg(REG_FIFO_ST + SHARD1))
+            if ack == T.OK and read:
+                assert len(got) == 6 and left == 0, (got, left)
+                value = sum(b << (8 * k) for k, b in enumerate(got[1:5]))
+                return ack, value, (got[5] >> 7) == T.parity(value)
+            assert len(got) == 1, got
+            assert left == (0 if ack == T.OK or read else 5), left           # the data of a write not made stays
+            if left:
+                await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+            return ack, None, None
+
+        self.log("line reset: 56 ones, 8 idle clocks")
+        await raw((1 << 56) - 1, 64)
+        assert target.resets == 1 and target.state == 'idle'
+
+        self.log("DPIDR")
+        ack, value, ok = await transfer(0, 1, 0x0)
+        assert (ack, value, ok) == (T.OK, target.dpidr, True), (ack, hex(value or 0), ok)
+
+        self.log("SELECT and CTRL/STAT written, CTRL/STAT read back")
+        assert (await transfer(0, 0, 0x8, 0x000000F0))[0] == T.OK
+        assert (await transfer(0, 0, 0x4, 0x50000000))[0] == T.OK
+        assert target.reg[8] == 0x000000F0 and target.reg[4] == 0x50000000
+        assert target.log[-2:] == [('W', 0, 8, 0x000000F0, True), ('W', 0, 4, 0x50000000, True)], target.log[-2:]
+        assert await transfer(0, 1, 0x4) == (T.OK, 0x50000000, True)
+
+        self.log("an AP register: every bit pattern, both parities")
+        for value in (0x00000000, 0xFFFFFFFF, 0x00000001, 0x80000000, 0xA5A5A5A5, 0x12345678, 0xDEADBEEF):
+            assert (await transfer(1, 0, 0xC, value))[0] == T.OK
+            assert await transfer(1, 1, 0xC) == (T.OK, value, True), hex(value)
+
+        self.log("WAIT and FAULT: no data")
+        entries = len(target.log)
+        for ack in (T.WAIT, T.FAULT):
+            target.next_ack = ack
+            assert await transfer(0, 1, 0x4) == (ack, None, None)
+            target.next_ack = ack
+            assert await transfer(0, 0, 0x4, 0x11111111) == (ack, None, None)
+        assert len(target.log) == entries and target.reg[4] == 0x50000000
+        assert await transfer(0, 1, 0x4) == (T.OK, 0x50000000, True)          # and the next one is answered
+
+        self.log("a write with the wrong parity is not taken")
+        assert (await transfer(0, 0, 0x4, 0x0F0F0F0F, parity=1))[0] == T.OK
+        assert target.log[-1] == ('W', 0, 4, 0x0F0F0F0F, False) and target.reg[4] == 0x50000000
+
+        self.log("a request with the wrong parity is not answered: the ACK reads as 7")
+        bad = target.bad
+        await tqv.write_byte_reg(REG_COMPARE, 0)
+        await tqv.write_byte_reg(REG_FIFO + SHARD1, T.request(0, 1, 0x0) ^ 0x20)
+        made = await go(8, 46)
+        assert made == 13 and target.bad == bad + 1
+        assert [await tqv.read_byte_reg(REG_FIFO)][0] >> 5 == 7
+        await raw((1 << 56) - 1, 64)                                          # the way back
+        assert target.resets == 2
+        assert await transfer(0, 1, 0x0) == (T.OK, target.dpidr, True)
+
+        self.log("no target")
+        target.present = False
+        assert (await transfer(0, 1, 0x0))[0] == 7
+        target.present = True
+
+        self.log("nothing to send: no clock")
+        await tqv.write_byte_reg(REG_COMPARE, 1)
+        assert await go(8, 8) == 0
+        assert target.fights == 0
+        await bench.disable()
+        dut.ui_in[2].value = 0
 

@@ -747,6 +747,66 @@ the model's reading of the standard, as the bit order of the control
 characters is: check both against ECSS-E-ST-50-12C.  The receiver has
 one state left of its 16, the transmitter one.
 
+### 4b.9 SWD host chroma (2026-09-29)
+
+`chromas/chroma_swd_host.v` (20 states, unfractured: shard 0 owns both
+FIFOs) is an ARM Serial Wire Debug host (ADIv5): SWCLK on uo_out[1]
+(pin_out[0], idle high), SWDIO out on uo_out[2] (the shifter's bit), its
+output enable on uo_out[3] (pin_out[1]) for an external buffer, the
+line's level on ui_in[2].  No RTL change: the first chroma whose data
+line changes direction inside a frame.
+
+Two operations, started by a toggle of host_in[0], host interrupt at the
+end:
+
+| COMPARE | operation |
+|---|---|
+| not 0 | raw: LIMIT3 + 1 bits from FIFO B with the host driving (the line reset of 56 ones, the JTAG-to-SWD sequence, idle clocks) |
+| 0 | transfer: LIMIT3 = 7, the request byte in FIFO B, host_in[1] = its RnW bit, and for a write the four data bytes and the parity (bit 0 of a fifth) |
+
+A transfer is the request (8 bits out), one turnaround clock with the
+line released, the ACK (3 bits in), then: for a read the data and its
+parity (33 bits in) and a turnaround; for a write a turnaround and the
+33 bits out; when the ACK is not OK a turnaround and nothing more.  FIFO
+A gets the ACK in the top of a byte (>> 5: 1 OK, 2 WAIT, 4 FAULT, 7 when
+nobody answers and the pull-up is read) and after a read four data bytes
+and the parity in the top of a fifth (>> 7).  The host makes and checks
+the parities.  After a write that was not made its data is still in FIFO
+B: the host flushes it.
+
+Bit counts are count3 against its limit, loaded by the FSM from K2 (2:
+the ACK) and K3 (32: the data) with the limit loads of 4b.2; the first
+part of an operation uses the limit the host wrote.  Two FSM flags
+(FLAG_LATCH) remember where a transfer is, "data" and "write"; the
+second is a LUT of host_in[1].  The ACK is read from comm[5], comm[6],
+comm[7] through three CFG2 slots.
+
+Timing: the host changes SWDIO as SWCLK falls, the target takes it as
+SWCLK rises and changes its own then; the host takes the target's bit at
+the end of the low half.  Half a period is 3 clocks or more with the
+two-flop synchroniser (10 MHz SWCLK at 60 MHz), 2 with one flop or raw
+(CFG0[19:18]).  Every state that decides what comes next sits in a high
+half and makes it one clock longer: SWCLK makes no edge that is not a
+bit, which the test counts (64 for the line reset, 46 for a transfer,
+13 when the ACK is not OK, 0 with nothing to send).
+
+Host setup: CFG1 = 8, CFG2 = 10 << 4 | 11 << 8 | 12 << 12, CONST =
+0x2002FF00 (K3 32, K2 2, K1 0xFF for the idle line), COMM = 0xFF after
+the enable, shard 1's CFG0 = FIFO_DIR_TX, PRELOAD = half period - 1.
+
+`test_swd_host` (SwdTarget in models.py: line reset, request parity and
+framing, ACK, DPIDR, CTRL/STAT, SELECT, AP registers, write parity): the
+line reset, DPIDR, registers written and read back, an AP register with
+seven bit patterns, WAIT and FAULT on a read and on a write, a write
+with the wrong parity (not taken), a request with the wrong parity (not
+answered, then a line reset), no target, nothing to send.  The model
+counts the clocks in which both ends drive the line: none.  SWD_HALF and
+SWD_SYNC choose the half period and the synchroniser.
+
+Not there: the sticky-error handling of ADIv5 (ABORT after a FAULT is
+the host's to send), the overrun mode where a data phase follows any
+ACK, a turnaround of more than one clock, SWD multi-drop.
+
 ## 4y. RX DMA into PSRAM B (2026-09-23)
 
 The idea: a received frame should reach PSRAM without the host popping
