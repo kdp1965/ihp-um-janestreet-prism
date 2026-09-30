@@ -15,10 +15,10 @@ From `changes.md` item 12, with the spares filled in as suggestions.
 
 | bit | name | notes |
 |---|---|---|
-| 0 | pin_out[0] | muxable to uo_out[7:1] |
-| 1 | pin_out[1] | muxable to uo_out[7:1] |
-| 2 | pin_out[2] | muxable to uo_out[7:1] |
-| 3 | pin_out[3] | muxable to uo_out[7:1]; with CFG0[12] also count3's second command bit (4b.1) |
+| 0 | pin_out[0] | muxable to any uo_out pin (uo_out[0] since 4b.11) |
+| 1 | pin_out[1] | muxable to any uo_out pin |
+| 2 | pin_out[2] | muxable to any uo_out pin |
+| 3 | pin_out[3] | muxable to any uo_out pin; with CFG0[12] also count3's second command bit (4b.1) |
 | 4 | OUT_LATCH | re-capture the in_prev flops selected by the firing tree (edge-detect ack); also usable in the default word for free-running capture |
 | 5 | OUT_FIFO_WR_RD | FIFO push of comm (RX mode) / pop into comm (TX mode), per CFG0 fifo_dir (Phase 4) |
 | 6 | OUT_COUNT1_INC_DEC | count1 step, direction from config (count up / down) |
@@ -179,7 +179,7 @@ registers only:
 | offset | register |
 |---|---|
 | +0x00 | CFG0: datapath configuration (chroma `ctrl_reg`, bit map in section 3) |
-| +0x04 | PINMUX: uo_out[7:1] source selects (chroma `pinmux_reg`, 3 bits per pin: 0-3 this shard's pin_out[n], 4/5 its cond_out[n], 6 its shift_data, 7 = this shard does not drive the pin).  A pin claimed by shard 0 goes to shard 0, otherwise to shard 1; a pin freezes while its owning shard is halted |
+| +0x04 | PINMUX: uo_out source selects, 3 bits per pin: [3k+2:3k] uo_out[k+1] (chroma `pinmux_reg`), [23:21] uo_out[0] (4b.11; TinyQV's GPIO output function select must route the pin to the PRISM, it is the UART TX by default).  Codes 0-3 this shard's pin_out[n], 4/5 its cond_out[n], 6 its shift_data, 7 = this shard does not drive the pin.  A pin claimed by shard 0 goes to shard 0, otherwise to shard 1; a pin freezes while its owning shard is halted |
 | +0x08 | PRELOAD (32-bit) |
 | +0x0C | COUNT1 (24/32-bit; read = count, write = load) |
 | +0x10 | COUNTS packed: byte 0 COUNT2, byte 1 COMPARE, byte 2 COMM, byte 3 {comm_count[2:0], shift_count[4:0]} (RO); word or byte writes load the first three |
@@ -196,7 +196,7 @@ registers only:
 | +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either / 3 either edge of that input xor the next of inputs 0-7 (a Data-Strobe pair, 4b.7), actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p; [11] 32-bit FIFO access through FIFO32 (+0x54), section 4b; [13:12] sampler timer preset k (count1 <= PRELOAD >> k), [14] bit-stuff unit, [15] its transmit mode, section 4b.2; [10] counter mode: the CRC register is a 32-bit up / down counter with compare, section 4b |
 | +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
 | +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
-| +0x50 | COMM_PINS: multi-bit shift lanes, section 4r: [2:0] window base b (comm[b+3:b], b = 0-4), [2k+5:2k+4] the window lane uo_out[k+1] shows when its pinmux code is 6 and CFG0[2] is set |
+| +0x50 | COMM_PINS: multi-bit shift lanes, section 4r: [2:0] window base b (comm[b+5:b], b = 0-2), [3p+6:3p+4] the window lane (0-5; 6-7 read 0) uo_out[p] shows when its pinmux code is 6 and CFG0[2] is set.  Six lanes and 3-bit lane fields since 4b.11 (was comm[b+3:b] with [2k+5:2k+4] for uo_out[k+1]) |
 | +0x4C | CONST_TAB: the 16x8 latch FIFO as addressable constants, section 4n: [0] enable (OUT_COMM_LOAD loads the row at the 4-bit index; {OUT_K_SEL1, OUT_K_SEL0} = how the index moves on each load: 0 clear, 1 + 1, 2 + add_to_idx [10:8], 3 = idx_load [7:4], or + idx_load with [1]), [2] post (the row before the move; default after), [19:16] the index (a write sets it, reads back live) |
 | +0x48 | TRACE_CTRL: write [0] arm (flushes the SRAM FIFO), [1] stop; read [0] armed, [1] running, [2] done, [3] big, [4] active.  Entry (16 bits) = [4:0] SI, [10:5] LUT mux inputs, [11] tree 0 matched, [12] tree 1 taken, [13] executing; the traced SRAM's FIFO then serves the entries as bytes through +0x20 of the window that reads that SRAM (count = FIFO bytes / 2) |
 | +0x54 | FIFO32: 32-bit FIFO access with CFG3[11], section 4b: TX a word write pushes its four bytes low byte first; RX a read takes the assembled word |
@@ -1057,6 +1057,77 @@ txring2_ko60, the width of section 4z.6) it placed with 3.6 %, GRT 15.0 k,
 detailed routing clean at pass 22, and signed off with DRC, LVS and
 antennas clean and typical-corner setup +0.10 ns (the QSPI clock output,
 not the ring; the worst internal path has +0.94 ns).
+
+### 4b.11 Output pins for a VGA chroma: uo_out[0] in the pinmux, six comm lanes (2026-09-30)
+
+The Tiny VGA PMOD wants all eight output pins: R1 G1 B1 VSync on
+uo_out[3:0] and R0 G0 B0 HSync on uo_out[7:4].  A chroma that streams a
+160x120 RGB222 frame buffer out of the SRAM FIFO (a 23.8 MHz pixel
+clock = 3 clocks per pixel at 71 MHz, each byte loaded into comm and held
+for four pixels) needs the six colour bits of comm on six pins at once
+and the two syncs on the other two.  Two changes to
+`prism_periph.v`, no new registers:
+
+- **uo_out[0] is in the pinmux.**  PINMUX[23:21] selects its source with
+  the same codes as the other pins; `pin_src_v` / `pin_claim_v` /
+  `latched_out` are eight wide and `uo_out` is no longer hardwired 0 in
+  bit 0.  A chroma's 21-bit `pinmux_reg` leaves the field 0 = pin_out[0]
+  claimed by shard 0, which is invisible unless TinyQV's GPIO output
+  function select (GPIO + 0x60 + 4 * pin, reset: UART for pins 0 and 1)
+  routes the pin to the PRISM, so nothing existing changes; a chroma that
+  wants the pin claims it explicitly, and one that runs beside the UART
+  leaves it alone.  The output read-back inputs 12 / 13 still see
+  uo_out[2] and uo_out[7].
+- **The comm window is six lanes wide.**  COMM_PINS[2:0] = base 0-2
+  names comm[base+5:base]; each pin's lane field is 3 bits at
+  [3p+6:3p+4] for uo_out[p] (lanes 0-5, 6 and 7 read 0), 28 bits in all
+  (was a 4-bit window, 2-bit lanes at [2k+5:2k+4] for uo_out[k+1]).  With
+  base 0 an RGB222 byte {R1,G1,B1,R0,G0,B0} in comm[5:0] maps lanes 5, 4, 3
+  to uo_out[2:0] and lanes 2, 1, 0 to uo_out[6:4]; `regs.py` COMM_PINS()
+  and the new PINMUX() helper build the words, and the SDK's
+  PRISM_COMM_LANE / PRISM_PINMUX macros follow.
+
+Cost: three latch bits in PINMUX, ten in COMM_PINS, one more pin mux per
+shard and 8:1 instead of 4:1 lane muxes.  `test_vga_pins` checks the six
+lanes at base 0 and 2, lanes 6 / 7, pin 0 claimed, not driven, and left
+to a 21-bit chroma word; `test_pio` and `test_spi_master` (the existing
+COMM_PINS users) pass with the new encoding.
+
+**The chromas** (`chromas/chroma_vga_px.v`, 6 states, shard 1, and
+`chromas/chroma_vga_ln.v`, 4 states, shard 0; `test_vga`): no further RTL
+was needed.  The pixel shard runs the whole horizontal line on its own
+datapath, in 12-clock units from count1 free-running (count-up to PRELOAD
+11 with WRAP_PRELOAD; counting down it stops at 0, the SpaceWire
+receiver's lesson): ST_LINE waits for the unit tick and pops the first
+byte if the line shard's "active" (input 26) is up, else starts a black
+line; ST_ACT / ST_BLK pop a byte (or nothing) per tick until count2 >=
+COMPARE (159); ST_FP is timer 2's one-shot (PRELOAD2 = 47 | T2_RELOAD |
+T2_STATE(FP) | T2_ONESHOT), loads K0 = 0 into comm (black) and presets the
+counter, and sets the semaphore on its way out; ST_HS holds hsync low
+(pin_out[0] on uo_out[7]) for CRC_EXPECTED + 1 = 24 units counted in the
+32-bit counter mode (CFG3[10]); ST_BP counts count3 to its limit 10 and
+hands over to ST_LINE's unit.  Measured: 2400 clocks per line exactly,
+hsync 287 (24 units less the exit leg's clock), back porch 144 from the
+hsync rise to the first pop, every byte 12 clocks, black elsewhere.  The
+line shard counts the semaphores: ST_VACT keeps "active" (pin_out[1])
+high and the counter counting until it reaches CRC_EXPECTED (= active
+lines - 1), then ST_VFP / ST_VS / ST_VBP count blanking lines in count2
+against comm = K1 / K2 / K3 (count2 == comm, input 15); vsync
+(pin_out[0] on uo_out[3]) is low in ST_VS; the frame restarts with the
+counter and count2 cleared.  With A active lines the blanking is K3 + 3
+lines, vsync falls at hsync A + K1 + 1 and lasts K2 - K1 + 1 lines: for
+480 / 10 / 2 / 33 use CRC_EXPECTED 479, K1 9, K2 10, K3 42.  Vsync moves
+two clocks after the semaphore, i.e. with the hsync edge.
+
+Two things the host decides.  (1) Line rate: 2400 clocks at 71.4 MHz is
+a 29.75 kHz hsync and a 56.7 Hz frame (the standard 31.47 kHz / 59.94
+Hz with a 25.175 MHz pixel clock); if a monitor will not lock that low,
+shorten the blanking to 189 units (2268 clocks: 31.5 kHz, 60.0 Hz) with
+COMPARE / CRC_EXPECTED / the count3 limit / PRELOAD2, at the price of a
+0.8 us back porch.  (2) The TX DMA must deliver 160 bytes per active
+line, each source line four times (4.6 MB/s at 60 Hz): `test_vga` pushes
+the bytes itself; a slot repeat count in the DMA is the obvious next
+feature if the CPU cannot keep up.
 
 ## 4c. Host software (item 11, Phase 5)
 
@@ -2018,7 +2089,9 @@ marks the byte boundary for widths of 1, 2 and 4, and a load that
 "counts one" (comm_load_one) counts the width instead, so a popped byte
 counts as its first group.  For outputs a second register, COMM_PINS at
 +0x50, names a 4-bit window of comm ([2:0] = its base, comm[base+3:base])
-and a lane of that window for every uo_out pin (2 bits per pin), and
+and a lane of that window for every uo_out pin (2 bits per pin; since 4b.11
+a 6-bit window comm[base+5:base], base 0-2, with a 3-bit lane per pin at
+[3p+6:3p+4] for uo_out[p], p = 0-7), and
 while CFG0[2] is set a pin whose pinmux code is 6 (the shifter bit) shows
 that lane instead of the serial one (the window replaced seven 8:1 muxes
 of any comm bit on 2026-09-17, section 4x.1): two lanes on comm[7:6] play a byte

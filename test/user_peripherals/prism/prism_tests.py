@@ -39,6 +39,8 @@ from user_peripherals.prism.chroma_spw_fct_stub import *
 from user_peripherals.prism.chroma_spw_rx import *
 from user_peripherals.prism.chroma_swd_host import *
 from user_peripherals.prism.chroma_ps2_host import *
+from user_peripherals.prism.chroma_vga_px import *
+from user_peripherals.prism.chroma_vga_ln import *
 from user_peripherals.prism import can_model as can
 from user_peripherals.prism import spw_model as spw
 
@@ -3894,6 +3896,189 @@ class SwdHostTest(PrismTest):
         assert target.fights == 0
         await bench.disable()
         dut.ui_in[2].value = 0
+
+
+class VgaPinsTest(PrismTest):
+    ''' The output pin changes for a VGA chroma (2026-09-30): uo_out[0] is in
+        the pinmux (PINMUX[23:21]; TinyQV's GPIO output function select routes
+        the pin, the bench routes all eight to the PRISM) and the multi-bit
+        shift window is six lanes wide (comm[base+5:base], 3-bit lane per pin),
+        so an RGB222 byte in comm[5:0] can drive the Tiny VGA PMOD's six
+        colour pins at once: R1 G1 B1 on uo_out[2:0], R0 G0 B0 on uo_out[6:4],
+        the syncs on uo_out[3] and uo_out[7] from pin_out bits.  The pio chroma
+        is loaded only to have a running shard; comm is written by the host. '''
+    name = "VGA pins (uo_out[0] in the pinmux, six comm lanes)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        COLOUR = ((0, 5), (1, 4), (2, 3), (4, 2), (5, 1), (6, 0))                 # (uo_out pin, comm bit)
+        pinmux = PINMUX(*[(uo, 6) for uo, _ in COLOUR], (3, 0), (7, 1))         # colour lanes, syncs = pin_out[0] / [1]
+        await bench.load_chroma(chroma_pio, chroma_pio_ctrlReg | CFG_MSHIFT_EN, pinmux)
+        assert await tqv.read_word_reg(REG_PINMUX) == pinmux                    # 24 bits read back
+        await tqv.write_word_reg(REG_COMM_PINS, COMM_PINS(*COLOUR))
+        assert await tqv.read_word_reg(REG_COMM_PINS) == COMM_PINS(*COLOUR)
+
+        def expect(comm):
+            uo = 0
+            for pin, bit in COLOUR:
+                uo |= ((comm >> bit) & 1) << pin
+            return uo                                                            # pin_out[1:0] are 0 in state 0
+
+        self.log("six colour lanes follow comm, the sync pins stay at their pin_out bits")
+        for comm in (0x00, 0x3F, 0x15, 0x2A, 0x07, 0x38, 0xFF, 0xC0):
+            await tqv.write_byte_reg(REG_COUNT2 + 2, comm)                       # COUNTS lane 2 = comm
+            await self.clocks(3)
+            uo = int(dut.uo_out.value)
+            assert uo == expect(comm), (hex(comm), bin(uo), bin(expect(comm)))
+
+        self.log("window base 2: the lanes move up two bits; lanes 6 and 7 read 0")
+        await tqv.write_word_reg(REG_COMM_PINS, COMM_PINS((0, 7), (1, 6), (2, 5), (4, 4), (5, 3), (6, 2)))
+        await tqv.write_byte_reg(REG_COUNT2 + 2, 0xA4)                           # comm[7:2] = 101001
+        await self.clocks(3)
+        assert int(dut.uo_out.value) == 0b0100_0101, bin(int(dut.uo_out.value))  # pins 0..2 = 1,0,1; 4..6 = 0,0,1
+        await tqv.write_word_reg(REG_COMM_PINS, 2 | (6 << 4) | (7 << 7))         # pins 0 / 1 name lanes 6 / 7
+        await self.clocks(3)
+        assert int(dut.uo_out.value) & 0b11 == 0
+
+        self.log("pin 0 not driven (code 7) reads 0; a 21-bit pinmux word leaves it on pin_out[0]")
+        await tqv.write_word_reg(REG_PINMUX, PINMUX(*[(uo, 6) for uo, _ in COLOUR], (0, 7), (3, 0), (7, 1)))
+        await tqv.write_word_reg(REG_COMM_PINS, COMM_PINS(*COLOUR))
+        await tqv.write_byte_reg(REG_COUNT2 + 2, 0x3F)
+        await self.clocks(3)
+        assert int(dut.uo_out.value) == expect(0x3F) & ~1
+        await tqv.write_word_reg(REG_PINMUX, chroma_pio_pinmuxReg)               # the chroma's own 21-bit value
+        assert await tqv.read_word_reg(REG_PINMUX) == chroma_pio_pinmuxReg
+        await self.clocks(3)
+        assert int(dut.uo_out.value) & 1 == 0                                    # pin_out[0] of state 0
+
+
+class VgaTest(PrismTest):
+    ''' The VGA pair (2026-09-30): chroma_vga_ln in shard 0 (vertical timing:
+        VSync on uo_out[3], the active-lines flag to shard 1 over input 26,
+        lines counted from shard 1's per-line semaphore) and chroma_vga_px in
+        shard 1 (a line of 160 pixel bytes popped from FIFO B into comm, each
+        held 12 clocks, the six colour lanes on uo_out[6:4] / [2:0], HSync on
+        uo_out[7], front porch / sync / back porch from timer 2, the counter
+        mode and count3).  640x480 timing at three clocks per pixel: 2400
+        clocks per line; the test shortens the frame to a few lines with the
+        host constants and checks the line timing, the pixel data, black in
+        the blanking and the vertical structure over two frames. '''
+    name = "vga Chromas (pixel + line shards, fractured)"
+
+    A_LINES, K1, K2, K3 = 4, 1, 2, 4                # active lines; blanking = K3 + 3 lines, vsync 2 lines
+    LINE = 2400                                     # clocks per line
+    UNIT = 12                                       # clocks per pixel byte (four pixels)
+    BYTES = 160
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        A, K1, K2, K3 = self.A_LINES, self.K1, self.K2, self.K3
+        BLANK = K3 + 3
+        FRAME = A + BLANK
+
+        await bench.load_fractured(chroma_vga_ln, chroma_vga_ln_ctrlReg, chroma_vga_ln_pinmuxReg,
+                                   chroma_vga_px, chroma_vga_px_ctrlReg | CFG_FIFO_SRAM, chroma_vga_px_pinmuxReg)
+        await bench.disable()
+        fp_si = can.state_with_default_output(chroma_vga_px, 12)               # FP: the state presetting the counter
+        # shard 1, the pixel shard
+        await tqv.write_word_reg(REG_PRELOAD + SHARD1, self.UNIT - 1)          # count1: the 12-clock unit, free-running
+        await tqv.write_byte_reg(REG_COMPARE + SHARD1, self.BYTES - 1)         # count2: the last pop
+        await tqv.write_word_reg(REG_CFG3 + SHARD1, CFG3_CNT_EN)               # the CRC register counts hsync units
+        await tqv.write_word_reg(REG_CRC_EXP + SHARD1, 23)                     # 24 units of hsync
+        await tqv.write_byte_reg(REG_COUNT3 + SHARD1 + 1, 10)                  # count3 limit: 11 units of back porch + the ST_LINE unit
+        await tqv.write_word_reg(REG_PRELOAD2 + SHARD1, 47 | T2_RELOAD | T2_STATE(fp_si) | T2_ONESHOT)   # 48-clock front porch
+        await tqv.write_word_reg(REG_CONST + SHARD1, 0)                        # K0 = black
+        await tqv.write_word_reg(REG_COMM_PINS + SHARD1, COMM_PINS((0, 5), (1, 4), (2, 3), (4, 2), (5, 1), (6, 0)))
+        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
+        # shard 0, the line shard
+        await tqv.write_word_reg(REG_CFG3, CFG3_CNT_EN)
+        await tqv.write_word_reg(REG_CRC, 0)                                   # line counter preset
+        await tqv.write_word_reg(REG_CRC_EXP, A - 1)
+        await tqv.write_word_reg(REG_CONST, (K3 << 24) | (K2 << 16) | (K1 << 8))
+
+        # two frames of pixels, no byte 0 so the active window is visible
+        data = [[((ln * 37 + i * 11) % 63) + 1 for i in range(self.BYTES)] for ln in range(2 * A)]
+        for line in data:
+            for b in line:
+                await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        assert (await tqv.read_word_reg(REG_FIFO_ST + SHARD1) >> 8) & 0x3FFF == 2 * A * self.BYTES
+
+        colour, hsync, vsync = [], [], []
+        async def watch():
+            while True:
+                await FallingEdge(dut.clk)
+                uo = int(dut.uo_out.value)
+                c = 0
+                for pin, bit in ((0, 5), (1, 4), (2, 3), (4, 2), (5, 1), (6, 0)):
+                    c |= ((uo >> pin) & 1) << bit
+                colour.append(c)
+                hsync.append((uo >> 7) & 1)
+                vsync.append((uo >> 3) & 1)
+        w = cocotb.start_soon(watch())
+        await bench.enable()
+        await self.clocks(2 * FRAME * self.LINE + 3 * self.LINE)
+        w.kill()
+
+        falls = [i for i in range(1, len(hsync)) if hsync[i - 1] and not hsync[i]]
+        rises = [i for i in range(1, len(hsync)) if not hsync[i - 1] and hsync[i]]
+        periods = [b - a for a, b in zip(falls, falls[1:])]
+        widths = [next(r for r in rises if r > f) - f for f in falls[:-1]]
+        self.log(f"hsync: {len(falls)} pulses, periods {sorted(set(periods))}, widths {sorted(set(widths))}")
+        assert periods[1:] and all(p == self.LINE for p in periods[1:]), periods
+        assert all(wd == 24 * self.UNIT - 1 for wd in widths), widths           # 24 units, less the clock the exit leg takes
+
+        # the active window of every line, from its hsync's rising edge
+        starts = []
+        for f, nf in zip(falls, falls[1:]):
+            r = next(r for r in rises if r > f)
+            seg = colour[r:nf]
+            nz = [i for i, c in enumerate(seg) if c]
+            starts.append((r + nz[0] - r, r + nz[-1] + 1 - r) if nz else None)
+        active = [s is not None for s in starts]
+        self.log(f"lines after each hsync: {''.join('P' if a else '.' for a in active)}")
+        vs_low = [i for i in range(1, len(vsync)) if vsync[i - 1] and not vsync[i]]
+        vs_high = [i for i in range(1, len(vsync)) if not vsync[i - 1] and vsync[i]]
+        self.log(f"vsync falls at {vs_low}, rises at {vs_high}")
+
+        self.log("pixels: each active line is the 160 pushed bytes, 12 clocks each, black elsewhere")
+        spans, i = [], 0
+        while i < len(colour):
+            if colour[i]:
+                j = i
+                while j < len(colour) and colour[j]:
+                    j += 1
+                spans.append((i, j))
+                i = j
+            else:
+                i += 1
+        assert len(spans) >= 2 * A, len(spans)
+        for ln, (s, e) in enumerate(spans[:2 * A]):
+            assert e - s == self.BYTES * self.UNIT, (ln, s, e)
+            got = [colour[s + i * self.UNIT + 6] for i in range(self.BYTES)]
+            assert got == [b & 0x3F for b in data[ln]], (ln, got[:8], data[ln][:8])
+            prev_falls = [f for f in falls if f < s]
+            if prev_falls:                                                     # not the first line after enable
+                r = next(r for r in rises if r > prev_falls[-1])
+                assert s - r == 12 * self.UNIT, (ln, s - r)                    # back porch: 12 units exactly
+        assert all(colour[s - 1] == 0 and colour[e] == 0 for s, e in spans[:2 * A])
+
+        self.log("frames: A active lines, then K3 + 3 blank ones; vsync low for two lines after K1 + 1 blank ones")
+        runs = []
+        for a in active:
+            if runs and runs[-1][0] == a:
+                runs[-1][1] += 1
+            else:
+                runs.append([a, 1])
+        assert runs[0] == [True, A - 1], runs                                  # the first line precedes the first hsync
+        assert runs[1] == [False, BLANK], runs
+        assert runs[2] == [True, A], runs
+        assert runs[3] == [False, BLANK], runs
+        vs_high = [r for r in vs_high if r > vs_low[0]]                        # the pin's reset value is 0: ignore the first rise
+        assert len(vs_low) >= 2 and len(vs_high) >= 2
+        assert vs_high[0] - vs_low[0] == 2 * self.LINE, (vs_low, vs_high)
+        assert vs_low[1] - vs_low[0] == FRAME * self.LINE, (vs_low, vs_high)
+        # the falling edge sits at hsync number A + K1 + 1 (falls[0] is the first line's), two clocks after the semaphore
+        assert 0 <= vs_low[0] - falls[A + K1] <= 4, (vs_low[0], falls[A + K1])
 
 
 class Ps2HostTest(PrismTest):

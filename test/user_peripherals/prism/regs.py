@@ -113,15 +113,26 @@ T2_RELOAD    = 1 << 24    # restart the count on entry into state T2_STATE(si): 
 def T2_STATE(si): return (si & 0x1f) << 25
 T2_ONESHOT   = 1 << 30    # with T2_RELOAD: one tick per entry, then wait for the next entry
 REG_CTAB    = 0x14C       # constant table: the latch FIFO as addressable constants (CT_*); [19:16] = the index
-REG_COMM_PINS = 0x150     # multi-bit shift lanes: [2:0] window base (comm[base+3:base]), [2k+5:2k+4] lane of uo_out[k+1] (pinmux code 6); was one comm bit per pin [3(k-1)]
+REG_COMM_PINS = 0x150     # multi-bit shift lanes: [2:0] window base (comm[base+5:base], 0-2), [3p+6:3p+4] lane 0-5 of uo_out[p] (pinmux code 6); was a 4-bit window with 2-bit lanes for uo_out[7:1] until 2026-09-30
 def COMM_PINS(*pairs):
-    '''(uo_out pin, comm bit) pairs -> COMM_PINS: the bits must fit one 4-bit window'''
+    '''(uo_out pin, comm bit) pairs -> COMM_PINS: the bits must fit one 6-bit window'''
     bits = [b for _, b in pairs]
-    base = min(4, min(bits)) if bits else 0                 # windows start at 0..4
-    assert all(base <= b <= base + 3 for b in bits), "comm bits must fit a 4-bit window"
+    base = min(2, min(bits)) if bits else 0                 # windows start at 0..2
+    assert all(base <= b <= base + 5 for b in bits), "comm bits must fit a 6-bit window"
     v = base
     for uo, b in pairs:
-        v |= (b - base) << (4 + 2 * (uo - 1))
+        v |= (b - base) << (4 + 3 * uo)
+    return v
+
+def PINMUX(*pairs, default=7):
+    '''(uo_out pin, source code) pairs -> PINMUX: codes 0-3 pin_out[n], 4/5 cond_out[n], 6 the shifter
+       bit / comm lane, 7 not driven (the default for pins not named); uo_out[0] sits in bits [23:21]'''
+    v = 0
+    for uo in range(8):
+        v |= default << (21 if uo == 0 else 3 * (uo - 1))
+    for uo, code in pairs:
+        v &= ~(7 << (21 if uo == 0 else 3 * (uo - 1)))
+        v |= (code & 7) << (21 if uo == 0 else 3 * (uo - 1))
     return v
 CT_EN        = 1 << 0     # OUT_COMM_LOAD loads comm from the table row at the index
 CT_LOAD_ADDS = 1 << 1     # index mode 3 ({K_SEL1, K_SEL0} = 3) adds idx_load instead of loading it

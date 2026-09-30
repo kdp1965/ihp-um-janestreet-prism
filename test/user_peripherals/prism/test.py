@@ -20,7 +20,7 @@ from user_peripherals.prism.prism_tests import (
     RegisterTest, StewIntegrityTest, EncoderTest, Ws2812Test, Gpio24Test,
     SpiSlaveTest, UartTxTest, FifoLoopTest, SramFifoTest, EdgeTest, UsbDeviceTest, EthernetTxTest, EthernetRxTest, EthernetLoopTest, FracturedTest,
     TraceTest, Timer2Test, ConstTableTest, I2cMasterTest, SamplerTest, I2cSlaveTest, PioTest, SpiMasterTest,
-    OneWireTest, Fifo32Test, CounterTest, Count3Test, CanRxTest, CanTxTest, CanLoopTest, UartRxTest, UartLoopTest, JtagMasterTest, SpwTxTest, SpwTxFracturedTest, SpwRxTest, SpwLinkTest, SwdHostTest, Ps2HostTest)
+    OneWireTest, Fifo32Test, CounterTest, Count3Test, CanRxTest, CanTxTest, CanLoopTest, UartRxTest, UartLoopTest, JtagMasterTest, SpwTxTest, SpwTxFracturedTest, SpwRxTest, SpwLinkTest, SwdHostTest, Ps2HostTest, VgaPinsTest, VgaTest)
 
 
 async def run(dut, test_class):
@@ -184,3 +184,11 @@ async def test_swd_host(dut):
 @cocotb.test()
 async def test_ps2_host(dut):
     await run(dut, Ps2HostTest)
+
+@cocotb.test()
+async def test_vga_pins(dut):
+    await run(dut, VgaPinsTest)
+
+@cocotb.test()
+async def test_vga(dut):
+    await run(dut, VgaTest)
