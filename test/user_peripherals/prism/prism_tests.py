@@ -8,7 +8,7 @@ from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge
 
 from user_peripherals.prism.regs import *
 from user_peripherals.prism.bench import PrismTest
-from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, UartTx, Ws2812Slave, I2cSlave, I2cMaster, QspiSlave, OneWireSlave, JtagTap, SwdTarget
+from user_peripherals.prism.models import Shift74165, Shift74595, SpiMaster, UartRx, UartTx, Ws2812Slave, I2cSlave, I2cMaster, QspiSlave, OneWireSlave, JtagTap, SwdTarget, Ps2Device
 from user_peripherals.prism.encoder import Encoder
 from user_peripherals.prism import usb_model as usb
 from user_peripherals.prism import eth_model as eth
@@ -38,6 +38,7 @@ from user_peripherals.prism.chroma_spw_tx import *
 from user_peripherals.prism.chroma_spw_fct_stub import *
 from user_peripherals.prism.chroma_spw_rx import *
 from user_peripherals.prism.chroma_swd_host import *
+from user_peripherals.prism.chroma_ps2_host import *
 from user_peripherals.prism import can_model as can
 from user_peripherals.prism import spw_model as spw
 
@@ -3894,3 +3895,135 @@ class SwdHostTest(PrismTest):
         await bench.disable()
         dut.ui_in[2].value = 0
 
+
+class Ps2HostTest(PrismTest):
+    ''' PS/2 host against a device model: bytes from the device (every
+        parity), a wrong parity, a wrong stop bit, a frame that stops (the
+        time-out), a glitch on CLK; commands to the device with its
+        acknowledge and its 0xFA reply, a device that does not acknowledge,
+        no device at all (timer 2), and a command while the device sends. '''
+    name = "ps2_host Chroma (PS/2 keyboard / mouse port)"
+    HALF = 32                                         # the device's half clock period, in clocks
+    TIMEOUT = 256                                     # CLK low for a request; no clock inside a frame
+    FIRST = 2000                                      # the device's first clock after a request
+
+    async def run(self):
+        tqv, bench, dut, HALF = self.tqv, self.bench, self.dut, self.HALF
+        await tqv.write_byte_reg(REG_HOST, 0x00)
+        dev = self.start(Ps2Device(dut, HALF, hold=100, first=300, reply=0xFA))
+        wait1 = can.state_with_default_output(chroma_ps2_host, 2)             # the state that drives pin_out[2]
+        await tqv.write_word_reg(REG_CFG1, 8)                                 # in_prev0 <- host_in[0]
+        await tqv.write_word_reg(REG_CFG2, 15 << 4)                           # input 17 = edge pending
+        await tqv.write_word_reg(REG_CFG3, CFG3_SMP_EN | CFG3_SMP_SRC(2) | CFG3_SMP_FALL | CFG3_SMP_TIMER)
+        await tqv.write_word_reg(REG_CRC_POLY, 0x80)                          # CRC8 with x^8 + x^7: the parity
+        await tqv.write_word_reg(REG_CRC_EXP, 0x80)                           # odd
+        await tqv.write_word_reg(REG_PRELOAD, self.TIMEOUT - 1)
+        await tqv.write_word_reg(REG_PRELOAD2, (self.FIRST - 1) | T2_RELOAD | T2_STATE(wait1) | T2_ONESHOT)
+        await tqv.write_byte_reg(REG_COUNT3, 0)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await bench.load_chroma(chroma_ps2_host, chroma_ps2_host_ctrlReg, chroma_ps2_host_pinmuxReg)
+        FRAME = 11 * 2 * HALF
+
+        async def fifo():
+            return [await tqv.read_byte_reg(REG_FIFO) for _ in range(fifo_count(await tqv.read_word_reg(REG_FIFO_ST)))]
+
+        async def errors():
+            return await tqv.read_byte_reg(REG_COUNT3)
+
+        async def idle():
+            assert await bench.curr_state() == 0
+            assert (int(dut.uo_out.value) >> 1) & 3 == 0                      # both lines released
+
+        async def from_device(values, clocks=None):
+            dev.send(*values)
+            await self.clocks(clocks or len(values) * (FRAME + 4 * HALF) + 200)
+            return await fifo()
+
+        async def command(value, clocks=None):
+            ''' Send it; True if the interrupt came without an error '''
+            before = await errors()
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            parity = (bin(value).count('1') + 1) & 1
+            await tqv.write_word_reg(REG_CONST, (parity << 8) | value)
+            await tqv.write_byte_reg(REG_TOGGLE, 0)
+            await self.clocks(clocks or self.TIMEOUT + 300 + FRAME + 400)
+            assert await bench.irq()
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            return await errors() == before
+
+        self.log("bytes from the device, every parity")
+        await self.clocks(100)
+        await idle()
+        values = [0x1C, 0xF0, 0x00, 0xFF, 0x01, 0x80, 0xAA, 0x55]
+        got = await from_device(values)
+        assert got == values, [hex(v) for v in got]
+        assert await bench.irq() and await errors() == 0
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+
+        self.log("a wrong parity, a wrong stop bit: nothing in the FIFO")
+        for what in ('bad_parity', 'bad_stop'):
+            setattr(dev, what, True)
+            before = await errors()
+            assert await from_device([0x5A]) == []
+            assert await errors() == before + 1 and await bench.irq()
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            assert await from_device([0x5B]) == [0x5B]                        # and the next one is taken
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+
+        self.log("a frame that stops after 6 bits: the time-out")
+        dev.cut = 6
+        before = await errors()
+        assert await from_device([0x77], clocks=6 * 2 * HALF + self.TIMEOUT + 300) == []
+        assert await errors() == before + 1 and await bench.irq()
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        await idle()
+        assert await from_device([0x78]) == [0x78]
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+
+        self.log("a glitch on CLK with DATA high is not a start bit")
+        before = await errors()
+        dev.clk_low = 1
+        await self.clocks(6)
+        dev.clk_low = 0
+        await self.clocks(200)
+        assert await fifo() == [] and await errors() == before and not await bench.irq()
+        await idle()
+
+        self.log("commands to the device: acknowledged, and its 0xFA comes back")
+        for value in (0xED, 0x02, 0xF4, 0x00, 0xFF):
+            assert await command(value), hex(value)
+            assert dev.received[-1] == (value, True), dev.received[-1]
+            assert dev.holds[-1] >= self.TIMEOUT, dev.holds[-1]              # CLK was held for the whole time-out
+            await self.clocks(FRAME + 8 * HALF)
+            assert await fifo() == [0xFA]
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            await idle()
+
+        self.log("a device that does not acknowledge")
+        dev.ack = False
+        dev.reply = None
+        assert not await command(0xF5)
+        assert dev.received[-1] == (0xF5, True)
+        dev.ack = True
+        await idle()
+
+        self.log("no device: the first clock never comes")
+        dev.present = False
+        taken = len(dev.received)
+        assert not await command(0xF2, clocks=self.TIMEOUT + self.FIRST + 400)
+        assert len(dev.received) == taken
+        await idle()
+        dev.present = True
+
+        self.log("a command asked for while the device sends: its byte first")
+        dev.send(0x2A)
+        await self.clocks(5 * 2 * HALF)                                       # in the middle of the frame
+        assert await command(0xEE, clocks=FRAME + self.TIMEOUT + 300 + FRAME + 600)
+        assert dev.received[-1] == (0xEE, True)
+        assert await fifo() == [0x2A]
+        await bench.disable()
+        await tqv.write_word_reg(REG_CFG3, 0)
+        await tqv.write_word_reg(REG_CFG2, 0)
+        await tqv.write_word_reg(REG_PRELOAD2, 0)
+        dut.ui_in[2].value = 0
+        dut.ui_in[3].value = 0

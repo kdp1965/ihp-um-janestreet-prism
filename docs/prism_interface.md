@@ -807,6 +807,62 @@ Not there: the sticky-error handling of ADIv5 (ABORT after a FAULT is
 the host's to send), the overrun mode where a data phase follows any
 ACK, a turnaround of more than one clock, SWD multi-drop.
 
+### 4b.10 PS/2 host chroma (2026-09-29)
+
+`chromas/chroma_ps2_host.v` (16 states: one shard, so two ports fit a
+fractured PRISM) is the host side of a PS/2 port, both directions: CLK
+pull-low on uo_out[1] (pin_out[0]), DATA pull-low on uo_out[2]
+(cond_out[0]), the CLK level on ui_in[2] and the DATA level on ui_in[3]
+(open collector through external buffers, as the I2C chromas; not
+ui_in[1], which TinyQV samples at reset).  No RTL change.
+
+**From the device**: the sampler is clocked by CLK's falling edges
+(CFG3 = SMP_EN | SMP_SRC(2) | SMP_FALL | SMP_TIMER) and the FSM takes
+start, eight bits, parity and stop one falling edge at a time.  The byte
+goes to the FIFO with the host interrupt when the parity is odd (the CRC
+unit as a parity accumulator, 4b.6, CRC_EXPECTED = 0x80) and the stop
+bit 1.  A wrong parity, a wrong stop bit or a frame that stops is an
+error: interrupt, count3 + 1, nothing in the FIFO.  A falling edge with
+DATA high is not a start bit and is dropped.
+
+**To the device**, on a toggle of host_in[0], with the byte in K0 and its
+odd parity in bit 0 of K1: CLK low for the time-out period, DATA low,
+CLK released; on the device's falling edges the eight bits, the parity
+and the stop bit (DATA released), and on the next one DATA low is the
+device's acknowledge: host interrupt.  No acknowledge or no clock is an
+error.  A frame the device has begun is received first.
+
+**Timers**: count1 counts up, is cleared by every falling edge of CLK
+(the sampler's timer action, and the FSM as it starts to hold CLK) and
+wraps at PRELOAD: the time CLK is held for a request (100 us or more)
+and the time-out inside a frame are the same number.  The time the
+device may take for its first clock after a request (15 ms) is timer 2,
+restarted as the state that waits for it is entered (T2_RELOAD |
+T2_STATE | T2_ONESHOT, the state found as the one that drives
+pin_out[2]).
+
+Host setup: CFG1 = 8, CFG2 = 15 << 4 (input 17 = edge pending), CFG3 as
+above, CRC_POLY = 0x80, CRC_EXPECTED = 0x80, PRELOAD, PRELOAD2; per
+command CONST = parity << 8 | byte.  The host tells a byte received from
+a command done from an error by the FIFO's count and count3.
+
+`test_ps2_host` (Ps2Device in models.py, its clock 64 system clocks per
+bit to keep the run short): eight bytes of every parity, a wrong parity
+and a wrong stop bit each followed by a good byte, a frame cut after six
+bits (the time-out), a glitch on CLK; five commands each acknowledged
+and answered with 0xFA, CLK held for the whole time-out; a device that
+does not acknowledge; no device (timer 2); a command asked for in the
+middle of a frame from the device.
+
+Not there: a filter on CLK (a real line is slow and the two-flop
+synchroniser is all there is; a host usually adds a few samples of
+debounce), the device pulling CLK low to abort a byte it is being sent,
+and the keyboard or mouse protocol above the bytes, which is the host
+software's.
+
+With this every protocol the contest names has a chroma: UART, SPI, I2C,
+low-speed USB, 10 Mbit Ethernet, JTAG, SWD, PS/2, CAN.
+
 ## 4y. RX DMA into PSRAM B (2026-09-23)
 
 The idea: a received frame should reach PSRAM without the host popping

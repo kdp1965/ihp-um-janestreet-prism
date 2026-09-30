@@ -775,3 +775,114 @@ class SwdTarget(Model):
             self.dut.ui_in[self.line].value = level
             clk_prev = clk
 
+
+class Ps2Device(Model):
+    ''' PS/2 device (a keyboard or a mouse) for the ps2_host chroma.  Both
+        lines are open collector: the host pulls CLK low with uo_out[1] and
+        DATA with uo_out[2], the device with its own outputs, and the
+        levels (low if either pulls) come back on ui_in[2] and ui_in[3].
+
+        The device makes the clock, `half` system clocks per half period.
+        To the host: `send(byte)` queues a frame, start 0, eight bits LSB
+        first, odd parity, stop 1, DATA changing while CLK is high;
+        `bad_parity`, `bad_stop` and `cut` (stop after that many bits) make
+        the next frame wrong.  From the host: CLK held low for `hold`
+        clocks or more, then DATA low with CLK released, is a request; after
+        `first` clocks the device clocks ten bits in on rising edges (eight
+        data, parity, stop), then pulls DATA low for one more clock, the
+        acknowledge (`ack` False leaves that out).  `received` lists (byte,
+        parity and stop ok), `holds` the lengths of the host's holds, and
+        `reply` is sent back after every byte taken (0xFA from a keyboard). '''
+
+    def __init__(self, dut, half=32, hold=100, first=300, clk=2, data=3, reply=None):
+        super().__init__(dut)
+        self.half, self.hold, self.first = half, hold, first
+        self.clk, self.data = clk, data
+        self.reply = reply
+        self.queue, self.received, self.holds = [], [], []
+        self.bad_parity = self.bad_stop = False
+        self.cut = None
+        self.ack = True
+        self.present = True
+        self.sent = 0
+        self.clk_low = self.data_low = 0
+        dut.ui_in[clk].value = 1
+        dut.ui_in[data].value = 1
+
+    def send(self, *values):
+        self.queue += list(values)
+
+    def _host(self):
+        uo = int(self.dut.uo_out.value)
+        return (uo >> 1) & 1, (uo >> 2) & 1
+
+    async def _tick(self, n=1):
+        ''' n system clocks with the lines as they are; the host's pulls at the end '''
+        for _ in range(n):
+            hc, hd = self._host()
+            self.dut.ui_in[self.clk].value = 0 if (hc or self.clk_low) else 1
+            self.dut.ui_in[self.data].value = 0 if (hd or self.data_low) else 1
+            await RisingEdge(self.dut.clk)
+        return self._host()
+
+    async def _pulse(self):
+        ''' One clock: low for half a period, then high; DATA as it was when CLK rose '''
+        self.clk_low = 1
+        await self._tick(self.half)
+        hc, hd = self._host()
+        level = 0 if (hd or self.data_low) else 1
+        self.clk_low = 0
+        await self._tick(self.half)
+        return level
+
+    async def _to_host(self, value):
+        bits = [(value >> k) & 1 for k in range(8)]
+        parity = (sum(bits) + 1) & 1
+        frame = [0] + bits + [parity ^ (1 if self.bad_parity else 0), 0 if self.bad_stop else 1]
+        n = len(frame) if self.cut is None else self.cut
+        self.bad_parity = self.bad_stop = False
+        self.cut = None
+        for b in frame[:n]:
+            self.data_low = 0 if b else 1
+            await self._tick(self.half // 2)       # DATA changes while CLK is high
+            self.clk_low = 1
+            await self._tick(self.half)
+            self.clk_low = 0
+            await self._tick(self.half - self.half // 2)
+        self.data_low = 0
+        self.sent += 1
+
+    async def _from_host(self):
+        await self._tick(self.first)
+        bits = [await self._pulse() for _ in range(10)]
+        value = sum(b << k for k, b in enumerate(bits[:8]))
+        ok = bits[8] == ((sum(bits[:8]) + 1) & 1) and bits[9] == 1
+        if self.ack:
+            self.data_low = 1
+        await self._pulse()
+        self.data_low = 0
+        self.received.append((value, ok))
+        if ok and self.reply is not None:
+            await self._tick(4 * self.half)
+            self.queue.insert(0, self.reply)
+
+    async def run(self):
+        held = 0
+        while True:
+            hc, hd = await self._tick()
+            if not self.present:
+                held = 0
+                continue
+            if hc:
+                held += 1
+                continue
+            if held:
+                self.holds.append(held)
+                if held >= self.hold and hd:       # CLK released with DATA low: the host's request
+                    held = 0
+                    await self._from_host()
+                    continue
+                held = 0
+            if self.queue and not hd:
+                await self._to_host(self.queue.pop(0))
+                await self._tick(2 * self.half)
