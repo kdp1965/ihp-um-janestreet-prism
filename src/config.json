@@ -55,7 +55,7 @@
   "EXTEND_STRIPES_SRAM_ALL_COLUMNS": false,
   "EXTEND_STRIPES_SRAM_ARRAY_EVERY_OTHER": true,
   "EXTEND_STRIPES_PIN_FACE_MARGIN": 0,
-  "//keepout_width": "40 um (runs/can_ko40, 2026-09-28): the CAN tree at 60 um placed with +13.9 % inflation (runs/can, stopped) and at 40 um with +3.9 %, which routed clean in 16 passes.  Before that 60 um was the good draw for txring2 (40 / 30 um placed at ~28 %).  One draw each: placement changes wholesale with any netlist change.",
+  "//keepout_width": "40 um (runs/spw, 2026-09-29: the SpaceWire link RTL, the same recipe; GPL 1.285 with no inflation, GRT 12776, detailed routing to 0 at pass 53 after a stall at 2 Metal2 spacing violations against the clock tree; typ setup +0.526).  40 um (runs/can_ko40, 2026-09-28): the CAN tree at 60 um placed with +13.9 % inflation (runs/can, stopped) and at 40 um with +3.9 %, which routed clean in 16 passes.  Before that 60 um was the good draw for txring2 (40 / 30 um placed at ~28 %).  One draw each: placement changes wholesale with any netlist change.",
   "MOUTH_KEEPOUT_WIDTH": 40,
   "MOUTH_KEEPOUT_MARGIN": 20,
   "MOUTH_KEEPOUT_MAX_DENSITY": 0.25,
