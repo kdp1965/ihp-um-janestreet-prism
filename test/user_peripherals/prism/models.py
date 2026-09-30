@@ -641,3 +641,4 @@ class JtagTap(Model):
                 shifting = self.state in (self.SH_DR, self.SH_IR)
                 self.dut.ui_in[self.tdo].value = (self.sr & 1) if shifting else 1
             tck_prev, pins_prev = tck, (tms, tdi)
+

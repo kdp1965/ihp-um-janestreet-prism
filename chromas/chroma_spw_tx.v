@@ -1,5 +1,5 @@
 // =======================================================
-// PRISM SpaceWire transmitter Chroma (2026-09-29: 13 states)
+// PRISM SpaceWire transmitter Chroma (2026-09-29: 15 states)
 //
 // The transmit half of a SpaceWire link (ECSS-E-ST-50-12C) on one shard:
 // Data-Strobe encoding, the characters with their parity, NULLs while
@@ -14,8 +14,8 @@
 // Bit clock: count1 counts up and wraps at PRELOAD (= bit period - 1), a
 // periodic tick the FSM never touches; every bit lasts exactly one period
 // (PRELOAD = 5: 10 Mb/s at 60 MHz, the rate a link starts at).  The
-// period cannot be shorter than 5 clocks: the next character is chosen
-// inside the last bit of the current one (DO, S1, S3, S4, then the wait).
+// period cannot be shorter than 6 clocks: the next character is chosen
+// inside the last bit of the current one (DO, S1 .. S4, then the wait).
 //
 // Data-Strobe: S = D xor C with C toggling every bit, so exactly one of
 // the two lines changes per bit.  Every character has an even number of
@@ -36,9 +36,21 @@
 // after the parity bit and fed every bit after the flag, so crc_ok (CRC =
 // CRC_EXPECTED = 0) says the bits of the last character were even.
 //
+// The link (the passive end of it): fractured, input 26 is the receiving
+// shard's pin_out[1], "a link is coming in".  The transmitter is silent
+// (D = S = 0) until it is set and then starts, its credit from zero, with
+// a NULL and one FCT (flag2, set at the start and cleared with that FCT):
+// what the other end waits for after its first NULL, within 12.8 us and
+// with nothing for the host to do in time.  When the input drops (the
+// receiver found an error, or the line went quiet) the transmitter stops
+// after the FCT of a NULL, where both lines are low already, and waits for
+// the next link.  The other end sees the silence and restarts too.
+// Unfractured input 26 is FIFO B's "empty": set.
+//
 // What is sent next, in this order:
 //   1. after an ESC its FCT: a NULL
-//   2. an FCT the host asked for: a toggle of host_in[1]
+//   2. the FCT of a link's start, then any the host asks for with a toggle
+//      of host_in[1] (each is credit for eight characters to come in)
 //   3. with credit and a byte in the FIFO: that byte
 //   4. with credit, the FIFO empty and a toggle of host_in[0]: EOP (K2),
 //      with the host interrupt
@@ -57,8 +69,10 @@
 //
 // Host side: PRELOAD = 5; CONST = 0x030B1F00; CRC_POLY = 0x80, CRC_EXPECTED
 // = 0; COMPARE = 1; LIMIT3 = 7; CFG1 in_prev0 / 1 <- host_in[0] / [1] (8, 9);
-// CFG2 slot 18 = comm[2] (code 7); CFG3 = SMP_EN | SMP_SRC(24) | SMP_RISE |
-// SMP_CNT2 when fractured; the FIFO in TX mode (this chroma's CFG0).
+// CFG2 slots 18 = comm[2] (code 7), 19 = flag2 (code 14); CFG3 = SMP_EN |
+// SMP_SRC(24) | SMP_RISE | SMP_CNT2 when fractured; the FIFO in TX mode
+// (this chroma's CFG0).  The receiving shard does not read the semaphore
+// flag2's output also sets.
 // =======================================================
 module chroma_spw_tx
 (
@@ -84,7 +98,7 @@ module chroma_spw_tx
    localparam [0:0]  SHIFT_24_EN        = 1'b0;
    localparam [0:0]  COUNT32            = 1'b0;
    localparam [0:0]  COUNT3_EN          = 1'b1;   // pin_out[3] is count3's second command bit
-   localparam [0:0]  LATCH2             = 1'b0;
+   localparam [0:0]  LATCH2             = 1'b1;   // OUT_LATCH enabled: it stores flag2
    localparam [0:0]  COUNT_UP           = 1'b1;   // count1 counts up ...
    localparam [0:0]  WRAP_PRELOAD       = 1'b1;   // ... and wraps at PRELOAD: the bit clock
    localparam [0:0]  SHIFT_LOAD_ONE     = 1'b0;
@@ -98,7 +112,7 @@ module chroma_spw_tx
    localparam [0:0]  CRC_XOR_OUT        = 1'b0;
    localparam [0:0]  CRC_SRC_OUT        = 1'b1;   // the parity is over the bits sent
    localparam [0:0]  SHIFT_IN_COND      = 1'b0;
-   localparam [0:0]  FLAG_LATCH         = 1'b0;
+   localparam [0:0]  FLAG_LATCH         = 1'b1;   // OUT_LATCH stores output 19 in flag2
    localparam [0:0]  COMM_LOAD_K        = 1'b1;   // OUT_COMM_LOAD takes K[{out20, out18}]
    localparam [0:0]  FIFO_SRAM          = 1'b0;
    localparam [2:0]  PIN_COND0 = 3'd4, PIN_COND1 = 3'd5, PIN_OFF = 3'd7;
@@ -109,19 +123,21 @@ module chroma_spw_tx
    // =======================================================
    // States
    // =======================================================
-   localparam [3:0]  STATE_START     = 4'd0;   // D = S = 0, then the first ESC
+   localparam [3:0]  STATE_START     = 4'd0;   // D = S = 0 until a link comes in, then the first ESC
    localparam [3:0]  STATE_P         = 4'd1;   // bit 0: the parity bit
    localparam [3:0]  STATE_F         = 4'd2;   // bit 1: the flag
    localparam [3:0]  STATE_C2        = 4'd3;   // control character, bit 2
    localparam [3:0]  STATE_DE        = 4'd4;   // data bits 0, 2, 4, 6
    localparam [3:0]  STATE_DO        = 4'd5;   // data bits 1, 3, 5 (and the way out at 7)
    localparam [3:0]  STATE_S1        = 4'd6;   // last bit of a character: what is next?
-   localparam [3:0]  STATE_S3        = 4'd7;
-   localparam [3:0]  STATE_S4        = 4'd8;
-   localparam [3:0]  STATE_WF        = 4'd9;   // last bit, then an FCT
-   localparam [3:0]  STATE_WN        = 4'd10;  // last bit, then an ESC (a NULL)
-   localparam [3:0]  STATE_WD        = 4'd11;  // last bit, then a data character
-   localparam [3:0]  STATE_WE        = 4'd12;  // last bit, then an EOP
+   localparam [3:0]  STATE_S2        = 4'd7;
+   localparam [3:0]  STATE_S3        = 4'd8;
+   localparam [3:0]  STATE_S4        = 4'd9;
+   localparam [3:0]  STATE_WF        = 4'd10;  // last bit, then an FCT
+   localparam [3:0]  STATE_WFN       = 4'd11;  // last bit of an ESC, then the FCT of the NULL
+   localparam [3:0]  STATE_WN        = 4'd12;  // last bit, then an ESC (a NULL)
+   localparam [3:0]  STATE_WD        = 4'd13;  // last bit, then a data character
+   localparam [3:0]  STATE_WE        = 4'd14;  // last bit, then an EOP
 
    reg   [3:0]    curr_state, next_state;
 
@@ -137,9 +153,11 @@ module chroma_spw_tx
    wire           in_prev0;
    wire           in_prev1;
    wire           esc_mark;
+   wire           first_fct;
    wire           fifo_empty;
    wire           parity_even;
    wire           fct_used;
+   wire           link_in;
 
    assign shift_data           = in_data[7];      // the bit to send
    assign host0                = in_data[8];      // toggles: send an EOP
@@ -150,17 +168,21 @@ module chroma_spw_tx
    assign in_prev0             = in_data[16];     // host_in[0] at the last EOP
    assign in_prev1             = in_data[17];     // host_in[1] at the last FCT
    assign esc_mark             = in_data[18];     // slot comm[2]: at bit 2, bit 4 of the constant (K1's mark)
+   assign first_fct            = in_data[19];     // slot flag2: the FCT of the link's start is still to go
    assign fifo_empty           = in_data[20];
    assign parity_even          = in_data[22];     // crc_ok: the last character's bits were even
+   assign link_in              = in_data[26];     // fractured: the receiving shard's pin_out[1]
    assign fct_used             = in_data[29];     // count3 >= LIMIT3 (7): the eighth character on this FCT
 
    // =======================================================
    // Outputs
    // =======================================================
    reg            count3_clr;     // pin_out[3]: count3 command bit 1 (alone: clear)
+   reg            latch;          // OUT_LATCH: store flag2
    reg            fifo_pop;       // OUT_FIFO_WR_RD
    reg            count1_step;    // OUT_COUNT1_INC_DEC: the bit clock runs in every state
    reg            shift_en;       // OUT_SHIFT
+   reg            count2_inc;     // with the decrement: clear count2
    reg            count2_dec;     // an FCT used up
    reg            count3_inc;     // OUT_COUNT3 (alone: + 1)
    reg            crc_clear;      // OUT_CRC_CLEAR: parity from zero
@@ -169,12 +191,15 @@ module chroma_spw_tx
    reg            sema_clear;     // OUT_SEMA_CLEAR in every clock (unfractured: the FIFO select, 0 at the pop)
    reg            comm_load;      // OUT_COMM_LOAD: comm <= K
    reg            ksel0;          // OUT_K_SEL0
+   reg            flag2_val;      // OUT_FLAG2: the value OUT_LATCH stores
    reg            ksel1;          // OUT_K_SEL1
 
    assign out_data[3]          = count3_clr;
+   assign out_data[4]          = latch;
    assign out_data[5]          = fifo_pop;
    assign out_data[6]          = count1_step;
    assign out_data[8]          = shift_en;
+   assign out_data[9]          = count2_inc;
    assign out_data[10]         = count2_dec;
    assign out_data[11]         = count3_inc;
    assign out_data[12]         = crc_clear;
@@ -183,6 +208,7 @@ module chroma_spw_tx
    assign out_data[15]         = sema_clear;
    assign out_data[16]         = comm_load;
    assign out_data[18]         = ksel0;
+   assign out_data[19]         = flag2_val;
    assign out_data[20]         = ksel1;
    // other out_data bits unused by this chroma
 
@@ -205,9 +231,11 @@ module chroma_spw_tx
       next_state     = curr_state;
 
       count3_clr     = 1'b0;
+      latch          = 1'b0;
       fifo_pop       = 1'b0;
       count1_step    = 1'b1;
       shift_en       = 1'b0;
+      count2_inc     = 1'b0;
       count2_dec     = 1'b0;
       count3_inc     = 1'b0;
       crc_clear      = 1'b0;
@@ -216,6 +244,7 @@ module chroma_spw_tx
       sema_clear     = 1'b1;
       comm_load      = 1'b0;
       ksel0          = 1'b0;
+      flag2_val      = 1'b0;
       ksel1          = 1'b0;
       cond_out[0]    = 1'b0;      // D
       cond_out[1]    = 1'b0;      // S
@@ -228,13 +257,18 @@ module chroma_spw_tx
                         3'h0, MSHIFT_EN, SHIFT_IN_SEL};
 
       case (curr_state)
-      STATE_START:                                 // both lines low; the link starts with a NULL
+      STATE_START:                                 // both lines low until a link comes in; then a NULL
          begin
-            if (tick)
+            if (tick && link_in)
             begin
                comm_load   = 1'b1;
                ksel0       = 1'b1;                 // K1: ESC
                crc_clear   = 1'b1;                 // nothing before it: even
+               count2_inc  = 1'b1;
+               count2_dec  = 1'b1;                 // no credit from the link before
+               count3_clr  = 1'b1;
+               latch       = 1'b1;
+               flag2_val   = 1'b1;                 // one FCT after this NULL
                next_state  = STATE_P;
             end
          end
@@ -293,7 +327,7 @@ module chroma_spw_tx
             begin
                shift_en    = 1'b1;
                crc_update  = 1'b1;
-               next_state  = STATE_WF;
+               next_state  = STATE_WFN;
             end
             else if (tick && !esc_mark)
             begin
@@ -350,11 +384,26 @@ module chroma_spw_tx
                cond_out[0] = 1'b1;
                cond_out[1] = 1'b1;
             end
-            if (host1 != in_prev1)                 // the FCT the host asked for
+            if (first_fct)                         // the FCT a new link starts with
                next_state  = STATE_WF;
-            else if (!credit)                      // nothing else may go
-               next_state  = STATE_WN;
+            else if (host1 != in_prev1)            // an FCT the host asked for
+               next_state  = STATE_WF;
             else
+               next_state  = STATE_S2;
+         end
+
+      STATE_S2:
+         begin
+            cond_out[0] = 1'b0;
+            cond_out[1] = 1'b0;                    // S = D
+            if (shift_data)
+            begin
+               cond_out[0] = 1'b1;
+               cond_out[1] = 1'b1;
+            end
+            if (!credit)                           // nothing else may go
+               next_state  = STATE_WN;
+            else if (credit)
                next_state  = STATE_S3;
          end
 
@@ -404,6 +453,26 @@ module chroma_spw_tx
                comm_load   = 1'b1;
                ksel0       = 1'b1;
                ksel1       = 1'b1;                 // K3: FCT
+               latch       = 1'b1;                 // flag2 <= 0: the link's first FCT is on its way
+               next_state  = STATE_P;
+            end
+         end
+
+      STATE_WFN:                                   // the second half of a NULL
+         begin
+            cond_out[0] = 1'b0;
+            cond_out[1] = 1'b0;                    // S = D
+            if (shift_data)
+            begin
+               cond_out[0] = 1'b1;
+               cond_out[1] = 1'b1;
+            end
+            if (tick)
+            begin
+               crc_update  = 1'b1;
+               comm_load   = 1'b1;
+               ksel0       = 1'b1;
+               ksel1       = 1'b1;                 // K3: FCT
                next_state  = STATE_P;
             end
          end
@@ -424,6 +493,8 @@ module chroma_spw_tx
                ksel0       = 1'b1;                 // K1: ESC
                next_state  = STATE_P;
             end
+            else if (!link_in && !shift_data)      // the link is gone, and both lines are low: stop here
+               next_state  = STATE_START;
          end
 
       STATE_WD:

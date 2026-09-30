@@ -4,7 +4,8 @@
 // Stands in for the receiving shard in the transmitter's fractured test:
 // a toggle of host_in[0] sets the semaphore towards the other shard
 // COUNT2 times, two clocks apart (the fastest a semaphore can repeat), as
-// a receiver does for every FCT it decodes.  No pins.
+// a receiver does for every FCT it decodes, and holds pin_out[1] up, the
+// receiver's "a link is coming in".  No pins.
 //
 // Host side: CFG1 in_prev0 <- host_in[0] (8); COMPARE = 1; COUNT2 = the
 // number of semaphores, then the toggle.
@@ -38,9 +39,11 @@ module chroma_spw_fct_stub
    assign more                 = in_data[11];     // count2 >= COMPARE (1)
    assign in_prev0             = in_data[16];
 
+   reg            link;           // pin_out[1]: the transmitter's input 26
    reg            count2_dec;
    reg            sema_set;       // OUT_SEMA_SET
 
+   assign out_data[1]          = link;
    assign out_data[10]         = count2_dec;
    assign out_data[19]         = sema_set;
    // other out_data bits unused by this chroma
@@ -57,6 +60,7 @@ module chroma_spw_fct_stub
    begin
       next_state     = curr_state;
 
+      link           = 1'b1;
       count2_dec     = 1'b0;
       sema_set       = 1'b0;
       cond_out[0]    = 1'b0;

@@ -157,7 +157,8 @@
 //     15   count2_eq_comm   19:16 in_prev[3:0] (edge-capture flops, sources in CFG1)
 //     20   FIFO flag slot E (default empty)   21 FIFO flag slot F (default full)
 //     22   crc_ok (counter mode: count >= compare)   23 count1_wrap   24 sema_in   25 other_shard_halt
-//     26   FIFO B flag slot E   27 FIFO B flag slot F (shard 0, unfractured; else 0)
+//     26   FIFO B flag slot E   27 FIFO B flag slot F (shard 0, unfractured); fractured: the other shard's
+//          pin_out[1] and pin_out[2], one clock old
 //     28    timer2 tick (slot default; CFG2 may select something else)
 //     29    count3 >= limit (slot default)   30 stuff unit: receive = a stuff bit was dropped (until the next
 //           shift), transmit = holding a stuff bit (slot default)   31 transmit: the next move will be a stuff bit
@@ -532,6 +533,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     wire [SHARDS-1:0]    sema_v;            // semaphore as seen by shard s
     wire [SHARDS-1:0]    sema_set_req;      // shard s asserts OUT_SEMA_SET (to the other shard)
     wire [SHARDS-1:0]    halt_r_v;          // registered per-shard halt (breaks the cross-shard comb. path)
+    wire [2*SHARDS-1:0]  xs_v;              // registered per-shard pin_out[2:1]: the other shard's inputs 26-27 when fractured
     wire [7*SHARDS-1:0]  pin_src_v;         // per-shard candidate value for uo_out[k+1]
     wire [7*SHARDS-1:0]  pin_claim_v;       // per-shard "drives uo_out[k+1]"
 
@@ -627,6 +629,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             wire                      win    = shard_win && (shard_sel == (s == 1));
             wire                      halt_s = halt[s];
             reg                       halt_r;
+            reg   [1:0]               xs_r;                      // pin_out[2:1] as the other shard sees them
             wire                      exec;
             wire [31:0]               cfg0;
             wire [20:0]               pinmux;
@@ -1229,11 +1232,15 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             assign in_s[25]    = halt_r_v[1-s];     // other shard halted (registered: the live
                                                     // halt includes the conditional break, which
                                                     // depends on this shard's inputs)
-            // FIFO B's flags for shard 0 while it owns both FIFOs, same two-slot select
+            // FIFO B's flags for shard 0 while it owns both FIFOs, same two-slot select;
+            // fractured, the other shard's pin_out[1] and pin_out[2], one clock old: two
+            // levels an FSM holds up for its neighbour (a link that is up, a fault)
             wire [3:0]                fifo_b_fl = fifo_st_v[32*(SHARDS-1) +: 4];   // {af, ae, full, empty}
             wire                      own_b     = (s == 0) && !fractured;
-            assign in_s[26]    = own_b & fifo_flag(1'b0, cfg1[29:28], fifo_b_fl[0], fifo_b_fl[1], fifo_b_fl[2], fifo_b_fl[3]);
-            assign in_s[27]    = own_b & fifo_flag(1'b1, cfg1[31:30], fifo_b_fl[0], fifo_b_fl[1], fifo_b_fl[2], fifo_b_fl[3]);
+            assign in_s[26]    = fractured ? xs_v[2*(1-s)] :
+                                 own_b & fifo_flag(1'b0, cfg1[29:28], fifo_b_fl[0], fifo_b_fl[1], fifo_b_fl[2], fifo_b_fl[3]);
+            assign in_s[27]    = fractured ? xs_v[2*(1-s) + 1] :
+                                 own_b & fifo_flag(1'b1, cfg1[31:30], fifo_b_fl[0], fifo_b_fl[1], fifo_b_fl[2], fifo_b_fl[3]);
 
             // Output pins: uo_out[k+1] source select PINMUX[3k+2:3k]
             //   0-3 pin_out[3:0], 4 cond_out[0], 5 cond_out[1], 6 shift_data
@@ -1272,6 +1279,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                 if (!rst_n)
                 begin
                     halt_r      <= 1'b0;
+                    xs_r        <= 2'b0;
                     host_irq_r  <= 1'b0;
                     irq         <= 1'b0;
                     host_in     <= 2'b0;
@@ -1285,6 +1293,13 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                 begin
                     halt_r     <= halt_s;
                     host_irq_r <= exec & out_s[OUT_HOST_INTERRUPT];
+
+                    // What the other shard sees of this one (inputs 26-27,
+                    // fractured): held while halted, low while disabled
+                    if (!prism_enable)
+                        xs_r <= 2'b0;
+                    else if (exec)
+                        xs_r <= out_s[2:1];
 
                     // Interrupt: debugger halt, or OUT_HOST_INTERRUPT asserted
                     // (once per assertion).  Cleared by a byte write to the
@@ -1642,6 +1657,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             assign irq_v[s]              = irq | (rx32 & word_full);    // 32-bit RX: a complete word is an interrupt
             assign sema_v[s]             = sema;
             assign halt_r_v[s]           = halt_r;
+            assign xs_v[2*s +: 2]        = xs_r;
 
             if (s == 0)
             begin : IN0

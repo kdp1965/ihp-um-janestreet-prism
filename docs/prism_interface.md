@@ -63,7 +63,7 @@ features take 16 and up.
 | 23 | count1_wrap | count1 rolled over (count-up natural mode) |
 | 24 | sema_in | sticky semaphore set by the other shard's OUT_SEMA_SET, cleared by this shard's OUT_SEMA_CLEAR (same-cycle winner = CFG0[24]); implemented Phase 2 |
 | 25 | other_shard_halt | the other shard is halted (debugger); implemented Phase 2 |
-| 26-27 | FIFO B flag slots E / F | shard 0 unfractured: two of shard 1's FIFO flags, selects CFG1[29:28] / [31:30]; 0 otherwise |
+| 26-27 | FIFO B flag slots E / F; the other shard | shard 0 unfractured: two of shard 1's FIFO flags, selects CFG1[29:28] / [31:30].  Fractured (2026-09-29, 4b.8): the other shard's pin_out[1] and pin_out[2], one clock old |
 | 28-31 | slots | input slots (4h): CFG2[31:16], same menu; defaults: 28 the timer 2 tick (4l), 29 count3 >= its limit (4b.1), 30 stuff unit: a stuff bit was dropped (receive) / a comm load is held (transmit), 31 a stuff bit is due (transmit), 4b.2 |
 
 Note on the trees: tree 0 reads muxes 0-2, tree 1 reads 3-5, cond 0 reads
@@ -532,15 +532,15 @@ synchroniser for the run.
 
 ### 4b.6 SpaceWire transmitter chroma (2026-09-29)
 
-`chromas/chroma_spw_tx.v` (13 states: it fits one shard of the fractured
-PRISM) is the transmit half of a SpaceWire link (ECSS-E-ST-50-12C): D on
+`chromas/chroma_spw_tx.v` (15 states with the link of 4b.8: it fits one
+shard of the fractured PRISM) is the transmit half of a SpaceWire link (ECSS-E-ST-50-12C): D on
 uo_out[1] (cond_out[0]), S on uo_out[2] (cond_out[1]).  No RTL change.
 
 **Bits.**  count1 is the periodic bit clock of 4b.2 (count up, wrap at
 PRELOAD = bit period - 1) and every bit lasts exactly one period: 6 clocks
 is 10 Mb/s at 60 MHz, the rate a link starts at (10.7 at 64 MHz, inside
-the standard's 10 %).  The minimum is 5 clocks: the next character is
-chosen inside the last bit of the current one (DO, S1, S3, S4, then the
+the standard's 10 %).  The minimum is 6 clocks: the next character is
+chosen inside the last bit of the current one (DO, S1 to S4, then the
 wait for the tick).  Data-Strobe is S = D xor C with C toggling per bit;
 every character has an even number of bits, so C belongs to the state
 (S = !D on a character's even bits, S = D on its odd ones).  The pins
@@ -563,8 +563,9 @@ crc_ok (CRC_EXPECTED = 0) says "the last character's bits were even" and
 P = crc_ok xor flag.  Bit 0 of each constant holds a copy of the flag, so
 the one LUT `crc_ok xor shift_data` makes P for every character.
 
-**What goes next**, decided per character: the FCT of a NULL; an FCT the
-host asked for (a toggle of host_in[1]); with credit, a byte from the
+**What goes next**, decided per character: the FCT of a NULL; the FCT a
+link starts with (4b.8), then any the host asks for (a toggle of
+host_in[1]); with credit, a byte from the
 FIFO; with credit and the FIFO empty, EOP on a toggle of host_in[0] (host
 interrupt); otherwise a NULL.  A request is a toggle, taken between two
 characters: a second toggle before the first was taken cancels it (wait
@@ -578,11 +579,11 @@ semaphore's rising edges into count2 (CFG3 = SMP_EN | SMP_SRC(24) |
 SMP_RISE | SMP_CNT2) while the FSM clears the semaphore in every clock
 (sema_set_wins, so a set shows for one clock): semaphores two clocks apart
 are all counted and a decrement in the same clock cancels against the
-increment.  The transmitter never sets the semaphore the other way.
+increment.
 
 Host setup: PRELOAD = 5, CONST = 0x030B1F00, CRC_POLY = 0x80, CRC_EXPECTED
-= 0, COMPARE = 1, LIMIT3 = 7, CFG1 = 8 | 9 << 4, CFG2 = 7 << 8 (input 18 =
-comm[2]), CFG3 as above.
+= 0, COMPARE = 1, LIMIT3 = 7, CFG1 = 8 | 9 << 4, CFG2 = 7 << 8 | 14 << 12
+(inputs 18, 19 = comm[2], flag2), CFG3 as above.
 
 Tests: `test_spw_tx` (unfractured, the host writes the credit) and
 `test_spw_tx_fractured` (the transmitter on shard 1, `chroma_spw_fct_stub`
@@ -592,7 +593,7 @@ that D and S never move together, every bit period, every parity and the
 character sequence: the NULL of the standard first, FCTs on request, data
 held without credit, the credit running out after eight characters, EOP
 with the interrupt, EEP, a burst of seven FCTs, a 40-byte packet.  Both
-pass at 5, 6 and 30 clocks per bit (SPW_BIT); 4 fails as it must.
+pass at 6 and 30 clocks per bit (SPW_BIT); 5 fails as it must.
 
 What this changes in the first assessment: parity and the counting of
 FCTs need no RTL.  The receiver is 4b.7.  The bit order of the control
@@ -608,15 +609,18 @@ pair with D and S on adjacent pins.  One 8:1 mux and an xor per shard.
 Lint unchanged (94 kinds); all 37 unit tests pass.
 
 `chromas/chroma_spw_rx.v` (15 states, one shard): D on ui_in[1], S on
-ui_in[2].
+ui_in[2].  (The time-out and the errors are as the link of 4b.8 left
+them.)
 
 **Bits.**  CFG3 = SMP_EN | SMP_SRC(1) | edge code 3 | SMP_TIMER | SMP_CNT2:
-every bit sets "edge pending" (input slot code 15), reloads count1 and
+every bit sets "edge pending" (input slot code 15), clears count1 and
 adds one to count2.  The FSM's wait states have two legs, the bit
 (shift D in, feed the parity, which clears the flag) and the time-out:
-count1 counts down from PRELOAD and stops at 0, so its terminal count is
-"no bit for PRELOAD + 1 clocks", the disconnect of the standard (850 ns:
-PRELOAD = 50 at 60 MHz).  What a bit means is decided in one-clock states
+count1 counts up and wraps at PRELOAD, so its terminal count is "no bit
+for PRELOAD + 1 clocks", the disconnect of the standard (850 ns: PRELOAD
+= 50 at 60 MHz).  (Counting down from PRELOAD, the first version, cannot
+start: count1 is held at 0 while the PRISM is disabled and its terminal
+count was there at the first clock.)  What a bit means is decided in one-clock states
 after it.  count2 counts the bits of a data character (COMPARE = 8).
 
 **Characters.**  After the parity bit and the flag, CHK checks the parity
@@ -643,12 +647,9 @@ way: the first push, two clocks in MARK and MARK2, the second in PUSH2.
 
 **Errors**: wrong parity, anything but an FCT after an ESC, a data
 character after an ESC (time-codes are not taken), no bit for the
-time-out.  The leg that finds the error interrupts the host and the FSM
-stops in HALT, whose pin_out[2] marks the state in the debug status.
-The host restarts the link by disabling and enabling the PRISM, as the
-standard has both directions do after any error.  The first bit of a
-link has no time-out (count1 is held at 0 while the PRISM is disabled,
-so the host cannot give it a start value).
+time-out.  The leg that finds the error interrupts the host, adds one to
+count3 (the links lost) and takes the receiver back to where it waits
+for the next link (4b.8).
 
 Host setup: CFG2 = 15 | 12 << 4 | 11 << 8 | 13 << 12 (inputs 16-19: edge
 pending, comm[7], comm[6], comm == K3), CFG3 as above, CONST = 0xF0010000
@@ -660,16 +661,12 @@ Mb/s at 60 MHz), the transmitter from 5.
 
 Tests (spw_model.py gained an encoder with parity errors, time-codes,
 stop and restart): `test_spw_rx`, the receiver on shard 0 against the
-encoder with the transmitter chroma on shard 1 counting its semaphores:
-NULLs, FCTs as credit, packets with the escape value in their data,
-EEP, NULLs and an FCT inside a packet, back-to-back and empty packets,
-then each error with a restart after it (parity of a data character, of
-a control character, of a NULL; ESC then EOP; ESC then ESC; a time-code;
-the lines stopping), and a link that starts late.  `test_spw_loop`: the
-transmitter's D and S wired to the receiver's; the FCTs the host asks
-the transmitter for come back as its own credit, and with that credit
-three packets go round into the receiver's FIFO, the last one waiting
-until one more FCT has come round.
+encoder with the transmitter chroma on shard 1: NULLs, FCTs as credit,
+packets with the escape value in their data, EEP, NULLs and an FCT
+inside a packet, back-to-back and empty packets, then each error
+(parity of a data character, of a control character, of a NULL; ESC
+then EOP; ESC then ESC; a time-code; the lines stopping) with the next
+link after it, and the PRISM enabled while the line is busy.
 
 Compiler notes.  (1) A state entered by INC goes back to where it came
 from when none of its legs matches (prism.v, loop_si), and the compiler
@@ -683,11 +680,72 @@ loads K3.  (3) INC chains work (CHK to DCHK to MARK).  (4) Two trees
 of three inputs with a two-input conditional output do not map; the
 control decode is split so that no state needs that.
 
-Still open for a complete link: the link state machine (ErrorReset,
-Ready, Started, Connecting, Run with the 6.4 and 12.8 us timers) and
-"got NULL"; time-codes; the electrical side (LVDS).  The host has to
-restart both shards after an error, and the receiver's 15 states and the
-transmitter's 13 leave 1 and 3 of their 16 for that.
+### 4b.8 SpaceWire link: the passive end (2026-09-29)
+
+A SpaceWire link is started by a state machine at each end (ErrorReset
+6.4 us, ErrorWait 12.8 us, Ready, Started, Connecting, Run) whose windows
+of 12.8 us are shorter than the host can answer in, and re-programming
+the PRISM between the negotiation and the data takes about 0.7 ms for
+both banks where the other end gives up after 850 ns of silence.  So the
+two chromas do the part that has to be in time themselves, as the end
+that answers: the other end starts the link.
+
+**RTL** (prism_periph.v): fractured, inputs 26 and 27 are the other
+shard's pin_out[1] and pin_out[2], registered (held while it is halted,
+low while the PRISM is disabled); unfractured they are FIFO B's flags as
+before.  Two flops and two 2:1 muxes per shard: a level each FSM can hold
+up for its neighbour, where the semaphore is an event.  Lint unchanged
+(94 kinds), 37 of 37 unit tests.
+
+**Receiver.**  A link starts on a quiet line, so its first bit is the
+first bit of a NULL and the characters are aligned from there.  QUIET
+(state 0) waits for the time-out whatever the line does, FIRST for the
+first bit, clearing the parity and the two flags while it waits; from the
+first bit on pin_out[1] is up.  Every error goes back to QUIET.
+
+**Transmitter.**  START keeps D = S = 0 until input 26 is set, clears the
+credit (count2, count3) and sends a NULL; flag2, set there, makes the
+next character an FCT and is cleared with it.  That is the FCT the other
+end must see within 12.8 us of its first NULL, and nothing in it waits
+for the host: an FCT armed by the host, the first version, went out
+whenever the toggle landed and the attempts after it had none.  When
+input 26 drops the transmitter stops in WN with the last bit 0, that is
+after the FCT of a NULL where both lines are low already, and is back in
+START.  The other end sees the silence as a disconnect and restarts.
+flag2's output is also OUT_SEMA_SET; the receiver does not read that
+semaphore.
+
+What the host does: enable the PRISM; read count3 of the receiving shard
+for the links lost and its FIFO for the packets; ask for one more FCT
+(host_in[1]) each time it has room for eight more characters.  It does
+not restart anything.
+
+`test_spw_link`: the two chromas against `SpwPeer` (spw_model.py), the
+standard's state machine as the end that starts the link, with its
+errors: disconnect, parity, escape, an FCT or a data character in a
+state that may not take it, more data than the credit given.
+
+| | 6 clocks per bit | 8 | 30 |
+|---|---|---|---|
+| Run after the other end's first NULL | 1.3 us | 1.6 us | 6.0 us |
+| Run again after a parity error from the other end | 22.3 us | 23.3 us | 32.0 us |
+
+The second row is the other end's 850 ns, 6.4 us and 12.8 us.  The test
+also sends packets both ways under the credit of the FCTs, has the other
+end wait for our next FCT, switches it off and on, and loses the link at
+each of eight points of a NULL: the next link always forms.  That last
+part found a flag left over from a link that ended just after an ESC
+(the first character of the next link was then refused); FIRST clears
+the flags since.  The other end at 4 clocks per bit against our 6 passes
+too.
+
+Not there: the end that starts a link (its 12.8 us time-outs in the
+transmitter, and a link of two passive ends never starts: the loopback
+test of 4b.7's first version is gone for that reason); time-codes; the
+electrical side (LVDS).  Which character is an error in which state is
+the model's reading of the standard, as the bit order of the control
+characters is: check both against ECSS-E-ST-50-12C.  The receiver has
+one state left of its 16, the transmitter one.
 
 ## 4y. RX DMA into PSRAM B (2026-09-23)
 

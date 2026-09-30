@@ -3238,7 +3238,7 @@ class SpwTxTest(PrismTest):
             await tqv.write_byte_reg(REG_COUNT2 + b, 0)                       # no credit yet
         await tqv.write_word_reg(REG_CFG1, 8 | (9 << 4))                      # in_prev0 / 1 <- host_in[0] / [1]
         await tqv.write_word_reg(REG_CFG1 + SHARD1, 8 | (9 << 4))
-        await tqv.write_word_reg(REG_CFG2 + base, 7 << 8)                     # input 18 = comm[2]: the ESC's mark
+        await tqv.write_word_reg(REG_CFG2 + base, (7 << 8) | (14 << 12))      # inputs 18, 19 = comm[2] (the ESC's mark), flag2
         await tqv.write_word_reg(REG_CONST + base, 0x030B1F00)                # K3 FCT, K2 EOP, K1 ESC + mark, K0 data prefix
         await tqv.write_word_reg(REG_CRC_POLY + base, 0x80)                   # CRC8 with x^8 + x^7: the parity
         await tqv.write_word_reg(REG_CRC_EXP + base, 0)
@@ -3285,12 +3285,12 @@ class SpwTxTest(PrismTest):
                     await self.clocks(4 * BIT)
                 await tqv.write_byte_reg(REG_FIFO + base, b)
 
-        self.log("the link starts: NULLs from D = S = 0")
+        self.log("the link starts from D = S = 0: a NULL, the first FCT, NULLs")
         await self.load()
         new = await news(60 * BIT)
         assert dec.first == (0, 0), dec.first
         assert dec.bits[:8] == [0, 1, 1, 1, 0, 1, 0, 0], dec.bits[:8]          # the NULL of the standard
-        assert len(new) >= 5 and set(new) == {'NULL'}, new
+        assert len(new) >= 5 and new[:2] == ['NULL', 'FCT'] and set(new[2:]) == {'NULL'}, new
 
         self.log("an FCT for the host")
         await toggle(1)
@@ -3359,8 +3359,6 @@ class SpwTxTest(PrismTest):
         await toggle(0)
         new = await until(lambda n: 'EOP' in n)
         assert new.count('EOP') == 1 and not data(new), new
-        if self.FRACTURED:
-            assert (await tqv.read_word_reg(REG_INT_STATUS) >> 2) & 1 == 0, "the transmitter set the semaphore towards shard 0"
         self.log(f"    {len(dec.bits)} bits, {self.seen} characters, every period {BIT} clocks")
         await bench.disable()
         await tqv.write_word_reg(REG_FRAC_CFG, 0)
@@ -3405,16 +3403,20 @@ class SpwTxFracturedTest(SpwTxTest):
 
 class SpwRxTest(PrismTest):
     ''' SpaceWire receiver on shard 0 (D on ui_in[1], S on ui_in[2]) fed by
-        an encoder model, the transmitter chroma on shard 1 counting the
-        receiver's semaphores: NULLs, FCTs into the transmitter's credit,
-        packets into the FIFO with their ends escaped, NULLs and FCTs
-        inside a packet, then every link error (parity on data and on
-        control, anything but an FCT after an ESC, a time-code, a
-        disconnect) with a restart after each, and a link that starts late. '''
-    name = "spw_rx Chroma (SpaceWire receiver)"
-    BIT = int(os.environ.get("SPW_BIT", 6))          # clocks per bit
+        an encoder model, the transmitter on shard 1: the receiver waits for
+        a quiet line and the first bit, the transmitter for the receiver
+        (a NULL, then the link's first FCT); FCTs into the transmitter's
+        credit, packets into the FIFO with their ends escaped, NULLs and
+        FCTs inside a packet; then every link error (parity on data, on
+        control, on a NULL, anything but an FCT after an ESC, a time-code,
+        the lines stopping): interrupt, one more link lost, the transmitter
+        silent, and a new link without the host touching the PRISM. '''
+    name = "spw_rx Chroma (SpaceWire receiver, the link's passive end)"
+    BIT = int(os.environ.get("SPW_BIT", 6))          # clocks per bit of the other end
+    TX_BIT = max(BIT, 6)                             # ours: the transmitter's minimum is 6
     ESC_BYTE = 0xF0
     TIMEOUT = 51                                     # 850 ns at 60 MHz
+    QUIET, FIRST = 0, 1                              # the receiver's states without a link
 
     async def configure(self):
         tqv, BIT = self.tqv, self.BIT
@@ -3422,56 +3424,65 @@ class SpwRxTest(PrismTest):
             await tqv.write_byte_reg(REG_HOST + b, 0x00)
             await tqv.write_word_reg(REG_FIFO_ST + b, 0)
             await tqv.write_byte_reg(REG_COUNT2 + b, 0)
+            await tqv.write_byte_reg(REG_COUNT3 + b, 0)
             await tqv.write_word_reg(REG_CRC_POLY + b, 0x80)                  # CRC8 with x^8 + x^7: the parity
+            await tqv.write_word_reg(REG_CRC + b, 0)
         # the receiver, shard 0
         await tqv.write_word_reg(REG_CFG2, 15 | (12 << 4) | (11 << 8) | (13 << 12))   # edge pending, comm[7], comm[6], comm == K3
         await tqv.write_word_reg(REG_CFG3, CFG3_SMP_EN | CFG3_SMP_SRC(1) | CFG3_SMP_DS | CFG3_SMP_TIMER | CFG3_SMP_CNT2)
         await tqv.write_byte_reg(REG_COMPARE, 8)                              # the bits of a data character
-        await tqv.write_word_reg(REG_CONST, (self.ESC_BYTE << 24) | 0x010000)  # K3 escape, K2 EEP, K0 EOP / zero
+        await tqv.write_word_reg(REG_CONST, (self.ESC_BYTE << 24) | 0x010000)  # K3 escape, K2 EEP, K0 EOP
         await tqv.write_word_reg(REG_CRC_EXP, 0x80)                           # odd
         await tqv.write_word_reg(REG_PRELOAD, self.TIMEOUT - 1)
         # the transmitter, shard 1
         await tqv.write_word_reg(REG_CFG1 + SHARD1, 8 | (9 << 4))
-        await tqv.write_word_reg(REG_CFG2 + SHARD1, 7 << 8)
+        await tqv.write_word_reg(REG_CFG2 + SHARD1, (7 << 8) | (14 << 12))
         await tqv.write_word_reg(REG_CFG3 + SHARD1, CFG3_SMP_EN | CFG3_SMP_SRC(24) | CFG3_SMP_RISE | CFG3_SMP_CNT2)
         await tqv.write_word_reg(REG_CONST + SHARD1, 0x030B1F00)
         await tqv.write_word_reg(REG_CRC_EXP + SHARD1, 0)
-        await tqv.write_word_reg(REG_PRELOAD + SHARD1, BIT - 1)
+        await tqv.write_word_reg(REG_PRELOAD + SHARD1, self.TX_BIT - 1)
         await tqv.write_byte_reg(REG_COMPARE + SHARD1, 1)
         await tqv.write_byte_reg(REG_LIMIT3 + SHARD1, 7)
-        self.halt = can.state_with_default_output(chroma_spw_rx, 2)           # the state that drives pin_out[2]
+        self.host = 0
 
-    async def link_start(self, load=False):
-        ''' What the host does before every start: no credit, empty FIFOs '''
-        tqv = self.tqv
-        await tqv.write_byte_reg(REG_COUNT2 + SHARD1, 0)
-        await tqv.write_byte_reg(REG_COUNT3 + SHARD1, 0)
-        await tqv.write_word_reg(REG_FIFO_ST, 0)
-        await tqv.write_word_reg(REG_FIFO_ST + SHARD1, 0)
-        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
-        await tqv.write_byte_reg(REG_INT_CLR1, 0x80)
-        if load:
-            await self.bench.load_fractured(chroma_spw_rx, chroma_spw_rx_ctrlReg, chroma_spw_rx_pinmuxReg,
-                                            chroma_spw_tx, chroma_spw_tx_ctrlReg, chroma_spw_tx_pinmuxReg)
-        else:
-            await self.bench.enable()
+    async def load(self):
+        await self.bench.load_fractured(chroma_spw_rx, chroma_spw_rx_ctrlReg, chroma_spw_rx_pinmuxReg,
+                                        chroma_spw_tx, chroma_spw_tx_ctrlReg, chroma_spw_tx_pinmuxReg)
+
+    async def unload(self):
+        tqv, dut = self.tqv, self.dut
+        await self.bench.disable()
+        for b in (0, SHARD1):
+            await tqv.write_word_reg(REG_CFG3 + b, 0)
+            await tqv.write_word_reg(REG_CFG2 + b, 0)
+            await tqv.write_byte_reg(REG_HOST + b, 0)
+        await tqv.write_word_reg(REG_FRAC_CFG, 0)
+        dut.ui_in[1].value = 0
+        dut.ui_in[2].value = 0
+
+    async def toggle(self, bit):
+        ''' A request to the transmitter: 1 an FCT, 0 an EOP '''
+        self.host ^= 1 << bit
+        await self.tqv.write_byte_reg(REG_HOST + SHARD1, self.host)
 
     async def fifo(self):
         tqv = self.tqv
         return [await tqv.read_byte_reg(REG_FIFO) for _ in range(fifo_count(await tqv.read_word_reg(REG_FIFO_ST)))]
 
-    async def halted(self):
-        return await self.bench.curr_state() == self.halt
+    async def lost(self):
+        ''' Links the receiver has lost '''
+        return await self.tqv.read_byte_reg(REG_COUNT3)
+
+    async def credit(self):
+        return await self.tqv.read_byte_reg(REG_COUNT2 + SHARD1)
 
     async def run(self):
         tqv, bench, dut, BIT = self.tqv, self.bench, self.dut, self.BIT
         E = self.ESC_BYTE
         await self.configure()
         enc = spw.SpwEncoder(dut, BIT)
-        self.tasks.append(enc)
-
-        async def credit():
-            return await tqv.read_byte_reg(REG_COUNT2 + SHARD1)
+        dec = spw.SpwDecoder(dut)
+        self.tasks += [enc, dec]
 
         async def packet(stream, settle=6):
             ''' Send it, then what the FIFO holds '''
@@ -3479,20 +3490,31 @@ class SpwRxTest(PrismTest):
             await self.clocks(settle * BIT)
             return await self.fifo()
 
-        self.log("the link starts: NULLs")
-        await self.link_start(load=True)
+        self.log("no link: the receiver waits, the transmitter is silent")
+        await self.load()
+        dec.start()
+        await self.clocks(6 * self.TIMEOUT)
+        assert await bench.curr_state() == self.FIRST and await bench.curr_state(1) == 0
+        assert dec.bits == [] and dec.lines() == (0, 0)
+        assert not await bench.irq() and await self.lost() == 0
+
+        self.log("the link comes in: the transmitter answers with a NULL and the FCT")
         enc.start()
         await self.clocks(100 * BIT)
-        assert not await self.halted() and not await bench.irq()
-        assert await self.fifo() == [] and await credit() == 0
+        events, errors = dec.decode()
+        assert not errors and dec.both == 0, errors
+        assert events[:3] == ['NULL', 'FCT', 'NULL'] and set(events[2:]) == {'NULL'}, events[:6]
+        assert [p for p in dec.periods() if p != self.TX_BIT] == []
+        assert not await bench.irq() and await self.lost() == 0
+        assert await self.fifo() == [] and await self.credit() == 0
 
         self.log("FCTs are the transmitter's credit")
         await enc.send(['FCT'] * 3)
         await self.clocks(6 * BIT)
-        assert await credit() == 3, await credit()
+        assert await self.credit() == 3, await self.credit()
         await enc.send(['FCT', 'NULL', 'FCT', 'FCT', 'FCT'])
         await self.clocks(6 * BIT)
-        assert await credit() == 7, await credit()
+        assert await self.credit() == 7, await self.credit()
 
         self.log("a packet, the escape value in its data")
         data = [0x00, 0xFF, E, 0x5A, 0x01, 0x80, E, E]
@@ -3506,7 +3528,7 @@ class SpwRxTest(PrismTest):
         stream = [('DATA', 0x11), 'NULL', ('DATA', 0x22), 'FCT', 'NULL', ('DATA', 0x33), 'EEP']
         got = await packet(stream)
         assert got == [0x11, 0x22, 0x33, E, 0x01], [hex(v) for v in got]
-        assert await credit() == 8
+        assert await self.credit() == 8
         assert await bench.irq()
         await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
 
@@ -3515,32 +3537,49 @@ class SpwRxTest(PrismTest):
         got = await packet(stream)
         assert got == [0xA1, 0xA2, E, 0, E, 0, 0xB1, E, 0], [hex(v) for v in got]
         await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
-        assert not await self.halted()
+        assert await self.lost() == 0
+        events, errors = dec.decode()
+        assert not errors and events.count('FCT') == 1, errors                # the transmitter: NULLs all along
 
-        async def error(what, stream, keeps):
-            ''' The stream ends in an error: interrupt, HALT, only `keeps` in the FIFO; then a new link '''
+        async def error(what, stream, keeps, before=None):
+            ''' The stream ends in an error: interrupt, one more link lost, only `keeps` in the
+                FIFO, the transmitter silent; then the next link, with nothing done to the PRISM '''
             self.log(f"error: {what}")
+            if before is None:
+                before = await self.lost()
             if stream is not None:
                 await enc.send(stream)
             for _ in range(40):
-                if await self.halted():
+                if await self.lost() != before:
                     break
                 await self.clocks(BIT)
-            assert await self.halted(), f"state {await bench.curr_state()}"
+            assert await self.lost() == before + 1, f"{await self.lost()} links lost, state {await bench.curr_state()}"
             assert await bench.irq()
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
             got = await self.fifo()
             assert got == keeps, [hex(v) for v in got]
+            await self.clocks(12 * self.TX_BIT)                               # the transmitter: to the end of its NULL
+            assert dec.lines() == (0, 0) and await bench.curr_state(1) == 0, (dec.lines(), await bench.curr_state(1))
+            assert dec.both == 0
             await self.clocks(20 * BIT)
-            assert await self.halted()                                        # and there it stays
-            # a new link: both ends stop, the lines go low, then NULLs again
-            await bench.disable()
+            assert await self.lost() == before + 1 and await self.fifo() == []    # what is on the line is left alone
+            assert await bench.curr_state() == (self.QUIET if enc.running else self.FIRST)
+            # the other end notices the silence and starts again; lines that were left
+            # standing come down first, which is one more link that comes to nothing
+            standing = not enc.running and (enc.D, enc.S) != (0, 0)
             enc.restart()
-            await self.clocks(4 * self.TIMEOUT)
-            await self.link_start()
+            await self.clocks(3 * self.TIMEOUT)
+            assert await bench.curr_state() == self.FIRST
+            assert await self.lost() == before + (2 if standing else 1)
+            before = await self.lost() - 1
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            dec.restart()
             enc.start()
-            got = await packet(['NULL', 'NULL', ('DATA', 0x77), 'EOP'])
+            got = await packet(['NULL', 'NULL', ('DATA', 0x77), 'EOP'], settle=40)
             assert got == [0x77, E, 0], [hex(v) for v in got]
-            assert not await self.halted()
+            assert await self.lost() == before + 1 and await self.credit() == 0
+            events, errors = dec.decode()
+            assert not errors and events[:2] == ['NULL', 'FCT'] and set(events[2:]) == {'NULL'}, (errors, events[:6])
             await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
 
         await error("parity of a data character", [('DATA', 0x42), ('BAD', ('DATA', 0x33)), ('DATA', 0x44)], [0x42])
@@ -3550,115 +3589,168 @@ class SpwRxTest(PrismTest):
         await error("ESC, then ESC", ['ESC', 'ESC'], [])
         await error("a time-code (not taken)", [('TIME', 0x15)], [])
 
-        self.log("error: the lines stop")
+        before = await self.lost()
         await enc.send([('DATA', 0x55)])
-        enc.stop()
-        await self.clocks(self.TIMEOUT + 12)
-        await error("disconnect", None, [0x55])
+        enc.stop()                                                            # the lines stop where they are
+        await error("disconnect", None, [0x55], before)
 
-        self.log("a link that starts late: the first bit has no time-out")
+        self.log("enabled with the line busy: nothing until it has been quiet")
         await bench.disable()
+        lost = await self.lost()
+        await enc.send(['FCT', ('DATA', 0x66), 'EOP'])
+        await bench.enable()                                                  # in the middle of the NULLs
+        await enc.send(['FCT', ('DATA', 0x67), 'EOP', 'NULL', 'NULL'])
+        assert await bench.curr_state() == self.QUIET and await bench.curr_state(1) == 0
+        assert await self.fifo() == [] and await self.credit() == 0 and await self.lost() == lost
+        assert not await bench.irq() and dec.lines() == (0, 0)
         enc.restart()
-        await self.link_start()
-        await self.clocks(20 * self.TIMEOUT)
-        assert not await self.halted() and not await bench.irq()
+        await self.clocks(2 * self.TIMEOUT)
+        dec.restart()
         enc.start()
-        got = await packet(['NULL', ('DATA', 0x99), 'EOP'])
+        got = await packet(['FCT', ('DATA', 0x99), 'EOP'], settle=40)
         assert got == [0x99, E, 0], [hex(v) for v in got]
+        assert await self.credit() == 1 and await self.lost() == lost
 
         enc.stop()
-        await bench.disable()
-        await tqv.write_word_reg(REG_CFG3, 0)
-        await tqv.write_word_reg(REG_CFG3 + SHARD1, 0)
-        await tqv.write_word_reg(REG_CFG2, 0)
-        await tqv.write_word_reg(REG_CFG2 + SHARD1, 0)
-        await tqv.write_word_reg(REG_FRAC_CFG, 0)
-        dut.ui_in[1].value = 0
-        dut.ui_in[2].value = 0
+        dec.stop()
+        await self.unload()
 
 
-class SpwLoopTest(SpwRxTest):
-    ''' A SpaceWire link with itself: the transmitter on shard 1 (uo_out[1],
-        uo_out[2]) wired to the receiver on shard 0 (ui_in[1], ui_in[2]).
-        The FCTs the host asks the transmitter for come back through the
-        receiver as the transmitter's own credit, and with it the packets
-        go round into the receiver's FIFO. '''
-    name = "SpaceWire loopback: transmitter (shard 1) to receiver (shard 0)"
+class SpwLinkTest(SpwRxTest):
+    ''' A SpaceWire link: the two chromas (receiver on shard 0, transmitter
+        on shard 1) against the other end, a model of the standard's link
+        state machine that starts the link.  The link reaches Run on the
+        first attempt, packets go both ways under the credit of the FCTs,
+        a parity error from the other end and the other end switched off
+        and on take the link down, and it forms again with nothing done by
+        the host. '''
+    name = "SpaceWire link: the passive end against the standard's state machine"
 
     async def run(self):
         tqv, bench, dut, BIT = self.tqv, self.bench, self.dut, self.BIT
         E = self.ESC_BYTE
+        US = 60                                                               # clocks per microsecond
         await self.configure()
+        peer = spw.SpwPeer(dut, BIT, grant=2, disconnect=self.TIMEOUT)
+        self.tasks.append(peer)
 
-        async def wire():
-            while True:
-                uo = int(dut.uo_out.value)
-                dut.ui_in[1].value = (uo >> 1) & 1
-                dut.ui_in[2].value = (uo >> 2) & 1
-                await RisingEdge(dut.clk)
+        async def up(within_us, since):
+            ''' The clock at which the other end reached Run '''
+            for _ in range(within_us):
+                if peer.runs(since):
+                    return peer.runs(since)[0]
+                await self.clocks(US)
+            assert False, f"no link in {within_us} us: {peer.history[-8:]}"
 
-        self.host = 0
+        async def push(values):
+            for b in values:
+                await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
 
-        async def toggle(bit):
-            self.host ^= 1 << bit
-            await tqv.write_byte_reg(REG_HOST + SHARD1, self.host)
-            await self.clocks(20 * BIT)                                       # a request is taken per character
+        async def received(n, within=400):
+            ''' Wait until the other end has n packets '''
+            for _ in range(within):
+                if len(peer.packets) >= n:
+                    return
+                await self.clocks(BIT * 4)
+            assert False, f"{len(peer.packets)} packets, {n} expected; {peer.errors[-3:]} {peer.history[-4:]}"
 
-        self.log("the link starts")
-        dut.ui_in[1].value = 0
-        dut.ui_in[2].value = 0
-        loop = cocotb.start_soon(wire())                                      # the wires are there before the link starts
-        await self.link_start(load=True)
-        await self.clocks(100 * BIT)
-        assert not await self.halted() and not await bench.irq()
-        assert await tqv.read_byte_reg(REG_COUNT2 + SHARD1) == 0
+        self.log("the link: ErrorReset, ErrorWait, Started, Connecting, Run")
+        await self.load()
+        peer.start()
+        t = await up(200, 0)
+        states = [st for _, st, _ in peer.history]
+        assert states == ['ErrorReset', 'ErrorWait', 'Ready', 'Started', 'Connecting', 'Run'], peer.history
+        started = [c for c, st, _ in peer.history if st == 'Started'][0]
+        self.log(f"    Run {(t - started) / US:.1f} us after the other end's first NULL")
+        assert t - started < 12.8 * US
+        await self.clocks(20 * BIT)
+        assert await self.credit() == 2 and peer.tx_credit == 8               # its two FCTs, our one
+        assert not await bench.irq() and await self.lost() == 0 and not peer.errors
 
-        self.log("FCTs sent are FCTs received: the transmitter's credit")
-        for n in (1, 2, 3):
-            await toggle(1)
-            assert await tqv.read_byte_reg(REG_COUNT2 + SHARD1) == n
-        assert await self.fifo() == []
-
-        self.log("a packet goes round")
-        data = [0x53, 0x70, 0x57, E, 0x00, 0xFF, 0x0F, E, 0x80, 0x01]
-        for b in data:
-            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
-        await self.clocks(10 * len(data) * BIT + 40 * BIT)
-        await toggle(0)                                                       # EOP
-        got = await self.fifo()
-        stream = [('DATA', b) for b in data] + ['EOP']
-        assert got == spw.escaped(stream, E), [hex(v) for v in got]
-        assert await bench.irq(IRQ0_MASK) and await bench.irq(IRQ1_MASK)      # received, and sent
-        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        self.log("a packet to the other end")
+        data = [0x53, 0x70, 0x57, E, 0x00, 0xFF, 0x80]
+        await push(data)
+        await self.clocks(12 * len(data) * BIT)
+        await self.toggle(0)                                                  # EOP
+        await received(1)
+        assert peer.packets[0] == data + ['EOP'], peer.packets
+        assert await bench.irq(IRQ1_MASK)
         await tqv.write_byte_reg(REG_INT_CLR1, 0x80)
+        assert await self.credit() == 1                                       # eight characters: one FCT used
 
-        self.log("24 characters of credit: two more packets, the second waits for an FCT")
-        first = [(i * 17 + 3) & 0xFF for i in range(12)]                      # 11 used, 12 + EOP more: 24
-        for b in first:
-            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
-        await self.clocks(10 * len(first) * BIT + 40 * BIT)
-        await toggle(0)
+        self.log("a packet from the other end, inside the credit of our FCT")
+        back = [0xC0, E, 0xC2, 0x01, 0x02]
+        peer.send([('DATA', b) for b in back] + ['EOP'])
+        await self.clocks((10 * len(back) + 30) * BIT)
         got = await self.fifo()
-        assert got == spw.escaped([('DATA', b) for b in first] + ['EOP'], E), [hex(v) for v in got]
-        assert await tqv.read_byte_reg(REG_COUNT2 + SHARD1) == 0              # all 24 used
-        second = [0xC0, 0xC1, 0xC2]
-        for b in second:
-            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
-        await self.clocks(60 * BIT)
-        assert await self.fifo() == []                                        # no credit: nothing moves
-        await toggle(1)                                                       # the FCT comes round
-        await self.clocks(60 * BIT)
-        await toggle(0)
-        got = await self.fifo()
-        assert got == second + [E, 0], [hex(v) for v in got]
-        assert not await self.halted()
+        assert got == spw.escaped([('DATA', b) for b in back] + ['EOP'], E), [hex(v) for v in got]
+        assert await bench.irq(IRQ0_MASK)
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        assert peer.tx_credit == 2
 
-        loop.kill()
-        await bench.disable()
-        await tqv.write_word_reg(REG_CFG3, 0)
-        await tqv.write_word_reg(REG_CFG3 + SHARD1, 0)
-        await tqv.write_word_reg(REG_CFG2, 0)
-        await tqv.write_word_reg(REG_CFG2 + SHARD1, 0)
-        await tqv.write_word_reg(REG_FRAC_CFG, 0)
-        dut.ui_in[1].value = 0
-        dut.ui_in[2].value = 0
+        self.log("it waits for our next FCT")
+        peer.send([('DATA', b) for b in (1, 2, 3, 4)] + ['EOP'])
+        await self.clocks(80 * BIT)
+        assert await self.fifo() == [1, 2] and peer.tx_credit == 0
+        await self.toggle(1)                                                  # the host has room again
+        await self.clocks(80 * BIT)
+        assert await self.fifo() == [3, 4, E, 0] and peer.tx_credit == 5
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        assert not peer.errors and await self.lost() == 0
+
+        self.log("a parity error from the other end: both ends start again")
+        mark = peer.clock
+        peer.bad_parity = 1
+        t = await up(200, mark + 1)
+        self.log(f"    Run again {(t - mark) / US:.1f} us after the error")
+        assert await self.lost() == 1 and await bench.irq(IRQ0_MASK)
+        await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+        assert [e[2] for e in peer.errors] == ['disconnect'], peer.errors     # it saw our silence
+        after = [st for c, st, _ in peer.history if c > mark]
+        assert after == ['ErrorReset', 'ErrorWait', 'Ready', 'Started', 'Connecting', 'Run'], peer.history[-8:]
+        await self.clocks(20 * BIT)
+        assert await self.credit() == 2 and peer.tx_credit == 8               # credit from zero on both sides
+        lost = await self.lost()
+
+        self.log("the link works again")
+        await push([0xAA, 0x55])
+        await self.clocks(40 * BIT)
+        await self.toggle(0)
+        await received(2)
+        assert peer.packets[1] == [0xAA, 0x55, 'EOP'], peer.packets
+        peer.send([('DATA', 0x5A), 'EEP'])
+        await self.clocks(60 * BIT)
+        assert await self.fifo() == [0x5A, E, 1]
+        assert await self.lost() == lost and len(peer.errors) == 1
+
+        self.log("the other end is switched off, and on again")
+        peer.enabled = False
+        peer._enter('ErrorReset', 'switched off')
+        await self.clocks(4 * self.TIMEOUT)
+        assert await self.lost() == lost + 1 and await bench.curr_state() == self.FIRST
+        await self.clocks(10 * BIT)
+        assert await bench.curr_state(1) == 0                                 # the transmitter stopped too
+        uo = int(dut.uo_out.value)
+        assert (uo >> 1) & 3 == 0
+        mark = peer.clock
+        peer.enabled = True
+        await up(200, mark)
+        await self.clocks(20 * BIT)
+        assert await self.credit() == 2 and await self.lost() == lost + 1, (await self.credit(), await self.lost(), peer.history[-6:])
+
+        self.log("links lost at every point of a NULL: the next one always forms")
+        for k in range(1, 9):
+            await self.clocks((8 * 3 + k) * BIT - (peer.clock % (8 * BIT)))   # a different bit of the NULL each time
+            mark = peer.clock
+            peer.enabled = False
+            peer._enter('ErrorReset', 'switched off')
+            await self.clocks(4 * self.TIMEOUT)
+            peer.enabled = True
+            await up(200, mark)
+            await self.clocks(20 * BIT)
+            assert await self.credit() == 2, (k, await self.credit(), peer.history[-6:])
+        assert len([e for e in peer.errors if e[2] != 'disconnect']) == 0, peer.errors
+
+        peer.stop()
+        await self.unload()
+

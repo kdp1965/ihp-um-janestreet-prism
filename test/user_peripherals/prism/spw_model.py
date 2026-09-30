@@ -77,6 +77,12 @@ class SpwDecoder:
         v = int(self.dut.uo_out.value)
         return (v >> self.d) & 1, (v >> self.s) & 1
 
+    def restart(self):
+        ''' Forget what was seen: a new link (call it with both lines low) '''
+        self.bits, self.edges = [], []
+        self.both = 0
+        self.first = self.lines()
+
     async def run(self):
         d_prev, s_prev = self.lines()
         self.first = (d_prev, s_prev)     # the levels before the first bit
@@ -200,3 +206,240 @@ class SpwEncoder:
         self.queue += list(characters)
         while self.sent < target:
             await RisingEdge(self.dut.clk)
+
+
+class SpwPeer:
+    ''' The other end of a SpaceWire link, the one that starts it: the link
+        state machine of ECSS-E-ST-50-12C with its transmitter on ui_in[d],
+        ui_in[s] and its receiver on uo_out[rd], uo_out[rs].
+
+          ErrorReset   6.4 us, transmitter and receiver off
+          ErrorWait   12.8 us, receiver on
+          Ready        -> Started at once (LinkStart)
+          Started      NULLs; got a NULL -> Connecting; 12.8 us -> ErrorReset
+          Connecting   FCTs and NULLs; got an FCT -> Run; 12.8 us -> ErrorReset
+          Run          data under credit; any error -> ErrorReset
+
+        Errors: disconnect (no edge for `disconnect` clocks after the first
+        bit), parity, ESC followed by anything but an FCT or data, an FCT or
+        a data / EOP / EEP character before the state that may take it, more
+        data than the credit given.  `history` lists (clock, state, why);
+        `packets` the packets received, each a list of bytes ending in 'EOP'
+        or 'EEP'; `send(...)` queues data / EOP / EEP to go out under the
+        credit the FCTs received have given; `grant` FCTs are sent when the
+        link connects, `give(n)` sends more. '''
+
+    STATES = ('ErrorReset', 'ErrorWait', 'Ready', 'Started', 'Connecting', 'Run')
+
+    def __init__(self, dut, bit=6, clock_mhz=60.0, d=1, s=2, rd=1, rs=2, grant=1, disconnect=51):
+        self.dut, self.bit = dut, bit
+        self.d, self.s, self.rd, self.rs = d, s, rd, rs
+        self.t_reset = int(round(6.4 * clock_mhz))
+        self.t_wait = int(round(12.8 * clock_mhz))
+        self.disconnect = disconnect
+        self.grant = grant
+        self.enabled = True
+        self.history = []
+        self.packets = []
+        self.errors = []
+        self.clock = 0
+        self.queue = []                   # N-chars waiting for credit
+        self.bad_parity = 0               # characters to send with the wrong parity
+        self.task = None
+        self._lines(0, 0)
+        self._enter('ErrorReset', 'start')
+
+    # ---- lines and states
+    def _lines(self, d, s):
+        self.D, self.S = d, s
+        self.dut.ui_in[self.d].value = d
+        self.dut.ui_in[self.s].value = s
+
+    def _enter(self, state, why=''):
+        self.state, self.since = state, self.clock
+        self.history.append((self.clock, state, why))
+        if state == 'ErrorReset':
+            self.tx_bits, self.tx_body, self.tx_phase = [], [], 0
+            self.fct_due = 0
+            self.tx_credit = 0            # characters we may still send
+            self.rx_credit = 0            # characters we have asked for
+            self.rx_on = False
+            self.packet = []
+        if state == 'ErrorWait':
+            self.rx_on = True
+            self.rx_bits, self.rx_body, self.rx_esc = [], [], False
+            self.got_null = False
+            self.first_bit = False
+            self.quiet = 0
+        if state == 'Connecting':
+            self.fct_due = self.grant
+
+    def start(self):
+        self.task = cocotb.start_soon(self.run())
+
+    def stop(self):
+        if self.task is not None:
+            self.task.kill()
+            self.task = None
+
+    def runs(self, since=0):
+        ''' Clocks at which the link reached Run '''
+        return [c for c, st, _ in self.history if st == 'Run' and c >= since]
+
+    def send(self, characters):
+        self.queue += list(characters)
+
+    def give(self, fcts=1):
+        self.fct_due += fcts
+
+    # ---- transmitter: one bit per `bit` clocks
+    def _next_character(self):
+        if self.state == 'Started' or (self.state in ('Connecting', 'Run') and not self.fct_due
+                                       and not (self.state == 'Run' and self.queue and self.tx_credit)):
+            return [ESC, FCT]
+        if self.fct_due:
+            self.fct_due -= 1
+            self.rx_credit += 8
+            return [FCT]
+        self.tx_credit -= 1
+        return [self.queue.pop(0)]
+
+    def _bits_of(self, c):
+        if isinstance(c, tuple):
+            flag, rest = 0, [(c[1] >> k) & 1 for k in range(8)]
+        else:
+            flag, rest = 1, SpwEncoder.BITS[c][1:]
+        p = (sum(self.tx_body) + flag + 1) % 2
+        if self.bad_parity:
+            self.bad_parity -= 1
+            p ^= 1
+        self.tx_body = rest
+        return [p, flag] + rest
+
+    def _transmit(self):
+        if self.state not in ('Started', 'Connecting', 'Run'):
+            if self.S:                                # reset: S first, then D, never both
+                self._lines(self.D, 0)
+            elif self.D:
+                self._lines(0, 0)
+            return
+        self.tx_phase = (self.tx_phase + 1) % self.bit
+        if self.tx_phase != 1 % self.bit:
+            return
+        if not self.tx_bits:
+            for c in self._next_character():
+                self.tx_bits += self._bits_of(c)
+        b = self.tx_bits.pop(0)
+        if b != self.D:
+            self._lines(b, self.S)
+        else:
+            self._lines(self.D, self.S ^ 1)
+
+    # ---- receiver
+    def _error(self, what):
+        self.errors.append((self.clock, self.state, what))
+        self._enter('ErrorReset', what)
+
+    def _character(self):
+        ''' One character off rx_bits if it is complete: its event, or None '''
+        b = self.rx_bits
+        if len(b) < 2:
+            return None
+        n = 10 if b[1] == 0 else 4
+        if len(b) < n:
+            return None
+        p, flag, rest = b[0], b[1], b[2:n]
+        del b[:n]
+        if (sum(self.rx_body) + p + flag) % 2 != 1:
+            return 'parity'
+        self.rx_body = rest
+        if flag == 0:
+            value = sum(x << k for k, x in enumerate(rest))
+            if self.rx_esc:
+                self.rx_esc = False
+                return ('TIME', value)
+            return ('DATA', value)
+        c = CONTROL[tuple(rest)]
+        if self.rx_esc:
+            self.rx_esc = False
+            return 'NULL' if c == FCT else 'escape'
+        if c == ESC:
+            self.rx_esc = True
+            return 'ESC'
+        return c
+
+    def _receive(self, d, s, d_prev, s_prev):
+        if not self.rx_on:
+            return
+        if d != d_prev and s != s_prev:
+            return self._error('D and S together')
+        if d != d_prev or s != s_prev:
+            self.first_bit = True
+            self.quiet = 0
+            self.rx_bits.append(d)
+        elif self.first_bit:
+            self.quiet += 1
+            if self.quiet >= self.disconnect:
+                return self._error('disconnect')
+        while True:
+            e = self._character()
+            if e is None:
+                return
+            if e in ('parity', 'escape'):
+                return self._error(e)
+            if e == 'ESC':
+                continue
+            if e == 'NULL':
+                self.got_null = True
+                continue
+            if e == FCT:
+                if self.state not in ('Connecting', 'Run'):
+                    return self._error('FCT in ' + self.state)
+                self.tx_credit += 8
+                if self.state == 'Connecting':
+                    self._enter('Run', 'FCT')
+                continue
+            if isinstance(e, tuple) and e[0] == 'TIME':
+                if self.state != 'Run':
+                    return self._error('time-code in ' + self.state)
+                continue
+            if self.state != 'Run':                   # data, EOP, EEP
+                return self._error('N-char in ' + self.state)
+            if self.rx_credit == 0:
+                return self._error('credit')
+            self.rx_credit -= 1
+            if e in (EOP, EEP):
+                self.packets.append(self.packet + [e])
+                self.packet = []
+            else:
+                self.packet.append(e[1])
+
+    # ---- the state machine, one step per clock
+    async def run(self):
+        uo = int(self.dut.uo_out.value)
+        d_prev, s_prev = (uo >> self.rd) & 1, (uo >> self.rs) & 1
+        while True:
+            await RisingEdge(self.dut.clk)
+            self.clock += 1
+            uo = int(self.dut.uo_out.value)
+            d, s = (uo >> self.rd) & 1, (uo >> self.rs) & 1
+            self._receive(d, s, d_prev, s_prev)
+            d_prev, s_prev = d, s
+            age = self.clock - self.since
+            if self.state == 'ErrorReset':
+                if age >= self.t_reset and self.enabled:
+                    self._enter('ErrorWait')
+            elif self.state == 'ErrorWait':
+                if age >= self.t_wait:
+                    self._enter('Ready')
+            elif self.state == 'Ready':
+                self._enter('Started')
+            elif self.state == 'Started':
+                if self.got_null:
+                    self._enter('Connecting', 'NULL')
+                elif age >= self.t_wait:
+                    self._enter('ErrorReset', 'no NULL in 12.8 us')
+            elif self.state == 'Connecting':
+                if age >= self.t_wait:
+                    self._enter('ErrorReset', 'no FCT in 12.8 us')
+            self._transmit()
