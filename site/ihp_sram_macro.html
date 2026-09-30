@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="A beginner's walkthrough of integrating an IHP SRAM macro into a Tiny Tapeout CMOS5L tile: RTL, LibreLane config, Metal4 power, sign-off and testing.">
+<title>Dropping a real SRAM macro into your CMOS5L tile</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f6fa;
+    --bg-2: #ffffff;
+    --panel: #eaeef5;
+    --ink: #17202c;
+    --ink-2: #4a5566;
+    --line: #d5dbe6;
+    --accent: #0b7f8a;
+    --accent-2: #c2571b;
+    --glow: rgba(11, 127, 138, .16);
+    --code-bg: #101722;
+    --code-ink: #dbe4f0;
+    --code-hi: #7fd7e0;
+    --code-key: #f0b27a;
+    --good: #2e8b57;
+    --warn: #b7791f;
+    --sram: #d7f1f4;
+    --sram-line: #0b7f8a;
+    --vp: #c2571b;
+    --vg: #2a5fb3;
+    --die: #ffffff;
+    --font-head: "Space Grotesk", system-ui, sans-serif;
+    --font-body: "IBM Plex Sans", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0b1017;
+      --bg-2: #111823;
+      --panel: #151d2a;
+      --ink: #e6ecf5;
+      --ink-2: #9aa7ba;
+      --line: #263142;
+      --accent: #5fd3dc;
+      --accent-2: #f2a15f;
+      --glow: rgba(95, 211, 220, .14);
+      --code-bg: #070b11;
+      --code-ink: #d6dfeb;
+      --code-hi: #7fd7e0;
+      --code-key: #f0b27a;
+      --good: #6fd39a;
+      --warn: #e2b04a;
+      --sram: #113640;
+      --sram-line: #5fd3dc;
+      --vp: #f2a15f;
+      --vg: #7fa8ff;
+      --die: #0e141d;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0b1017;
+    --bg-2: #111823;
+    --panel: #151d2a;
+    --ink: #e6ecf5;
+    --ink-2: #9aa7ba;
+    --line: #263142;
+    --accent: #5fd3dc;
+    --accent-2: #f2a15f;
+    --glow: rgba(95, 211, 220, .14);
+    --code-bg: #070b11;
+    --code-ink: #d6dfeb;
+    --code-hi: #7fd7e0;
+    --code-key: #f0b27a;
+    --good: #6fd39a;
+    --warn: #e2b04a;
+    --sram: #113640;
+    --sram-line: #5fd3dc;
+    --vp: #f2a15f;
+    --vg: #7fa8ff;
+    --die: #0e141d;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 16px 80px; overflow-x: clip; }
+
+  /* hero */
+  .hero {
+    position: relative;
+    padding: 56px 0 36px;
+    border-bottom: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .hero::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      linear-gradient(var(--line) 1px, transparent 1px) 0 0 / 100% 44.96px,
+      linear-gradient(90deg, var(--line) 1px, transparent 1px) 0 0 / 44.96px 100%;
+    opacity: .35;
+    mask-image: linear-gradient(180deg, rgba(0,0,0,.9), transparent 90%);
+    -webkit-mask-image: linear-gradient(180deg, rgba(0,0,0,.9), transparent 90%);
+    pointer-events: none;
+  }
+  .hero > * { position: relative; }
+  .kicker {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-family: var(--font-head);
+    font-weight: 700;
+    font-size: clamp(30px, 5.4vw, 46px);
+    line-height: 1.08;
+    margin: 0 0 16px;
+    letter-spacing: -.01em;
+  }
+  h1 em { font-style: normal; color: var(--accent); }
+  .lede { font-size: 19px; color: var(--ink-2); max-width: 660px; margin: 0 0 22px; }
+  .meta { font-family: var(--font-mono); font-size: 13px; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 10px 22px; }
+  .meta a { color: var(--accent); }
+
+  h2 {
+    font-family: var(--font-head);
+    font-size: 26px;
+    line-height: 1.2;
+    margin: 56px 0 14px;
+    padding-top: 8px;
+    letter-spacing: -.005em;
+  }
+  h2 .n {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 1px 8px;
+    margin-right: 12px;
+    vertical-align: middle;
+    transform: translateY(-2px);
+  }
+  h3 { font-family: var(--font-head); font-size: 19px; margin: 30px 0 8px; }
+  p { margin: 0 0 16px; }
+  a { color: var(--accent); text-underline-offset: 3px; }
+  ul, ol { padding-left: 22px; margin: 0 0 16px; }
+  li { margin: 6px 0; }
+  code {
+    font-family: var(--font-mono);
+    font-size: .88em;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1px 6px;
+    overflow-wrap: anywhere;
+  }
+  pre {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border-radius: 12px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    line-height: 1.55;
+    margin: 0 0 20px;
+    box-shadow: 0 10px 30px -18px rgba(0,0,0,.6);
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: inherit; white-space: pre; color: inherit; }
+  pre .c { color: #7f8ea3; }
+  pre .k { color: var(--code-key); }
+  pre .s { color: var(--code-hi); }
+  pre .t { color: #fff; font-weight: 600; }
+  .pre-title {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink-2);
+    margin: 0 0 6px;
+    letter-spacing: .04em;
+  }
+
+  .callout {
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    background: var(--bg-2);
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin: 0 0 22px;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.good { border-left-color: var(--good); }
+  .callout .t {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+    margin-bottom: 6px;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin: 20px 0 26px;
+  }
+  .stat {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 14px 16px;
+    box-shadow: 0 0 0 4px var(--glow);
+  }
+  .stat b { display: block; font-family: var(--font-head); font-size: 26px; line-height: 1.1; color: var(--accent); }
+  .stat span { font-size: 13px; color: var(--ink-2); font-family: var(--font-mono); }
+
+  figure { margin: 22px 0 28px; }
+  figure svg { width: 100%; height: auto; display: block; border-radius: 12px; }
+  figure img { width: 100%; height: auto; display: block; border-radius: 12px; border: 1px solid var(--line); }
+  figcaption { font-size: 14px; color: var(--ink-2); margin-top: 8px; }
+  .die { fill: var(--die); stroke: var(--line); stroke-width: 3; }
+  .sram { fill: var(--sram); stroke: var(--sram-line); stroke-width: 3; }
+  .pins { stroke: var(--accent-2); stroke-width: 6; }
+  .vp { stroke: var(--vp); stroke-width: 2.1; opacity: .55; }
+  .vg { stroke: var(--vg); stroke-width: 2.1; opacity: .55; stroke-dasharray: 10 8; }
+  .lbl { font-family: var(--font-mono); font-size: 22px; fill: var(--ink); text-anchor: middle; }
+  .lbl.small { font-size: 17px; fill: var(--ink-2); }
+  .lbl.dim { font-size: 24px; fill: var(--ink-2); }
+  .lbl.axis { font-size: 20px; fill: var(--ink-2); }
+  .lbl.start { text-anchor: start; }
+  .lbl.halo { paint-order: stroke; stroke: var(--die); stroke-width: 8px; stroke-linejoin: round; }
+  .sram + .pins + .lbl.halo, .lbl.halo.small { stroke: var(--sram); }
+  figure.zoom svg { max-width: 560px; margin: 0 auto; }
+  figure.zoom .col { fill: none; stroke-width: .35; }
+  figure.zoom .col.vd { stroke: var(--vp); }
+  figure.zoom .col.gd { stroke: var(--vg); }
+  figure.zoom .stripe { stroke: none; opacity: 1; }
+  figure.zoom .stripe.vp { fill: var(--vp); }
+  figure.zoom .stripe.vg { fill: var(--vg); }
+  figure.zoom .stripe.added { opacity: .5; }
+  figure.zoom .lbl.axis { font-size: 2.1px; }
+  figure.zoom .sram { stroke-width: .5; }
+  figure.zoom .lbl.mid { text-anchor: middle; }
+
+  table { border-collapse: collapse; width: 100%; margin: 0 0 22px; font-size: 15px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+  .modes th:nth-child(2), .modes td:nth-child(2) { white-space: nowrap; }
+  .modes th:nth-child(2) code, .modes td:nth-child(2) code { white-space: nowrap; }
+  th { font-family: var(--font-mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+  td code { white-space: normal; }
+
+  .steps { counter-reset: s; list-style: none; padding: 0; }
+  .steps li { position: relative; padding-left: 40px; margin: 10px 0; }
+  .steps li::before {
+    counter-increment: s;
+    content: counter(s);
+    position: absolute; left: 0; top: 2px;
+    width: 26px; height: 26px; border-radius: 50%;
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 13px; font-weight: 600;
+    background: var(--accent); color: var(--bg);
+  }
+  .checks { list-style: none; padding: 0; }
+  .checks li { padding-left: 30px; position: relative; }
+  .checks li::before { content: "✓"; position: absolute; left: 4px; color: var(--good); font-weight: 700; }
+  .foot { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); font-size: 14px; color: var(--ink-2); }
+  @media (max-width: 600px) {
+    body { font-size: 16px; }
+    pre { font-size: 12.5px; padding: 14px; }
+    .lbl { font-size: 26px; }
+    .lbl.axis { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <p class="kicker">Tiny Tapeout · IHP SG13CMOS5L · LibreLane</p>
+    <h1>Dropping a real <em>SRAM macro</em> into your CMOS5L tile</h1>
+    <p class="lede">A first-timer's walkthrough: where the IHP memory macro lives, how to wire it into your RTL, how to feed it power on a tile that only has Metal4 stripes, and which sign-off checks will yell at you and why.</p>
+    <div class="meta">
+      <span>~20 min read</span>
+      <span>worked example: <a href="https://github.com/kdp1965/ihp-um-janestreet-prism">kdp1965/ihp-um-janestreet-prism</a></span>
+      <span>2026-09-29</span>
+    </div>
+  </header>
+
+  <h2>Why you would want one</h2>
+  <p>Every Tiny Tapeout design eventually wants a buffer. A frame of Ethernet, a few milliseconds of audio, a trace log. In flip-flops that memory is brutally expensive: a single flop in the CMOS5L standard cell library is about 52 µm² before you add the write and read muxing around it. The IHP SRAM macro stores a bit in under 5 µm², and it comes with its own decoder, sense amps and a clean synchronous interface.</p>
+
+  <div class="stats">
+    <div class="stat"><b>2 KB</b><span>512 words × 32 bits per macro</span></div>
+    <div class="stat"><b>0.08 mm²</b><span>416.64 × 191.34 µm</span></div>
+    <div class="stat"><b>6.5 %</b><span>of an 8x4 tile (1.22 mm²)</span></div>
+    <div class="stat"><b>~11×</b><span>denser than flops, per bit</span></div>
+  </div>
+
+  <p>The same 16 kilobits built from flops would eat about 70 % of an 8x4 tile in flip-flop area alone. That is the whole argument. My Jane Street competition entry, a programmable protocol engine called PRISM riding on the TinyQV RISC-V core, uses two of these macros as packet FIFOs, one per direction, and the repository is public if you want to see every file mentioned below in context: <a href="https://github.com/kdp1965/ihp-um-janestreet-prism">github.com/kdp1965/ihp-um-janestreet-prism</a>.</p>
+
+  <div class="callout">
+    <span class="t">What "macro" means here</span>
+    <p>A <b>hard macro</b> is a finished piece of layout. You do not synthesize it, you do not place cells inside it. The flow treats it as one big opaque rectangle with pins on the edge, and your job is to (1) tell the tools where the rectangle goes, (2) connect its pins, (3) get power into it, and (4) convince every checker that the black box is fine. That's the entire post.</p>
+  </div>
+
+  <h2><span class="n">01</span>Find the macro in the PDK</h2>
+  <p>First, get the PDK itself. Everything for this process lives in one public git repository, IHP-Open-PDK, and the CMOS5L variant is the <code>ihp-sg13cmos5l</code> folder inside it, next to the seven-metal <code>ihp-sg13g2</code> that the earlier IHP shuttles used. Tiny Tapeout's own checks install it from the repository's <code>dev</code> branch at a pinned commit, so use the same one and your local results will match the precheck. The repository is large, so fetch just that commit:</p>
+
+<pre><code>mkdir -p ~/pdk/IHP-Open-PDK &amp;&amp; cd ~/pdk/IHP-Open-PDK
+git init -q
+git fetch --depth 1 https://github.com/IHP-GmbH/IHP-Open-PDK.git 2bbec755dc67ca3db0261c3d6163e15735d66710
+git checkout -q FETCH_HEAD
+
+<span class="c"># the two variables every tool in the flow reads</span>
+export PDK_ROOT=~/pdk/IHP-Open-PDK
+export PDK=ihp-sg13cmos5l</code></pre>
+
+  <p><code>PDK_ROOT</code> is the directory that <i>contains</i> the PDK folders, not the PDK folder itself. LibreLane joins the two variables to find the process, and every <code>pdk_dir::</code> path you will see in the config below resolves to <code>$PDK_ROOT/$PDK/</code>. Put the two exports in your shell profile; forgetting them is the most common reason a first run fails before it starts, usually with a complaint that some LEF or lib file does not exist. Check the commit hash against the precheck action you are using before you trust it, since Tiny Tapeout moves the pin when IHP updates the memories.</p>
+
+  <p>With that in place, the IHP open PDK ships a whole family of compiled memories. In the CMOS5L variant of the PDK they sit next to the standard cells:</p>
+
+<p class="pre-title">$PDK_ROOT/ihp-sg13cmos5l/libs.ref/sg13cmos5l_sram/</p>
+<pre><code>cdl/      <span class="c"># transistor-level netlist, used by LVS</span>
+doc/      <span class="c"># one datasheet .txt per macro. READ THIS FIRST.</span>
+gds/      <span class="c"># the actual layout that goes on the chip</span>
+lef/      <span class="c"># the abstract: outline, pins, obstructions (what the P&amp;R tools see)</span>
+lib/      <span class="c"># timing + power, one file per corner</span>
+verilog/  <span class="c"># behavioural model for simulation</span></code></pre>
+
+  <p>The names encode the shape. <code>RM_IHPSG13_1P_512x32_c2_bm_bist</code> is a one-port (1P) memory of 512 words by 32 bits, column mux 2, with a byte/bit mask (bm) and a built-in self-test port (bist). There are single-port sizes from 64×16 up to 8192×32, and dual-port (2P) ones up to 1024×32. Pick the smallest one that holds what you need; the 512×32 is a good first macro because it is short enough to leave room above and below it in a 4-tile-tall design.</p>
+
+  <p>Open the datasheet in <code>doc/</code> before anything else. It is a plain text file and it tells you four things you cannot guess:</p>
+  <ul>
+    <li><b><code>A_DLY</code> must be tied to 1.</b> The datasheet says it in capital letters. It is a timing trim pin, and the characterized libs assume it is high.</li>
+    <li><b>The operation table.</b> Nothing happens unless <code>A_MEN</code> (memory enable) is high. Then <code>A_REN</code> reads and <code>A_WEN</code> writes; both high is a write-through. Every input is sampled on the rising edge of <code>A_CLK</code>.</li>
+    <li><b>Read data is registered.</b> You present the address with <code>A_REN</code> high on one edge and <code>A_DOUT</code> is valid after the next. Your FIFO logic has to expect that one-cycle latency.</li>
+    <li><b>The <code>A_BIST_*</code> pins are a second, parallel port for built-in self-test.</b> They exist so that production test equipment can exercise the memory at high volume, driving it through a dedicated path when <code>A_BIST_EN</code> is high. Tiny Tapeout does no such testing, so tie <code>A_BIST_EN</code> and the rest of that group to 0 and forget them. When BIST is off, the datasheet's operation table says the normal port is in charge.</li>
+  </ul>
+
+  <h2><span class="n">02</span>Instantiate it in your RTL</h2>
+  <p>You write the instance yourself, with the port names from the datasheet. Tie off everything you don't use. This is the real instance from my design (the address width follows a parameter, so there are three such blocks under separate <code>if</code>s; here is the 512-word one):</p>
+
+<p class="pre-title">src/user_peripherals/prism/prism_periph.v</p>
+<pre><code><span class="c">// IHP single-port SRAM: A_DLY must be tied high, BIST off.</span>
+RM_IHPSG13_1P_512x32_c2_bm_bist i_sram
+(
+    .A_CLK       ( clk                  ),
+    .A_MEN       ( sram_ren | sram_wen  ),   <span class="c">// enable only when doing something</span>
+    .A_WEN       ( sram_wen             ),
+    .A_REN       ( sram_ren             ),
+    .A_ADDR      ( sram_addr            ),
+    .A_DIN       ( sram_din             ),
+    .A_DLY       ( <span class="k">1'b1</span>                 ),   <span class="c">// datasheet: always 1</span>
+    .A_DOUT      ( sram_dout            ),
+    .A_BM        ( sram_bm              ),   <span class="c">// per-bit write mask, 1 = write this bit</span>
+    .A_BIST_CLK  ( <span class="k">1'b0</span>                 ),
+    .A_BIST_EN   ( <span class="k">1'b0</span>                 ),
+    .A_BIST_MEN  ( <span class="k">1'b0</span>                 ),
+    .A_BIST_WEN  ( <span class="k">1'b0</span>                 ),
+    .A_BIST_REN  ( <span class="k">1'b0</span>                 ),
+    .A_BIST_ADDR ( <span class="k">9'h0</span>                 ),
+    .A_BIST_DIN  ( <span class="k">32'h0</span>                ),
+    .A_BIST_BM   ( <span class="k">32'h0</span>                 )
+);</code></pre>
+
+  <p>Two more files make this compile in the two worlds that need it, synthesis and simulation:</p>
+
+  <h3>A black box for synthesis</h3>
+  <p>Yosys must not try to synthesize the memory, it only needs to know the module exists and what its ports are. A tiny file with the module header, an empty body, and the <code>(* blackbox *)</code> attribute does it. I wrap mine in <code>`ifndef SIM</code> so the simulator never sees it and picks up the real model instead:</p>
+
+<p class="pre-title">src/user_peripherals/prism/sram_2048x32_bb.v (excerpt)</p>
+<pre><code><span class="k">`ifndef</span> SIM
+(* blackbox *)
+<span class="k">module</span> RM_IHPSG13_1P_512x32_c2_bm_bist
+(
+    <span class="k">input  wire</span>        A_CLK,
+    <span class="k">input  wire</span>        A_MEN,
+    <span class="k">input  wire</span>        A_WEN,
+    <span class="k">input  wire</span>        A_REN,
+    <span class="k">input  wire</span>  [8:0] A_ADDR,
+    <span class="k">input  wire</span> [31:0] A_DIN,
+    <span class="k">input  wire</span>        A_DLY,
+    <span class="k">output wire</span> [31:0] A_DOUT,
+    <span class="k">input  wire</span> [31:0] A_BM,
+    <span class="c">/* ... the A_BIST_* ports ... */</span>
+);
+<span class="k">endmodule</span>
+<span class="k">`endif</span></code></pre>
+
+  <h3>The behavioural model for simulation</h3>
+  <p>The PDK's <code>verilog/</code> folder has a behavioural model per macro plus a shared core file, and they only behave when you define <code>FUNCTIONAL</code>. I copied those files into the repo under <code>test/ihp_sram/</code> (Apache-2.0, so that is allowed) because the GitHub test job has no PDK checkout. The cocotb Makefile then adds:</p>
+
+<p class="pre-title">test/test_basic.mk (excerpt)</p>
+<pre><code>SRAM_MODEL_DIR ?= $(PWD)/ihp_sram
+SRAM_MODELS = $(SRAM_MODEL_DIR)/RM_IHPSG13_1P_core_behavioral_bm_bist.v \
+              $(SRAM_MODEL_DIR)/RM_IHPSG13_1P_512x32_c2_bm_bist.v
+
+VERILOG_SOURCES += $(SRAM_MODELS)
+COMPILE_ARGS    += -DSIM -DFUNCTIONAL</code></pre>
+
+  <div class="callout warn">
+    <span class="t">Gotcha</span>
+    <p>The gate-level netlist LibreLane produces also keeps the SRAM as a black box (there is no gate netlist of a hard macro). So your <b>gate-level</b> simulation needs the behavioural model too, not just the RTL one. Add the models to both build variants or your GL test will fail with an unresolved module.</p>
+  </div>
+
+  <h2><span class="n">03</span>Tell LibreLane about it</h2>
+  <p>Everything physical goes in <code>config.json</code> under a <code>MACROS</code> key. One entry per macro <i>type</i>, and inside it, one entry per <i>instance</i> with its location and orientation. The paths use <code>pdk_dir::</code> so they resolve wherever the PDK is installed:</p>
+
+<p class="pre-title">src/config.json (excerpt)</p>
+<pre><code><span class="s">"MACROS"</span>: {
+  <span class="s">"RM_IHPSG13_1P_512x32_c2_bm_bist"</span>: {
+    <span class="s">"gds"</span>:   [<span class="s">"pdk_dir::libs.ref/sg13cmos5l_sram/gds/RM_IHPSG13_1P_512x32_c2_bm_bist.gds"</span>],
+    <span class="s">"lef"</span>:   [<span class="s">"pdk_dir::libs.ref/sg13cmos5l_sram/lef/RM_IHPSG13_1P_512x32_c2_bm_bist.lef"</span>],
+    <span class="s">"spice"</span>: [<span class="s">"pdk_dir::libs.ref/sg13cmos5l_sram/cdl/RM_IHPSG13_1P_512x32_c2_bm_bist.cdl"</span>],
+    <span class="s">"nl"</span>: [],  <span class="s">"spef"</span>: {},
+    <span class="s">"lib"</span>: {
+      <span class="s">"nom_typ_1p20V_25C"</span>:   [<span class="s">"pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_typ_1p20V_25C.lib"</span>],
+      <span class="s">"nom_fast_1p32V_m40C"</span>: [<span class="s">"pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_fast_1p32V_m55C.lib"</span>],
+      <span class="s">"nom_slow_1p08V_125C"</span>: [<span class="s">"pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_slow_1p08V_125C.lib"</span>]
+    },
+    <span class="s">"instances"</span>: {
+      <span class="s">"i_peripherals.i_prism.SRAM[0].M512.i_sram"</span>: { <span class="s">"location"</span>: [3.36, 3.78],  <span class="s">"orientation"</span>: <span class="s">"FS"</span> },
+      <span class="s">"i_peripherals.i_prism.SRAM[1].M512.i_sram"</span>: { <span class="s">"location"</span>: [3.36, 340.2], <span class="s">"orientation"</span>: <span class="s">"N"</span> }
+    }
+  }
+}</code></pre>
+
+  <p>Three things to notice:</p>
+  <ul>
+    <li><b>The lib corner names are LibreLane's, not IHP's.</b> The flow asks for <code>nom_fast_1p32V_m40C</code> but the SRAM was characterized at −55 °C. You map the closest file onto the name the flow wants. The typ and slow corners match exactly.</li>
+    <li><b>The instance name is the full hierarchical path in the synthesized netlist.</b> Dots for hierarchy, square brackets for generate loops. If you rename a wrapper module or change an <code>if</code> into an <code>else if</code>, the path changes and the flow will tell you the instance does not exist. That is why my RTL comment insists on separate <code>if</code>s: it keeps the path <code>SRAM[n].M512.i_sram</code> stable.</li>
+    <li><b>The location is the macro's lower-left corner, in µm, and the orientation flips it.</b> All the SRAM's signal pins sit on one long edge, on Metal2. With orientation <code>N</code> that edge is at the bottom; <code>FS</code> flips it to the top. My two macros are stacked with their pin faces looking at each other so the FIFO wrappers sit in the gap between them.</li>
+  </ul>
+
+  <figure>
+<svg viewBox="-12 -40 1748 795" role="img" aria-labelledby="fig1t" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+<title id="fig1t">The 8x4 tile with two SRAM macros flush left and the Metal4 stripe grid</title>
+<rect x="0" y="0" width="1724.16" height="710.64" class="die"/>
+<line x1="9.03" y1="0" x2="9.03" y2="710.64" class="vp"/>
+<line x1="14.65" y1="0" x2="14.65" y2="710.64" class="vg"/>
+<line x1="53.99" y1="0" x2="53.99" y2="710.64" class="vp"/>
+<line x1="59.61" y1="0" x2="59.61" y2="710.64" class="vg"/>
+<line x1="98.95" y1="0" x2="98.95" y2="710.64" class="vp"/>
+<line x1="104.57" y1="0" x2="104.57" y2="710.64" class="vg"/>
+<line x1="143.91" y1="0" x2="143.91" y2="710.64" class="vp"/>
+<line x1="149.53" y1="0" x2="149.53" y2="710.64" class="vg"/>
+<line x1="188.87" y1="0" x2="188.87" y2="710.64" class="vp"/>
+<line x1="194.49" y1="0" x2="194.49" y2="710.64" class="vg"/>
+<line x1="233.83" y1="0" x2="233.83" y2="710.64" class="vp"/>
+<line x1="239.45" y1="0" x2="239.45" y2="710.64" class="vg"/>
+<line x1="278.79" y1="0" x2="278.79" y2="710.64" class="vp"/>
+<line x1="284.41" y1="0" x2="284.41" y2="710.64" class="vg"/>
+<line x1="323.75" y1="0" x2="323.75" y2="710.64" class="vp"/>
+<line x1="329.37" y1="0" x2="329.37" y2="710.64" class="vg"/>
+<line x1="368.71" y1="0" x2="368.71" y2="710.64" class="vp"/>
+<line x1="374.33" y1="0" x2="374.33" y2="710.64" class="vg"/>
+<line x1="413.67" y1="0" x2="413.67" y2="710.64" class="vp"/>
+<line x1="419.29" y1="0" x2="419.29" y2="710.64" class="vg"/>
+<line x1="458.63" y1="0" x2="458.63" y2="710.64" class="vp"/>
+<line x1="464.25" y1="0" x2="464.25" y2="710.64" class="vg"/>
+<line x1="503.59" y1="0" x2="503.59" y2="710.64" class="vp"/>
+<line x1="509.21" y1="0" x2="509.21" y2="710.64" class="vg"/>
+<line x1="548.55" y1="0" x2="548.55" y2="710.64" class="vp"/>
+<line x1="554.17" y1="0" x2="554.17" y2="710.64" class="vg"/>
+<line x1="593.51" y1="0" x2="593.51" y2="710.64" class="vp"/>
+<line x1="599.13" y1="0" x2="599.13" y2="710.64" class="vg"/>
+<line x1="638.47" y1="0" x2="638.47" y2="710.64" class="vp"/>
+<line x1="644.09" y1="0" x2="644.09" y2="710.64" class="vg"/>
+<line x1="683.43" y1="0" x2="683.43" y2="710.64" class="vp"/>
+<line x1="689.05" y1="0" x2="689.05" y2="710.64" class="vg"/>
+<line x1="728.39" y1="0" x2="728.39" y2="710.64" class="vp"/>
+<line x1="734.01" y1="0" x2="734.01" y2="710.64" class="vg"/>
+<line x1="773.35" y1="0" x2="773.35" y2="710.64" class="vp"/>
+<line x1="778.97" y1="0" x2="778.97" y2="710.64" class="vg"/>
+<line x1="818.31" y1="0" x2="818.31" y2="710.64" class="vp"/>
+<line x1="823.93" y1="0" x2="823.93" y2="710.64" class="vg"/>
+<line x1="863.27" y1="0" x2="863.27" y2="710.64" class="vp"/>
+<line x1="868.89" y1="0" x2="868.89" y2="710.64" class="vg"/>
+<line x1="908.23" y1="0" x2="908.23" y2="710.64" class="vp"/>
+<line x1="913.85" y1="0" x2="913.85" y2="710.64" class="vg"/>
+<line x1="953.19" y1="0" x2="953.19" y2="710.64" class="vp"/>
+<line x1="958.81" y1="0" x2="958.81" y2="710.64" class="vg"/>
+<line x1="998.15" y1="0" x2="998.15" y2="710.64" class="vp"/>
+<line x1="1003.77" y1="0" x2="1003.77" y2="710.64" class="vg"/>
+<line x1="1043.11" y1="0" x2="1043.11" y2="710.64" class="vp"/>
+<line x1="1048.73" y1="0" x2="1048.73" y2="710.64" class="vg"/>
+<line x1="1088.07" y1="0" x2="1088.07" y2="710.64" class="vp"/>
+<line x1="1093.69" y1="0" x2="1093.69" y2="710.64" class="vg"/>
+<line x1="1133.03" y1="0" x2="1133.03" y2="710.64" class="vp"/>
+<line x1="1138.65" y1="0" x2="1138.65" y2="710.64" class="vg"/>
+<line x1="1177.99" y1="0" x2="1177.99" y2="710.64" class="vp"/>
+<line x1="1183.61" y1="0" x2="1183.61" y2="710.64" class="vg"/>
+<line x1="1222.95" y1="0" x2="1222.95" y2="710.64" class="vp"/>
+<line x1="1228.57" y1="0" x2="1228.57" y2="710.64" class="vg"/>
+<line x1="1267.91" y1="0" x2="1267.91" y2="710.64" class="vp"/>
+<line x1="1273.53" y1="0" x2="1273.53" y2="710.64" class="vg"/>
+<line x1="1312.87" y1="0" x2="1312.87" y2="710.64" class="vp"/>
+<line x1="1318.49" y1="0" x2="1318.49" y2="710.64" class="vg"/>
+<line x1="1357.83" y1="0" x2="1357.83" y2="710.64" class="vp"/>
+<line x1="1363.45" y1="0" x2="1363.45" y2="710.64" class="vg"/>
+<line x1="1402.79" y1="0" x2="1402.79" y2="710.64" class="vp"/>
+<line x1="1408.41" y1="0" x2="1408.41" y2="710.64" class="vg"/>
+<line x1="1447.75" y1="0" x2="1447.75" y2="710.64" class="vp"/>
+<line x1="1453.37" y1="0" x2="1453.37" y2="710.64" class="vg"/>
+<line x1="1492.71" y1="0" x2="1492.71" y2="710.64" class="vp"/>
+<line x1="1498.33" y1="0" x2="1498.33" y2="710.64" class="vg"/>
+<line x1="1537.67" y1="0" x2="1537.67" y2="710.64" class="vp"/>
+<line x1="1543.29" y1="0" x2="1543.29" y2="710.64" class="vg"/>
+<line x1="1582.63" y1="0" x2="1582.63" y2="710.64" class="vp"/>
+<line x1="1588.25" y1="0" x2="1588.25" y2="710.64" class="vg"/>
+<line x1="1627.59" y1="0" x2="1627.59" y2="710.64" class="vp"/>
+<line x1="1633.21" y1="0" x2="1633.21" y2="710.64" class="vg"/>
+<line x1="1672.55" y1="0" x2="1672.55" y2="710.64" class="vp"/>
+<line x1="1678.17" y1="0" x2="1678.17" y2="710.64" class="vg"/>
+<line x1="1717.51" y1="0" x2="1717.51" y2="710.64" class="vp"/>
+<line x1="1723.13" y1="0" x2="1723.13" y2="710.64" class="vg"/>
+<rect x="3.36" y="515.52" width="416.64" height="191.34" class="sram"/>
+<line x1="9.36" y1="515.52" x2="414.0" y2="515.52" class="pins"/>
+<text x="211.7" y="621.2" class="lbl halo">SRAM[0] · 512x32 · FS</text>
+<rect x="3.36" y="179.10" width="416.64" height="191.34" class="sram"/>
+<line x1="9.36" y1="370.44" x2="414.0" y2="370.44" class="pins"/>
+<text x="211.7" y="284.8" class="lbl halo">SRAM[1] · 512x32 · N</text>
+<text x="211.7" y="473.7" class="lbl small halo">99.7 µm gap: both FIFO wrappers live here</text>
+<text x="1072" y="363" class="lbl dim halo">standard cells, CFGMEM macros, TinyQV …</text>
+<text x="0" y="-14" class="lbl axis start">die 1724.16 × 710.64 µm, origin bottom left · Metal4 stripes every 44.96 µm: VPWR solid, VGND dashed</text>
+<text x="0" y="741" class="lbl axis start">pin face = the bright edge · SRAM[0] is flipped (FS) so the two pin faces look at each other</text>
+</svg>
+    <figcaption>The real floorplan of the 8x4 tile in my design, drawn from the config. Two 512×32 macros flush against the left edge, pin faces toward each other, and the tile's Metal4 stripe grid running top to bottom every 44.96 µm.</figcaption>
+  </figure>
+
+  <p>Two settings go with the placement. <code>FP_MACRO_HORIZONTAL_HALO</code> (2 µm in my design) keeps standard cells away from the macro edge, which matters because the SRAM's well edge and the neighbouring cells' wells need a minimum distance. And an explicit list of <code>ROUTING_OBSTRUCTIONS</code> over the macro's footprint on Metal2 to Metal4. The LEF already declares the inside as obstructed, but a Tiny Tapeout CMOS5L tile routes on Metal2 to Metal4 only (TopMetal belongs to the chip-level harness), so there is no free layer above the macro and I want the router to have no ideas about crossing it:</p>
+
+<pre><code><span class="s">"ROUTING_OBSTRUCTIONS"</span>: [
+  <span class="s">"Metal2 3.36 3.78 420.0 192.5"</span>,   <span class="c">// SRAM[0]</span>
+  <span class="s">"Metal3 3.36 3.78 420.0 192.5"</span>,
+  <span class="s">"Metal4 3.36 3.78 420.0 192.5"</span>,
+  <span class="c">// ... and the same three for SRAM[1]</span>
+]</code></pre>
+
+  <h2><span class="n">04</span>Power: the part that actually bites</h2>
+  <p>This is where a beginner's first attempt usually stalls, so slow down here.</p>
+  <p>A standard cell gets power from the horizontal rails it sits on. A hard macro has its own power pins and nothing feeds them unless <i>your</i> power grid lands on them. The SRAM has three supplies, all as vertical Metal4 columns running the full height of the macro:</p>
+
+  <table>
+    <tr><th>Pin</th><th>What it feeds</th><th>Where it is</th></tr>
+    <tr><td><code>VDD!</code></td><td>the periphery logic (decoders, sense amps)</td><td>36 columns, 2.81 µm wide, at x = 4.26 + 11.24·k, the lower 39 µm of the macro</td></tr>
+    <tr><td><code>VDDARRAY!</code></td><td>the bit-cell array</td><td>the same 36 columns, the upper 146 µm</td></tr>
+    <tr><td><code>VSS!</code></td><td>ground for both</td><td>36 columns at x = 9.88 + 11.24·k, full height</td></tr>
+  </table>
+
+  <p>The exclamation marks are part of the pin names, IHP's way of marking a global net. Note the geometry: VDD and VSS alternate every 5.62 µm and the pattern repeats every 11.24 µm. Keep those two numbers in your head.</p>
+
+  <div class="callout warn">
+    <span class="t">These numbers belong to one macro</span>
+    <p>Everything quantitative in this post, the 36 supply columns and where they start, the 4.26 and 9.88 µm offsets, the 191.34 µm height, the 9-bit address and 32-bit data buses, the pin count, is specific to <code>RM_IHPSG13_1P_512x32_c2_bm_bist</code>, the macro my PRISM design uses. A different size or a dual-port macro has its own width, its own column count and offsets, and its own bus widths. Read them off its LEF (the <code>PIN VDD!</code> rectangles give the columns) and its datasheet before you copy any value from here.</p>
+  </div>
+
+  <h3>The Tiny Tapeout CMOS5L grid is Metal4 only</h3>
+  <p>On the CMOS5L tile template the power distribution is a single layer: vertical VPWR/VGND stripes on Metal4 that the top-level harness contacts from above. There is no horizontal Metal5 mesh inside your tile. That is a gift here, because the macro's supply columns are also vertical Metal4. If a tile stripe runs exactly over one of the macro's columns, the PDN generator makes the connection for free; if it lands between columns, or on the obstructed part of the macro, it does nothing and the macro floats.</p>
+
+  <p>So the trick is to make the tile grid's numbers match the macro's numbers. My <code>config.json</code> does exactly that:</p>
+
+<pre><code><span class="s">"FP_PDN_MULTILAYER"</span>: 0,        <span class="c">// vertical stripes only, no upper mesh</span>
+<span class="s">"FP_PDN_VWIDTH"</span>:     2.1,      <span class="c">// narrower than the 2.81 µm column: sits inside it</span>
+<span class="s">"FP_PDN_VSPACING"</span>:   3.52,     <span class="c">// 2.1 + 3.52 = 5.62: VPWR-to-VGND matches the macro</span>
+<span class="s">"FP_PDN_VPITCH"</span>:     44.96,    <span class="c">// 4 x 11.24: every fourth column pair gets a tile pair</span>
+<span class="s">"FP_PDN_VOFFSET"</span>:    6.15      <span class="c">// phases the grid so a pair lands on the first columns</span></code></pre>
+
+  <p>With that pitch and offset the tile's VPWR stripes are centred at x = 9.03 + 44.96·k and its VGND stripes at 14.65 + 44.96·k. Place the macro at x = 3.36 and its first VDD column centre is at 3.36 + 4.26 + 1.405 = 9.03. That is not a coincidence, that is the whole design of the grid. Every macro in the tile, including my latch-based configuration memories, was built or placed on that same 44.96 µm rhythm so that the one grid feeds all of them.</p>
+
+  <p>One honest footnote: the macro's columns are not perfectly regular across its whole width. The left bit-cell array lines up with the grid exactly. The narrow band of support logic in the middle has columns at odd spacings, and the right array is phased 0.67 µm off. So the four tile pairs that cross the left array land dead centre, while the ones over the band and the right array need a nudge. My flow's stripe step does that nudge automatically (its log says things like "VPWR stripe at x=188.87 moved +9.94 um onto a column"). Without such a step you would check each crossing in the GUI and move the offending stripes by hand, which is exactly why the next section exists. The Python that does this job in my repository is <a href="https://github.com/kdp1965/ihp-um-janestreet-prism/blob/count3/odb_stripes.py"><code>odb_stripes.py</code></a>, run by the <code>Project.ExtendPowerStripes</code> step in <code>librelane_plugin_prism_pdn.py</code>. It is written around this macro and this floorplan, so if you borrow it, expect to modify it to meet your needs.</p>
+
+  <figure class="zoom">
+<svg viewBox="-3 -13 66 72" role="img" aria-labelledby="fig2t" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+<title id="fig2t">One stripe period over the SRAM: the tile pair lands on the first column pair, the project adds pairs on every other one</title>
+<rect x="0" y="0" width="60" height="40" class="sram"/>
+<rect x="4.26" y="0" width="2.81" height="40" class="col vd"/>
+<rect x="9.88" y="0" width="2.81" height="40" class="col gd"/>
+<rect x="15.50" y="0" width="2.81" height="40" class="col vd"/>
+<rect x="21.12" y="0" width="2.81" height="40" class="col gd"/>
+<rect x="26.74" y="0" width="2.81" height="40" class="col vd"/>
+<rect x="32.36" y="0" width="2.81" height="40" class="col gd"/>
+<rect x="37.98" y="0" width="2.81" height="40" class="col vd"/>
+<rect x="43.60" y="0" width="2.81" height="40" class="col gd"/>
+<rect x="49.22" y="0" width="2.81" height="40" class="col vd"/>
+<rect x="54.84" y="0" width="2.81" height="40" class="col gd"/>
+<rect x="4.62" y="-6" width="2.1" height="52" class="stripe vp"/>
+<rect x="10.24" y="-6" width="2.1" height="52" class="stripe vg"/>
+<rect x="49.58" y="-6" width="2.1" height="52" class="stripe vp"/>
+<rect x="55.20" y="-6" width="2.1" height="52" class="stripe vg"/>
+<rect x="27.10" y="-6" width="2.1" height="52" class="stripe vp added"/>
+<rect x="32.72" y="-6" width="2.1" height="52" class="stripe vg added"/>
+<text x="0" y="-9" class="lbl axis start">VDD! and VSS! columns of the macro, 11.24 µm pitch</text>
+<text x="8.48" y="51" class="lbl axis mid">tile pair</text>
+<text x="30.96" y="51" class="lbl axis mid">added pair</text>
+<text x="53.44" y="51" class="lbl axis mid">tile pair</text>
+<text x="30" y="57" class="lbl axis mid">outlined columns get no stripe from the base grid</text>
+</svg>
+    <figcaption>One grid period seen from inside the macro. The tile's own VPWR/VGND pair (solid) lands on the first column pair; the macro's other three pairs in that period get nothing from the base grid. The every-other mode adds the faded pair; the all-columns mode fills every outlined column.</figcaption>
+  </figure>
+
+  <h3>Telling the PDN which pin is which</h3>
+  <p>The generator also needs to know that the macro's <code>VDD!</code> is your <code>VPWR</code>. That is the <code>PDN_MACRO_CONNECTIONS</code> list: one line per instance per supply pair, in the form <i>instance-pattern VPWR VGND macro-power-pin macro-ground-pin</i>. Because the SRAM has two power pins, each instance gets two lines. The pattern is a regular expression, and the square brackets in the instance path need to survive both JSON and the regex engine, hence the escaping:</p>
+
+<pre><code><span class="s">"PDN_MACRO_CONNECTIONS"</span>: [
+  <span class="s">"i_peripherals\\.i_prism\\.SRAM\\\\?\\[0\\\\?\\]\\.M512\\.i_sram VPWR VGND VDD! VSS!"</span>,
+  <span class="s">"i_peripherals\\.i_prism\\.SRAM\\\\?\\[0\\\\?\\]\\.M512\\.i_sram VPWR VGND VDDARRAY! VSS!"</span>,
+  <span class="s">"i_peripherals\\.i_prism\\.SRAM\\\\?\\[1\\\\?\\]\\.M512\\.i_sram VPWR VGND VDD! VSS!"</span>,
+  <span class="s">"i_peripherals\\.i_prism\\.SRAM\\\\?\\[1\\\\?\\]\\.M512\\.i_sram VPWR VGND VDDARRAY! VSS!"</span>
+]</code></pre>
+
+  <div class="callout good">
+    <span class="t">How to check it worked</span>
+    <p>Open the ODB after the PDN step in the OpenROAD GUI, turn on Metal4, and look at the macro. Every tile stripe that crosses it should sit dead centre on a coloured column, not in the gap between them. Then run the flow's IR-drop report: a macro that is fed shows a sane drop (mine reports well under a millivolt); an unfed macro shows up as a floating net and the PSM step complains. Do not skip this look. A macro with no power passes DRC and LVS with flying colours and is a brick on silicon.</p>
+  </div>
+
+  <h3>How many stripes? Three answers</h3>
+  <p>The base grid gets the macro alive, and for a first design that may be all you want. But an SRAM is the hungriest thing on the tile when it is reading and writing every cycle, and every stripe that lands on a column is another feed into the macro's internal power mesh. My flow's stripe step (<code>Project.ExtendPowerStripes</code> in <code>librelane_plugin_prism_pdn.py</code>) has three modes, and I have hardened the design in all three, so here is what they cost and buy:</p>
+
+  <table class="modes">
+    <tr><th>Mode</th><th>Option under <code>EXTEND_STRIPES_SRAM_</code></th><th>Stripe pairs per SRAM</th><th>What it does</th></tr>
+    <tr><td>Grid only</td><td>both options false</td><td>10</td><td>the tile grid's pairs, nudged onto the nearest column</td></tr>
+    <tr><td>Every other array pair</td><td><code>ARRAY_EVERY_OTHER</code></td><td>17</td><td>adds a pair on every other column pair of each bit-cell array, leaves the middle band as the grid gives it (what the submission uses)</td></tr>
+    <tr><td>All columns</td><td><code>ALL_COLUMNS</code></td><td>36</td><td>a stripe on every legal supply column, best power delivery</td></tr>
+  </table>
+
+  <p><b>If you want the best power delivery, use all columns.</b> Every one of the macro's 36 VDD and 36 VSS columns gets its own full-height Metal4 stripe. I measured the routing price of that on an earlier revision of this tile, against the same design on the base grid: total wirelength up 0.8 %, global-routing overflow up 1.9 %, the detailed router needed 28 passes instead of 21 to reach zero violations, and the worst-case IR drop fell from 0.38 mV to 0.27 mV. Everything signed off clean. Metal4 wire did not change at all, because the corridor above and below an SRAM carries little signal Metal4 anyway. In other words, routing is not a reason to leave those stripes out. It is also the direction Tiny Tapeout's own tooling is taking: in a September 2026 discussion on the TT Discord the maintainers described drawing Metal4 stripes over the macro's power tracks at full height, and confirmed that a tile may have any number of VPWR/VGND stripes since the top level drops its vias onto whatever is there.</p>
+
+  <p><b>Why my submission runs every-other instead.</b> The stripes on the SRAM's columns run the full height of the tile, not just the height of the macro. In my floorplan a latch-macro sits directly above the SRAM stack, and with all columns fed, 41 of its 56 Metal4 data pins ended up on or within a quarter micron of a stripe: a dozen hard shorts that no amount of routing could fix. Every-other on the arrays, plus a rule that no SRAM column stripe comes within 0.5 µm of any macro's Metal4 signal pin, cleared it, and the design still reports a worst-case IR drop of 0.46 mV. So the decision rule for a beginner is simple: if nothing with Metal4 pins sits in the SRAM's x-range above or below it, turn on all columns and enjoy the margin. If something does, either move it out of that column of the tile or step down to every-other.</p>
+
+  <div class="callout">
+    <span class="t">If you do not have a stripe step</span>
+    <p>You can get most of the all-columns benefit with plain <code>pdngen</code>: set the vertical pitch to 11.24 µm, the macro's own column pitch, with the same 2.1 µm width and 3.52 µm spacing, and keep the offset at 6.15. Now a VPWR/VGND pair lands on every column pair of the left array for free. You lose the 0.67 µm nudge on the right array and the irregular band, and you pay for the stripes across the whole tile, not just over the macro; look at the standard-cell region afterwards, since four times the Metal4 stripes there is a real routing cost that my measurement above did not include.</p>
+  </div>
+
+  <h3>What it looks like when it is right</h3>
+  <p>Here is the resulting power grid on the finished tile, a KLayout screenshot with just two layers turned on: GatPoly in red, which paints every transistor and so shows where the standard cells and the macros are, and the Metal4 pins in green, which are the stripes. Read it left to right. The two SRAM macros are the dense blocks at the left with the closer-spaced pairs over their bit-cell arrays, the every-other mode at work. The regular pairs every 44.96 µm run the full height of the tile through everything else, and where they cross the latch-based configuration macros in the middle and at the right, they land on those macros' own rails. Every macro in the picture is fed by the same grid, which was the point of choosing the grid's numbers from the SRAM's columns.</p>
+
+  <figure>
+    <img src="JaneStreet_PRISM_PDN.png" alt="KLayout screenshot of the whole tile with GatPoly and the Metal4 pins visible: vertical power stripes every 44.96 µm across the standard cells and macros, denser over the two SRAM arrays at the left" loading="lazy">
+    <figcaption>The finished tile in KLayout, GatPoly (red) and Metal4.pin (green) only: the tile's stripe pairs on the 44.96 µm grid, the extra every-other pairs over the two SRAM arrays at the left, and the same stripes crossing the CFGMEM latch macros on their rails.</figcaption>
+  </figure>
+
+  <h2><span class="n">05</span>Sign-off: what will complain, and what to do about it</h2>
+  <p>With the macro placed and powered, the design routes like any other. The surprises are all in the checks at the end. Here is each one and the fix, in the order the flow runs them.</p>
+
+  <h3>Antenna diodes on the SRAM inputs</h3>
+  <p>The SRAM has 191 pins and almost all are inputs. Long routes into a gate can pick up charge during fabrication, and the macro's LEF carries antenna numbers for its Metal2 pins, so the antenna checker cares about them. LibreLane's rule-based repair covers most of it. In my flow the checker could not always see the nets driving the macro, so I added a step that drops one antenna diode (<code>sg13cmos5l_antennanp</code>) next to every SRAM input pin before detailed placement. Cheap insurance. If your antenna report is clean without it, you do not need it.</p>
+
+  <h3>Magic DRC and the "illegal overlap"</h3>
+  <p>Magic does not understand the SRAM's bit cells; it reads the macro from its LEF abstract, not the GDS. That LEF abstract has a Metal4 obstruction bar at the height where the <code>VDD!</code> columns end and the <code>VDDARRAY!</code> columns begin. A VPWR stripe running the full height crosses that bar, and Magic reports it as an illegal overlap of a wire with a blockage. In the real GDS there is no metal in that bar, so the stripe simply bridges two supply pins that you tied to the same net anyway. I waived it:</p>
+
+<pre><code><span class="s">"RUN_MAGIC_DRC"</span>: 0,
+<span class="s">"ERROR_ON_ILLEGAL_OVERLAPS"</span>: 0,
+<span class="s">"RUN_KLAYOUT_DRC"</span>: 1,
+<span class="s">"KLAYOUT_DRC_RUNSET"</span>: <span class="s">"pdk_dir::libs.tech/klayout/tech/drc/ihp-sg13cmos5l.drc"</span></code></pre>
+
+  <p>The important half of that is the last two lines. You are not skipping DRC, you are moving it to KLayout, which runs the same deck the Tiny Tapeout precheck runs and does see the real geometry. My final run reports 22 of the Magic overlaps, all on VDD columns, and zero KLayout violations.</p>
+
+  <h3>LVS</h3>
+  <p>LVS compares the extracted layout against the netlist, and for the macro it needs a transistor-level description. That is why the <code>spice</code> entry in the MACROS block points at the CDL file. If LVS reports the macro's power pins as unconnected, go back to section 04: it means a stripe never actually landed on a column.</p>
+
+  <h3>The Tiny Tapeout precheck and two mystery layers</h3>
+  <p>The SRAM GDS contains two layers that no standard cell uses: <code>SRAM.drawing</code> (GDS 25/0) and <code>DigiBnd.drawing</code> (16/0). They are marker layers IHP uses to identify the macro. An older precheck rejected any tile carrying them. Since September 2026 the Tiny Tapeout maintainers whitelist both for designs that use the IHP SRAMs. If you run a local copy of the precheck and it flags layers 25/0 or 16/0, update it, or add the two layers to its valid-layer list as I did in <code>tt/precheck/tech_data.py</code>.</p>
+
+  <h2><span class="n">06</span>Test it like you mean it</h2>
+  <p>Because the model is behavioural, your cocotb tests exercise the real interface timing: the one-cycle read latency, the enable semantics, the bit mask. Write at least these three before you call the integration done:</p>
+  <ol class="steps">
+    <li>Write a word, read it back one cycle later, check <code>A_DOUT</code>. Then read the same address twice in a row and confirm the data holds.</li>
+    <li>Write with a partial <code>A_BM</code> and confirm untouched bits keep their old value.</li>
+    <li>Run the same test against the gate-level netlist from your local build. If the SRAM is unresolved there, your GL Makefile is missing the models (section 02).</li>
+  </ol>
+  <p>My repo's SRAM FIFO test does this through the peripheral's registers, and the same test runs on RTL, on the post-synthesis netlist and on the final gate-level netlist in CI.</p>
+
+  <h2>The whole thing on one page</h2>
+  <ul class="checks">
+    <li>Fetch IHP-Open-PDK at the commit the precheck pins, export <code>PDK_ROOT</code> (the parent directory) and <code>PDK=ihp-sg13cmos5l</code>.</li>
+    <li>Read <code>doc/&lt;macro&gt;.txt</code>. Tie <code>A_DLY</code> to 1, BIST ports to 0, drive <code>A_MEN</code> whenever you read or write.</li>
+    <li>RTL instance + a <code>(* blackbox *)</code> header for synthesis + the PDK behavioural model with <code>-DFUNCTIONAL</code> for RTL and GL simulation.</li>
+    <li><code>MACROS</code> block: gds, lef, cdl as spice, three libs mapped onto LibreLane's corner names, one instance per hierarchical path with location and orientation.</li>
+    <li>Pin face toward the logic that talks to it. Halo of 2 µm. Routing obstructions over the footprint on Metal2 to Metal4.</li>
+    <li>Metal4-only grid with pitch 44.96, spacing 3.52, width 2.1, offset 6.15; place the macro at x = 3.36 so the stripes hit the columns. Two <code>PDN_MACRO_CONNECTIONS</code> lines per instance, for <code>VDD!</code> and <code>VDDARRAY!</code>.</li>
+    <li>Look at Metal4 over the macro in the GUI. Read the IR-drop report. Feed all 36 column pairs if nothing with Metal4 pins sits above or below the SRAM; every other pair if something does.</li>
+    <li>Magic DRC off, KLayout DRC on with the CMOS5L deck, illegal-overlap error off (22 known overlaps at the VDD/VDDARRAY break), LVS clean.</li>
+    <li>Precheck whitelist: layers 25/0 and 16/0.</li>
+    <li>Tests on RTL and on gates.</li>
+  </ul>
+
+  <p>The files to open in the example repository, in the order this post used them:</p>
+  <table>
+    <tr><th>Topic</th><th>File in <a href="https://github.com/kdp1965/ihp-um-janestreet-prism">ihp-um-janestreet-prism</a></th></tr>
+    <tr><td>RTL instance and the FIFO wrapper around it</td><td><code>src/user_peripherals/prism/prism_periph.v</code>, <code>src/user_peripherals/prism/prism_sram_fifo.v</code></td></tr>
+    <tr><td>Synthesis black box</td><td><code>src/user_peripherals/prism/sram_2048x32_bb.v</code></td></tr>
+    <tr><td>Vendored behavioural models and the sim Makefiles</td><td><code>test/ihp_sram/</code>, <code>test/test_basic.mk</code></td></tr>
+    <tr><td>MACROS, PDN numbers, connections, waivers, and the <code>//</code> comment keys that explain each one</td><td><code>src/config.json</code>, <code>src/pdn_cfg.tcl</code></td></tr>
+    <tr><td>Stripes on the SRAM columns (grid / every-other / all), diodes on the SRAM pins</td><td><code>librelane_plugin_prism_pdn.py</code>, <code>odb_stripes.py</code>, <code>odb_sram_diodes.py</code></td></tr>
+    <tr><td>Precheck layer whitelist</td><td><code>tt/precheck/tech_data.py</code></td></tr>
+  </table>
+
+  <p>Two macros, two kilobytes each, and a tile that now buffers whole Ethernet frames on both sides of a protocol engine. The first time it hardened clean I spent a long minute just looking at the Metal4 stripes lining up on the columns. You will too.</p>
+
+  <p class="foot">Written from the state of the design on 2026-09-29. Numbers (macro size, pin positions, grid pitch, tile size) are taken from the IHP SG13CMOS5L PDK views and the design's <code>config.json</code>; check them against your PDK snapshot, IHP regenerates the memories occasionally.</p>
+</div>
+</body>
+</html>

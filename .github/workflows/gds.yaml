@@ -58,6 +58,12 @@ jobs:
       - name: GL test
         uses: kdp1965/tt-gds-action/gl_test@ihp-cmos5l-fix
 
+  # The GitHub Pages site.  The steps are the TT viewer action's
+  # (TinyTapeout/tt-gds-action/viewer@ihp-cmos5l) written out, minus its
+  # index.html that only redirects to the 3D viewer: the landing page comes
+  # from site/ instead (site/index.html links the 3D viewer and the SRAM
+  # write-up, site/ihp_sram_macro.html), next to the render, the GDS and the
+  # OASIS the action publishes.
   viewer:
     needs: gds
     runs-on: ubuntu-24.04
@@ -65,4 +71,52 @@ jobs:
       pages: write # to deploy to Pages
       id-token: write # to verify the deployment originates from an appropriate source
     steps:
-      - uses: TinyTapeout/tt-gds-action/viewer@ihp-cmos5l
+      - name: checkout repo
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: site
+          sparse-checkout-cone-mode: false
+
+      - name: Download GDS artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: tt_submission
+
+      - name: Download gds_render (png) artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: gds_render
+          path: gh-pages
+
+      - name: Assemble the site
+        run: |
+          cp tt_submission/*.gds gh-pages/tinytapeout.gds
+          cp tt_submission/*.oas gh-pages/tinytapeout.oas
+          cp -r site/. gh-pages/
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: 'gh-pages'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+      - name: Display preview in workflow summary
+        run: |
+          PAGE_URL=$(echo "${{ steps.deployment.outputs.page_url }}" | sed -e 's/\/$//')
+          PDK=$(jq -r '.PDK' tt_submission/pdk.json)
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          # Site
+          [Landing page]($PAGE_URL/) · [SRAM write-up]($PAGE_URL/ihp_sram_macro.html)
+
+          # 3D Viewer
+          [Open 3D viewer](https://gds-viewer.tinytapeout.com/?model=$PAGE_URL/tinytapeout.oas&pdk=$PDK)
+
+          # Tiny Tapeout Explorer
+          [Open in Tiny Tapeout Explorer](https://gds-explorer.tinytapeout.com/viewer?file=$PAGE_URL/tinytapeout.oas&pdk=$PDK)
+
+          # 2D Preview
+          ![png]($PAGE_URL/gds_render.png)
+          EOF

@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="PRISM on TinyQV: a programmable protocol engine for the Jane Street Tiny Tapeout competition on IHP SG13CMOS5L. 3D view of the tile and a write-up on integrating the IHP SRAM macros.">
+<title>PRISM · Jane Street CMOS5L tile</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f6fa; --bg-2: #ffffff; --ink: #17202c; --ink-2: #4a5566; --line: #d5dbe6;
+    --accent: #0b7f8a; --accent-2: #c2571b; --glow: rgba(11, 127, 138, .16);
+    --font-head: "Space Grotesk", system-ui, sans-serif;
+    --font-body: "IBM Plex Sans", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0b1017; --bg-2: #111823; --ink: #e6ecf5; --ink-2: #9aa7ba; --line: #263142;
+      --accent: #5fd3dc; --accent-2: #f2a15f; --glow: rgba(95, 211, 220, .14);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0b1017; --bg-2: #111823; --ink: #e6ecf5; --ink-2: #9aa7ba; --line: #263142;
+    --accent: #5fd3dc; --accent-2: #f2a15f; --glow: rgba(95, 211, 220, .14);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 17px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 0 16px 64px; }
+  header { position: relative; padding: 56px 0 28px; border-bottom: 1px solid var(--line); overflow: hidden; }
+  header::before {
+    content: ""; position: absolute; inset: 0;
+    background:
+      linear-gradient(var(--line) 1px, transparent 1px) 0 0 / 100% 44.96px,
+      linear-gradient(90deg, var(--line) 1px, transparent 1px) 0 0 / 44.96px 100%;
+    opacity: .35;
+    mask-image: linear-gradient(180deg, rgba(0,0,0,.9), transparent 90%);
+    -webkit-mask-image: linear-gradient(180deg, rgba(0,0,0,.9), transparent 90%);
+    pointer-events: none;
+  }
+  header > * { position: relative; }
+  .kicker { font-family: var(--font-mono); font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin: 0 0 14px; }
+  h1 { font-family: var(--font-head); font-weight: 700; font-size: clamp(30px, 5.4vw, 46px); line-height: 1.08; margin: 0 0 14px; letter-spacing: -.01em; }
+  h1 em { font-style: normal; color: var(--accent); }
+  .lede { font-size: 19px; color: var(--ink-2); max-width: 680px; margin: 0; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin: 32px 0; }
+  .card {
+    display: block; text-decoration: none; color: inherit;
+    background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px; padding: 22px 22px 20px;
+    box-shadow: 0 0 0 4px var(--glow);
+    transition: transform .12s ease, border-color .12s ease;
+  }
+  .card:hover { transform: translateY(-2px); border-color: var(--accent); }
+  .card .t { display: block; font-family: var(--font-mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin-bottom: 8px; }
+  .card h2 { font-family: var(--font-head); font-size: 24px; line-height: 1.2; margin: 0 0 10px; }
+  .card p { margin: 0; color: var(--ink-2); font-size: 16px; }
+  .card .go { display: inline-block; margin-top: 14px; font-family: var(--font-mono); font-size: 13px; color: var(--accent); }
+  .preview { margin: 8px 0 0; }
+  .preview img { width: 100%; height: auto; display: block; border-radius: 12px; border: 1px solid var(--line); }
+  .preview figcaption { font-size: 14px; color: var(--ink-2); margin-top: 8px; }
+  .links { margin-top: 28px; font-size: 15px; color: var(--ink-2); }
+  .links a { color: var(--accent); text-underline-offset: 3px; }
+  .links span { margin: 0 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="kicker">Tiny Tapeout · Jane Street competition · IHP SG13CMOS5L · 8x4 tile</p>
+    <h1><em>PRISM</em> on TinyQV</h1>
+    <p class="lede">A programmable protocol engine beside a RISC-V core: two 16-state machines with their own datapaths, packet FIFOs in IHP SRAM, and DMA to the PSRAM. Ethernet, CAN, USB, SpaceWire, I2C, SPI, UART, JTAG, SWD, PS/2, 1-Wire and WS2812, each a small configuration file.</p>
+  </header>
+
+  <div class="cards">
+    <a class="card" id="viewer" href="#">
+      <span class="t">Layout</span>
+      <h2>3D GDS viewer</h2>
+      <p>The tile as taped out, in Tiny Tapeout's interactive viewer: the two SRAM macros on the left, the eight latch-based configuration memories, the standard cells between them.</p>
+      <span class="go">Open the viewer →</span>
+    </a>
+    <a class="card" href="ihp_sram_macro.html">
+      <span class="t">Write-up</span>
+      <h2>Dropping a real SRAM macro into your CMOS5L tile</h2>
+      <p>A first-timer's walkthrough of the IHP memory macro: where it lives in the PDK, the RTL and LibreLane config, feeding it power on a Metal4-only grid, and the sign-off checks that will complain.</p>
+      <span class="go">Read the write-up →</span>
+    </a>
+  </div>
+
+  <figure class="preview">
+    <img src="gds_render.png" alt="2D render of the tile's GDS">
+    <figcaption>2D render of the current GDS, regenerated by the GitHub Action on every push.</figcaption>
+  </figure>
+
+  <p class="links">
+    <a href="https://github.com/kdp1965/ihp-um-janestreet-prism">Source on GitHub</a>
+    <span>·</span>
+    <a id="explorer" href="#">Tiny Tapeout Explorer</a>
+    <span>·</span>
+    <a href="tinytapeout.oas">Download the OASIS</a>
+  </p>
+</div>
+<script>
+  // The viewer and explorer take the OASIS file's URL, which is this page's directory.
+  var model = new URL("tinytapeout.oas", location.href).href;
+  var pdk = "ihp-sg13cmos5l";
+  document.getElementById("viewer").href =
+    "https://gds-viewer.tinytapeout.com/?pdk=" + pdk + "&model=" + encodeURIComponent(model);
+  document.getElementById("explorer").href =
+    "https://gds-explorer.tinytapeout.com/viewer?file=" + encodeURIComponent(model) + "&pdk=" + pdk;
+</script>
+</body>
+</html>
