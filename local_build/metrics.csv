@@ -125,7 +125,7 @@ timing__drv__floating__pins,0
 design__instance__displacement__total,3401.04
 design__instance__displacement__mean,0.109
 design__instance__displacement__max,36.06
-route__wirelength__estimated,1.84292E+6
+route__wirelength__estimated,1842920
 design__violations,0
 design__instance__count__class:timing_repair_buffer,6846
 design__instance__area__class:timing_repair_buffer,82611.4
