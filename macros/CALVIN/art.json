@@ -1,0 +1,46 @@
+{
+  "gds": "/Users/Ken2/projects/tiny_tapeout/ihp-um-janestreet-prism/macros/CALVIN/tt_um_pettit_calvin.gds",
+  "cell": "tt_um_pettit_calvin",
+  "lef": "/Users/Ken2/projects/tiny_tapeout/ihp-um-janestreet-prism/macros/CALVIN/tt_um_pettit_calvin.lef",
+  "origin": [
+    1634.9,
+    4.4
+  ],
+  "box": [
+    1634.9,
+    4.4,
+    1670.9,
+    51.8
+  ],
+  "pixel": 0.6,
+  "pixels": [
+    60,
+    79
+  ],
+  "metal_pixels": 2756,
+  "polygons": 22,
+  "metal_area_um2": 992.16,
+  "routing_obstruction": [
+    "Metal4",
+    1634.9,
+    4.4,
+    1670.9,
+    51.8
+  ],
+  "exclusions": [
+    [
+      1670.77,
+      46.05,
+      1670.97,
+      61.47
+    ]
+  ],
+  "clearance": 0.6,
+  "mode": "plate",
+  "extent": [
+    1670.77,
+    46.05,
+    1670.97,
+    61.47
+  ]
+}
