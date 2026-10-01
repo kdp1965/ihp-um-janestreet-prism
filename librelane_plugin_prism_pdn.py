@@ -19,6 +19,7 @@ from librelane.steps import Step
 from librelane.steps.odb import OdbpyStep
 from librelane.config import Variable
 from typing import Optional
+from librelane.common import Path
 from decimal import Decimal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -104,6 +105,68 @@ class MouthKeepouts(OdbpyStep):
             "--max-density", str(self.config["MOUTH_KEEPOUT_MAX_DENSITY"]),
             "--inward", str(self.config["MOUTH_KEEPOUT_INWARD"]),
         ]
+
+
+@Step.factory.register()
+class AnchorSequential(OdbpyStep):
+    """Pins the flops and latches where an earlier run had them (a
+    tools/seq_placement.py table keyed by RTL name) before global placement,
+    so a good draw's register skeleton is reused; new registers place
+    freely.  Inserted right before global placement, after the rows are cut,
+    the taps and the PDN are in, with meta.substituting_steps
+    "+Odb.AddRoutingObstructions": "Project.AnchorSequential": any earlier
+    and cut_rows slices the rows around every pinned (fixed) cell."""
+    id = "Project.AnchorSequential"
+    name = "Anchor the Registers to a Reference Placement"
+
+    config_vars = ANCHOR_VARS = [
+        Variable("ANCHOR_SEQ_TABLE", Optional[Path], "tools/seq_placement.py JSON of the run whose register placement is reused; unset = nothing pinned.", default=None),
+        Variable("ANCHOR_SEQ_STATUS", str, "Placement status of the pinned registers: FIRM (DEF FIXED, the placers leave them) or PLACED (a starting point only).", default="FIRM"),
+        Variable("ANCHOR_CELLS_TABLE", Optional[Path], "odb_anchor_cells.py --dump graph of the run whose placement is reused: registers by name AND combinational cells by structure; takes precedence over ANCHOR_SEQ_TABLE.", default=None),
+        Variable("ANCHOR_CELLS_ROUNDS", int, "Neighbourhood radius (hops) of the structural matching's local pass.", default=3),
+    ]
+
+    def get_script_path(self):
+        if self.config["ANCHOR_CELLS_TABLE"] is not None:
+            return os.path.join(HERE, "odb_anchor_cells.py")
+        return os.path.join(HERE, "odb_anchor_seq.py")
+
+    def get_command(self) -> List[str]:
+        if self.config["ANCHOR_CELLS_TABLE"] is not None:
+            return super().get_command() + [
+                "--table", str(self.config["ANCHOR_CELLS_TABLE"]),
+                "--status", self.config["ANCHOR_SEQ_STATUS"],
+                "--rounds", str(self.config["ANCHOR_CELLS_ROUNDS"]),
+                "--report", os.path.join(self.step_dir, "anchor_pairs.json"),
+            ]
+        return super().get_command() + [
+            "--table", str(self.config["ANCHOR_SEQ_TABLE"]),
+            "--status", self.config["ANCHOR_SEQ_STATUS"],
+        ]
+
+    def run(self, state_in, **kwargs):
+        if self.config["ANCHOR_SEQ_TABLE"] is None and self.config["ANCHOR_CELLS_TABLE"] is None:
+            return {}, {}
+        return super().run(state_in, **kwargs)
+
+
+@Step.factory.register()
+class ReleaseAnchors(OdbpyStep):
+    """Sets the cells Project.AnchorSequential pinned back to PLACED right
+    after global placement ("+OpenROAD.GlobalPlacement":
+    "Project.ReleaseAnchors"): FIRM only has to steer the global placer, and
+    left on it breaks the resizers' in-place upsizing (DPL-0033)."""
+    id = "Project.ReleaseAnchors"
+    name = "Release the Anchored Cells"
+    config_vars = AnchorSequential.config_vars
+
+    def get_script_path(self):
+        return os.path.join(HERE, "odb_anchor_release.py")
+
+    def run(self, state_in, **kwargs):
+        if self.config["ANCHOR_SEQ_TABLE"] is None and self.config["ANCHOR_CELLS_TABLE"] is None:
+            return {}, {}
+        return super().run(state_in, **kwargs)
 
 
 @Step.factory.register()
