@@ -182,9 +182,15 @@
 
 `default_nettype none
 
-module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter CNT_CMP = 1,       // CNT_CMP: build the CRC register's counter mode (CFG3[10])
-                     parameter FIFO_AW_A = 4, parameter FIFO_AW_B = 4 ) (                        // log2 of the flop FIFO depth of shard 0 (A) / shard 1 (B); levels in bytes at 4, 4-byte units above
-                         // SRAM_FIFO: number of SRAM FIFOs (0/1/2); SRAM_AW 11: 2048x32, 10: 1024x32, 9: 512x32 (2 KB)
+module tqvp_prism
+#(
+    parameter SRAM_FIFO = 2,
+    parameter SRAM_AW = 9,
+    parameter CNT_CMP = 1,          // CNT_CMP: build the CRC register's counter mode (CFG3[10])
+    parameter FIFO_AW_A = 4,
+    parameter FIFO_AW_B = 4
+)
+(
     input             clk,          // Clock - the TinyQV project clock is normally set to 64MHz.
     input             rst_n,        // Reset_n - low to reset.
     input      [7:0]  ui_in,        // The input PMOD, 2-flop synchronized (project.v).  ui_in[7] is normally UART RX.
@@ -253,7 +259,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     localparam  PRISM_DUAL_COMPARE  = 1;
     localparam  SHARDS              = 2;
 
-    // Output bit assignments (changes.md item 12)
+    // Output bit assignments
     localparam  OUT_LATCH             = 4;
     localparam  OUT_FIFO_WR_RD        = 5;
     localparam  OUT_COUNT1_INC_DEC    = 6;
@@ -302,68 +308,72 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     localparam [8:0] REG_INT_STATUS = 9'h024;
 
     // Shard window offsets (shard s base = 0x100 + 0x80 * s)
-    localparam [6:0] SH_CFG0    = 7'h00;
-    localparam [6:0] SH_PINMUX  = 7'h04;
-    localparam [6:0] SH_PRELOAD = 7'h08;
-    localparam [6:0] SH_COUNT1  = 7'h0C;
-    localparam [6:0] SH_COUNTS  = 7'h10;
-    localparam [6:0] SH_HOST    = 7'h14;
-    localparam [6:0] SH_TOGGLE  = 7'h15;   // byte
-    localparam [6:0] SH_FLAGS   = 7'h18;
-    localparam [6:0] SH_CFG1    = 7'h1C;
-    localparam [6:0] SH_FIFO    = 7'h20;
-    localparam [6:0] SH_FIFO_ST = 7'h24;
-    localparam [6:0] SH_CRC_POLY= 7'h28;
-    localparam [6:0] SH_CRC     = 7'h2C;
-    localparam [6:0] SH_CRC_EXP = 7'h30;
-    localparam [6:0] SH_CFG2    = 7'h34;    // input slot selects
-    localparam [6:0] SH_CONST   = 7'h38;    // constants K3..K0 (K3 also the comm match value)
-    localparam [6:0] SH_CFG3    = 7'h3C;    // Manchester bit recoverer
-    localparam [6:0] SH_PRELOAD2 = 7'h40;   // free-running timer period (24 bits)
-    localparam [6:0] SH_TRACE_CFG  = 7'h44; // trace: configuration
-    localparam [6:0] SH_TRACE_CTRL = 7'h48; //        arm / stop, status
-    localparam [6:0] SH_CTAB    = 7'h4C;    // constant table: the latch FIFO as addressable constants
-    localparam [6:0] SH_COMM_PINS = 7'h50;  // multi-bit shift: comm bit per uo_out pin with pinmux code 6
-    localparam [6:0] SH_FIFO32  = 7'h54;    // 32-bit FIFO push / pop (CFG3[11])
-    localparam [6:0] SH_COUNT3  = 7'h58;    // count3 and its limit
-    localparam       CT_EN        = 0;      // CONST_TAB bits
-    localparam       CT_LOAD_ADDS = 1;      // index mode 3 adds idx_load instead of loading it
-    localparam       CT_POST      = 2;      // load the row before the index moves
-    localparam       CT_LOAD      = 4;      // [7:4]  idx_load
-    localparam       CT_ADD       = 8;      // [10:8] add_to_idx
-    localparam       CTAB_W       = 11;
-    localparam       TRC_EN   = 0;          // TRACE_CFG bits
-    localparam       TRC_BIG  = 1;
-    localparam       TRC_TRIG = 2;          // [3:2]
-    localparam       TRC_EDGE = 4;          // [5:4]
-    localparam       TRC_SI   = 8;          // [12:8]
-    localparam       TRC_IN   = 16;         // [20:16]
-    localparam       TRC_OTHER = 6;         // trace into the other shard's SRAM
-    localparam       T2_RELOAD  = 24;       // PRELOAD2: restart on entry into state [29:25]
-    localparam       T2_STATE   = 25;
-    localparam       T2_ONESHOT = 30;
-    localparam       SI_W     = 5;          // state index width (DEPTH 32)
-    localparam       CFG3_MRX_EN    = 3;    // CFG3: [2:0] pin, [3] enable, [7:4] clocks per half bit
-    localparam       CFG3_SHIFT_MRX = 8;    //       [8] shifter input = recovered bit
-    localparam       CFG3_MRX_DDR   = 9;    //       [9] double-edge sampling (hb in half clocks)
-    localparam       CFG3_CNT_EN    = 10;   //       [10] CRC register = up / down counter with compare
-    localparam       CFG3_FIFO32    = 11;   //       [11] 32-bit FIFO access through FIFO32
-    localparam       CFG3_SMP_PRESET = 12;  //       [13:12] sampler timer action = count1 <= preload >> k (k = 1-3; 0 = load)
-    localparam       CFG3_STUFF_EN  = 14;   //       [14] bit-stuff unit on count2 (run of COMPARE + 1 equal bits)
-    localparam       CFG3_STUFF_TX  = 15;   //       [15] stuff unit inserts (transmit) instead of dropping (receive)
-    localparam       CFG3_SMP_EN    = 16;   // edge-clocked sampler: [16] enable
-    localparam       CFG3_SMP_SRC   = 17;   //       [21:17] clock input (PRISM input 0-31)
-    localparam       CFG3_SMP_EDGE  = 22;   //       [23:22] 0 rising, 1 falling, 2 either, 3 either edge of input xor the next (Data-Strobe)
-    localparam       CFG3_SMP_SHIFT = 24;   //       [24] shift on the edge
-    localparam       CFG3_SMP_CNT2  = 25;   //       [25] count2 + 1 on the edge
-    localparam       CFG3_SMP_LATCH = 26;   //       [26] capture the in_prev flops on the edge
-    localparam       CFG3_SMP_TIMER = 27;   //       [27] count1 clear / load on the edge
-    localparam       CFG3_SMP_INV   = 28;   //       [28] flag2 swaps rising and falling
-    localparam       CFG3_FIFO_REPUSH = 29; //       [29] SRAM FIFO: a pop with cond_out[0] high re-pushes the popped byte (4b.12)
+    localparam [6:0] SH_CFG0         = 7'h00;
+    localparam [6:0] SH_PINMUX       = 7'h04;
+    localparam [6:0] SH_PRELOAD      = 7'h08;
+    localparam [6:0] SH_COUNT1       = 7'h0C;
+    localparam [6:0] SH_COUNTS       = 7'h10;
+    localparam [6:0] SH_HOST         = 7'h14;
+    localparam [6:0] SH_TOGGLE       = 7'h15; // byte
+    localparam [6:0] SH_FLAGS        = 7'h18;
+    localparam [6:0] SH_CFG1         = 7'h1C;
+    localparam [6:0] SH_FIFO         = 7'h20;
+    localparam [6:0] SH_FIFO_ST      = 7'h24;
+    localparam [6:0] SH_CRC_POLY     = 7'h28;
+    localparam [6:0] SH_CRC          = 7'h2C;
+    localparam [6:0] SH_CRC_EXP      = 7'h30;
+    localparam [6:0] SH_CFG2          = 7'h34; // input slot selects
+    localparam [6:0] SH_CONST         = 7'h38; // constants K3..K0 (K3 also the comm match value)
+    localparam [6:0] SH_CFG3          = 7'h3C; // Manchester bit recoverer
+    localparam [6:0] SH_PRELOAD2      = 7'h40; // free-running timer period (24 bits)
+    localparam [6:0] SH_TRACE_CFG     = 7'h44; // trace: configuration
+    localparam [6:0] SH_TRACE_CTRL    = 7'h48; //        arm / stop, status
+    localparam [6:0] SH_CTAB          = 7'h4C; // constant table: the latch FIFO as addressable constants
+    localparam [6:0] SH_COMM_PINS     = 7'h50; // multi-bit shift: comm bit per uo_out pin with pinmux code 6
+    localparam [6:0] SH_FIFO32        = 7'h54; // 32-bit FIFO push / pop (CFG3[11])
+    localparam [6:0] SH_COUNT3        = 7'h58; // count3 and its limit
+    localparam       CT_EN            = 0;     // CONST_TAB bits
+    localparam       CT_LOAD_ADDS     = 1;     // index mode 3 adds idx_load instead of loading it
+    localparam       CT_POST          = 2;     // load the row before the index moves
+    localparam       CT_LOAD          = 4;     // [7:4]  idx_load
+    localparam       CT_ADD           = 8;     // [10:8] add_to_idx
+    localparam       CTAB_W           = 11;
+    localparam       TRC_EN           = 0;     // TRACE_CFG bits
+    localparam       TRC_BIG          = 1;
+    localparam       TRC_TRIG         = 2;     // [3:2]
+    localparam       TRC_EDGE         = 4;     // [5:4]
+    localparam       TRC_SI           = 8;     // [12:8]
+    localparam       TRC_IN           = 16;    // [20:16]
+    localparam       TRC_OTHER        = 6;     // trace into the other shard's SRAM
+    localparam       T2_RELOAD        = 24;    // PRELOAD2: restart on entry into state [29:25]
+    localparam       T2_STATE         = 25;
+    localparam       T2_ONESHOT       = 30;
+    localparam       SI_W             = 5;     // state index width (DEPTH 32)
+    localparam       CFG3_MRX_EN      = 3;     // CFG3: [2:0] pin, [3] enable, [7:4] clocks per half bit
+    localparam       CFG3_SHIFT_MRX   = 8;     //       [8] shifter input = recovered bit
+    localparam       CFG3_MRX_DDR     = 9;     //       [9] double-edge sampling (hb in half clocks)
+    localparam       CFG3_CNT_EN      = 10;    //       [10] CRC register = up / down counter with compare
+    localparam       CFG3_FIFO32      = 11;    //       [11] 32-bit FIFO access through FIFO32
+    localparam       CFG3_SMP_PRESET  = 12;    //       [13:12] sampler timer action = count1 <= preload >> k (k = 1-3; 0 = load)
+    localparam       CFG3_STUFF_EN    = 14;    //       [14] bit-stuff unit on count2 (run of COMPARE + 1 equal bits)
+    localparam       CFG3_STUFF_TX    = 15;    //       [15] stuff unit inserts (transmit) instead of dropping (receive)
+    localparam       CFG3_SMP_EN      = 16;    // edge-clocked sampler: [16] enable
+    localparam       CFG3_SMP_SRC     = 17;    //       [21:17] clock input (PRISM input 0-31)
+    localparam       CFG3_SMP_EDGE    = 22;    //       [23:22] 0 rising, 1 falling, 2 either, 3 either edge of input xor the next (Data-Strobe)
+    localparam       CFG3_SMP_SHIFT   = 24;   //       [24] shift on the edge
+    localparam       CFG3_SMP_CNT2    = 25;   //       [25] count2 + 1 on the edge
+    localparam       CFG3_SMP_LATCH   = 26;   //       [26] capture the in_prev flops on the edge
+    localparam       CFG3_SMP_TIMER   = 27;   //       [27] count1 clear / load on the edge
+    localparam       CFG3_SMP_INV     = 28;   //       [28] flag2 swaps rising and falling
+    localparam       CFG3_FIFO_REPUSH = 29;   //       [29] SRAM FIFO: a pop with cond_out[0] high re-pushes the popped byte (4b.12)
+    localparam        IN_NUM_BITS     = 5;   // PRISM input number width
+    localparam [13:0] SRAM_BYTES      = 14'd4 << SRAM_AW;
+    localparam        SRAM_SHARED     = (SRAM_FIFO == 1);
+    localparam        NSRAM           = (SRAM_FIFO > SHARDS) ? SHARDS : SRAM_FIFO;
+    localparam        TRC_CFG_W       = 21;    // TRACE_CFG bits in use (write-only: no readback, to spare the read mux)
 
     // The flop FIFOs: shard 0 (A) FIFO_AW_A, shard 1 (B) FIFO_AW_B deep.  A
     // FIFO deeper than 16 bytes keeps CFG1's 4-bit levels in 4-byte units.
-
     wire                prism_enable;
     wire                prism_wr;
     wire                word_wr;
@@ -378,7 +388,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     wire [PRISM_INPUTS-1:0]   in_data_0, in_data_1;
     wire [OUTPUTS-1:0]        out_data_0, out_data_1;
     wire [PRISM_COND_OUT-1:0] cond_out_0, cond_out_1;
-    wire                      fractured;         // cfg_fractured, static at run time
+    wire                      fractured;      // cfg_fractured, static at run time
     wire [1:0]                halt;           // per-shard halt, incl. the conditional-break cycle
     wire                      halt_either;    // unused: per-shard halts are used instead
 
@@ -401,9 +411,9 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     wire [8*SHARDS-1:0]  fifo_head_v;
     wire [8*SHARDS-1:0]  comm_v;            // comm register per shard (FIFO push data)
     wire                 fifo_op_to_b;      // unfractured: shard 0's strobe aimed at FIFO B
-    localparam           IN_NUM_BITS = 5;   // PRISM input number width
     wire [4*IN_NUM_BITS*SHARDS-1:0] in_prev_num_v; // per shard: 4 source input numbers
     wire [4*SHARDS-1:0]  in_prev_cap_v;     // per shard: capture strobes from the core
+
     // SRAM FIFO: per-shard requests, and the one FIFO's outputs
     wire [SHARDS-1:0]    sram_sel_v, sram_push_v, sram_pop_v, sram_flush_v;
     wire [SHARDS-1:0]    sram_repush_v;                  // replay: the pop re-pushes (CFG3[29] and cond_out[0])
@@ -411,13 +421,11 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     wire [8*SHARDS-1:0]  sram_head_v;       // per SRAM FIFO instance (index = shard, or 0 when shared)
     wire [14*SHARDS-1:0] sram_count_v;
     wire [SHARDS-1:0]    sram_empty_v, sram_full_v;
-    localparam [13:0]    SRAM_BYTES = 14'd4 << SRAM_AW;
+
     // ---- SRAM FIFOs: prism_sram_fifo.v on IHP single-port macros ---------------
     // SRAM_FIFO = 1: one FIFO owned by the shard with CFG0[31] set (shard 0
     // first), its requests routed here and its flags / head fed back.
     // SRAM_FIFO = 2: one FIFO per shard (shard s <-> SRAM s), no sharing.
-    localparam SRAM_SHARED = (SRAM_FIFO == 1);
-    localparam NSRAM       = (SRAM_FIFO > SHARDS) ? SHARDS : SRAM_FIFO;
     // Trace (section 4m): per shard the 16-bit entry and three strobes for
     // the SRAM trace ports (one shard's set is registered and sent below);
     // per SRAM whether it is full and whether it holds a finished trace
@@ -426,10 +434,10 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     wire [SHARDS-1:0]    trc_full_v, trc_held_v;
     wire [16*SHARDS-1:0] trc_din_v;
     wire [32*SHARDS-1:0] trace_st_v;
-    localparam           TRC_CFG_W = 21;    // TRACE_CFG bits in use (write-only: no readback, to spare the read mux)
     wire [SI_W-1:0]      trace_si_0, trace_si_1, trace_nsi_0, trace_nsi_1;
     wire [PRISM_STATE_INPUTS-1:0] trace_mux_0, trace_mux_1;
     wire [1:0]           trace_match_0, trace_match_1;
+
     // One shard traces at a time (shard 0 wins if both enable): into SRAM
     // s (SRAM 0 when there is only one), or with TRACE_CFG[1] into both
     // SRAMs as one buffer.  One 16-bit bus and three strobes cross the tile
@@ -441,6 +449,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     wire        trc_sel1 = trc_active_v[SHARDS-1];      // whose entry goes out
     reg  [15:0] trc_bus_din;
     reg         trc_bus_cap, trc_bus_arm, trc_bus_stop, trc_stop_r;
+
     always @(posedge clk or negedge rst_n)
     begin
         if (!rst_n)
@@ -503,9 +512,11 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             fifo_flag = (full_side ^ sel[1]) ? (sel[0] ? af : full) : (sel[0] ? ae : empty);
         end
     endfunction
+
     wire [32*SHARDS-1:0] fifo32_v;      // the RX word registers
     wire [14*SHARDS-1:0] fifo_count_v;
     wire [SHARDS-1:0]    fifo_empty_v, fifo_full_v, fifo_af_v, host_irq_pulse_v, crc_ok_v;
+
     // DMA chain mode (DMA_CFG[7]): FIFO A drains into FIFO B by itself, so
     // the two 16-byte FIFOs act as one 32-byte one for the DMA, which then
     // reads B (shard select 1); the frame end still comes from shard 0, the
@@ -516,6 +527,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     reg                  mv_d1;
     wire                 mv      = dma_chain & !fifo_empty_v[0] & !fifo_full_v[SHARDS-1] & (mv_gap == 2'd0);
     wire                 mv_busy = mv | mv_d1;
+
     always @(posedge clk or negedge rst_n)
     begin
         if (!rst_n)
@@ -732,6 +744,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                                                                       ctab[CT_LOAD +: 4];
             wire  [3:0]               tab_idx  = (ctab[CT_POST] | !exec) ? const_idx : idx_next;
             wire                      tab_load = exec & out_s[OUT_COMM_LOAD] & ctab[CT_EN];
+
             always @(posedge clk or negedge rst_n)
             begin
                 if (!rst_n)
@@ -742,12 +755,14 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                     const_idx <= idx_next;
             end
             wire  [7:0]               crc_byte;
+
             // While the SRAM this window reads holds a finished trace, the
             // window's FIFO is that SRAM FIFO in RX mode: the host pops the
             // trace entries (the shard's own FIFO is frozen meanwhile; until
             // the capture is done it works as configured)
             wire                      fifo_traced;
             wire                      fifo_dir = cfg0[CFG_FIFO_DIR] & !fifo_traced;
+
             // Bit-stuff unit (CFG3[14], count2 = run length - 1 of the bits the
             // shifter moves, COMPARE = the run length - 1 that calls for a stuff
             // bit).  Receive: an OUT_SHIFT whose bit differs from the previous
@@ -760,6 +775,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             wire                      stuff_en    = cfg3[CFG3_STUFF_EN];
             wire                      stuff_tx    = cfg3[CFG3_STUFF_TX];
             reg                       stuff_prev, stuff_hold, stuff_dropped;
+
             // a transmitter's shifter also moves on a FIFO pop, a CRC byte load or a
             // comm load (the byte boundaries), so those count as bit times too
             wire                      fsm_shift   = exec & (out_s[OUT_SHIFT] |
@@ -768,11 +784,13 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             wire                      stuff_reset = exec & out_s[OUT_CRC_CLEAR];             // a frame start restarts the run
             wire                      stuff_same  = (stuff_bit == stuff_prev);
             wire  [7:0]               stuff_cnt_n = stuff_same ? count2 + 8'd1 : 8'h0;   // the run after this bit
+
             // receive: the bit after a full run that differs is the stuff bit (count before it)
             wire                      stuff_rx_ev = stuff_en & !stuff_tx & fsm_shift & count2_cmp & !stuff_same & !stuff_reset;
             // transmit: the bit just sent completes a full run: the next bit time is a stuff bit
             wire                      stuff_tx_ev = stuff_en &  stuff_tx & fsm_shift & !stuff_hold & (stuff_cnt_n >= compare) & !stuff_reset;
             wire                      stuff_event = stuff_rx_ev | stuff_tx_ev;
+
             // (the transmit look-ahead reads the shifter's output bit only: shift_in_bit can come from cond_out)
             wire  [7:0]               stuff_tx_n  = (shift_data == stuff_prev) ? count2 + 8'd1 : 8'h0;
             wire                      stuff_due   = stuff_en & stuff_tx & !stuff_hold & (stuff_tx_n >= compare);   // input 31
@@ -808,6 +826,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                     stuff_dropped <= stuff_rx_ev;
                 end
             end
+
             // Unfractured, shard 0's OUT_FIFO_WR_RD strobes FIFO A (own,
             // OUT_FIFO_PUSH_POP = 0) or FIFO B (shard 1's, = 1), each per
             // its own direction.
@@ -821,6 +840,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             wire  [7:0]               fifo_head;
             wire [13:0]               fifo_count;
             wire                      fifo_empty, fifo_full, fifo_ae, fifo_af;
+
             // This shard's FIFO storage: the flop FIFO, or the SRAM FIFO (CFG0[31])
             localparam                SI = (SRAM_FIFO == 1) ? 0 : s;     // the SRAM FIFO serving this shard
             wire                      fifo_sram = (SRAM_FIFO != 0) && (cfg0[CFG_FIFO_SRAM] || fifo_traced) &&
@@ -834,6 +854,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             wire  [FIFO_AW-1:0]       lf_tab_idx = tab_idx;                     // the table is rows 0-15
             wire  [FIFO_AW-1:0]       lf_ae_lvl  = cfg1[16 +: 4] << FIFO_LVL_SH; // CFG1 levels: bytes, or 4-byte units on a deep FIFO
             wire  [FIFO_AW-1:0]       lf_af_lvl  = cfg1[20 +: 4] << FIFO_LVL_SH;
+
             // RX DMA (prism_dma.v, next to TinyQV) pops this shard's FIFO through the tap
             wire                      dma_on    = dma_en && (dma_shard == (s == 1));
             wire                      dma_end_s = dma_en && (dma_chain ? (s == 0) : (dma_shard == (s == 1)));  // its host interrupt ends the DMA's frames
@@ -843,6 +864,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             wire [31:0]               crc_value, crc_out;
             wire                      crc_ok;
             wire                      cnt_en = cfg3[CFG3_CNT_EN];    // CRC register counts (CFG3[10])
+
             // in_prev edge-capture flops: CFG1[4i+3:4i] = source input number
             reg   [3:0]               in_prev;
             wire  [3:0]               in_prev_src_val;
@@ -859,6 +881,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             wire                      pop_dir  = sel_b ? fifo_dir_b : fifo_dir;          // direction of the FIFO bit 5 strobes
             wire  [7:0]               pop_head = sel_b ? fifo_head_v[8*(SHARDS-1) +: 8] : fifo_head;
             wire  [7:0]               push_src = (s == SHARDS-1 && !fractured) ? comm_v[7:0] : comm;
+
             // 32-bit FIFO access (CFG3[11], FIFO32 at +0x54): a push machine that
             // feeds a written word into a TX FIFO a byte at a time, and a pop
             // machine that assembles a word from an RX FIFO, see below
@@ -873,6 +896,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             reg  [1:0]                push_gap;                 // clocks to wait before the next push
             wire                      word_full = (pop_n == 3'd4);
             wire                      rx32      = f32_en & !fifo_dir;
+
             // A byte read of FIFO is served from the word register while that
             // holds anything (the machine refills behind it), from the FIFO
             // otherwise; the machine never pops in a cycle the host reads.
@@ -882,10 +906,12 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             wire                      fsm_push  = push_busy & (push_gap == 2'd0) & !fifo_full & !fifo_wr;
             assign fifo_rd_v[8*s +: 8]   = (pop_n != 3'd0) ? pop_w[7:0] : fifo_head;
             assign fifo32_v[32*s +: 32]  = pop_w;
+
             // FIFO requests: RX (fifo_dir = 0) FSM pushes comm / host pops by reading,
             //                TX (fifo_dir = 1) host pushes by writing / FSM pops into comm
             wire                      mv_push = (s == SHARDS-1) & mv;          // chain: B takes A's head
             wire                      mv_pop  = (s == 0) & mv;                 //        A gives it up
+
             // TX DMA: B takes the tap's byte (TX mode only; the host does not push
             // B while a copy runs, and the chain does not run with it)
             wire                      txd_push_s = (s == SHARDS-1) & txd_push & fifo_dir;
@@ -975,6 +1001,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             wire                      c2_inc   = stuff_en ? stuff_inc   : !c2_clear & ((c2_inc_o & !c2_dec_o) | (c2_smp & !c2_dec_o));
             wire                      c2_dec   = stuff_en ? 1'b0        : !c2_clear & c2_dec_o & !c2_smp;
             wire                      c2_clr   = stuff_en ? stuff_clear : c2_clear;
+
             // count3 commands: {pin_out[3] with CFG0[12], OUT_COUNT3} = 01 + 1,
             // 10 clear, 11 limit <= comm
             wire                      c3_hi    = out_s[3] & cfg0[CFG_COUNT3_EN];
@@ -1068,6 +1095,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             assign fifo_count = fifo_sram ? sram_count_v[14*SI +: 14] : {{(13-FIFO_AW){1'b0}}, lf_count};
             assign fifo_empty = fifo_sram ? sram_empty_v[SI] : lf_empty;
             assign fifo_full  = fifo_sram ? sram_full_v[SI]  : lf_full;
+
             // SRAM FIFO almost-empty / almost-full (levels in 64-byte units),
             // compared here so only the count crosses from the SRAM side
             assign fifo_ae    = fifo_sram ? (sram_count_v[14*SI +: 14] <= {4'h0, cfg1[16 +: 4], 6'b0}) : lf_ae;
@@ -1084,6 +1112,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             assign sram_pdata_v[8*s +: 8] = f_pdata;
             assign sram_pop_v[s]          = f_pop;
             assign sram_flush_v[s]        = fifo_flush;
+
             // SRAM FIFO replay (4b.12): with CFG3[29] a pop while cond_out[0]
             // is high re-pushes the popped byte, so a FIFO that holds exactly
             // one line plays it again; the VGA pixel shard raises cond_out[0]
@@ -1126,6 +1155,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             assign in_s[13:12] = cfg0[CFG_LATCH_IN_OUT] ? {latched_out[7], latched_out[2]} : latched_in;
             assign in_s[14]    = shift_term;
             assign in_s[15]    = count2_eq_comm;
+
             // Timer 2 (PRELOAD2): a down counter that reloads itself and ticks
             // for one clock every PRELOAD2 + 1 clocks; the default value of
             // input 28.  Nothing in the FSM needs to start it, which is the
