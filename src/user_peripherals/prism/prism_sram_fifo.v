@@ -24,6 +24,13 @@
 // `load` makes the FIFO serve load_bytes bytes from word 0 that something
 // else (the tracer) wrote into the SRAM directly, oldest byte first.
 // Almost-empty / almost-full levels are in 64-byte units.
+//
+// `repush` (2026-09-30, the VGA chroma's line replay): a pop with repush
+// high pushes the popped byte back in at the tail in the same clock, so the
+// contents circulate and the count stays; whoever else pushes must stay
+// off the FIFO that clock (the TX DMA's tap holds).  Meant for a FIFO that
+// holds exactly the bytes to replay: what is re-pushed lands behind
+// anything already queued.
 `default_nettype none
 module prism_sram_fifo
 #(
@@ -38,6 +45,7 @@ module prism_sram_fifo
     input  wire          push,
     input  wire    [7:0] push_data,
     input  wire          pop,
+    input  wire          repush,            // a pop also pushes the popped byte (the FSM's replay)
     output wire    [7:0] head,
     output wire [AW+2:0] count,             // bytes held (0 .. 4 * 2^AW); the almost-empty /
                                             // almost-full flags are derived from it by the shard
@@ -77,8 +85,10 @@ module prism_sram_fifo
     assign empty        = (cnt == 0) || !head_valid;
     assign full         = cnt[AW+2];        // cnt == BYTES
 
-    wire push_ok = push && !full;
     wire pop_ok  = pop && !empty;
+    wire recirc  = pop_ok && repush;        // the popped byte goes back in: never refused (its slot frees now)
+    wire push_ok = (push && !full) || recirc;
+    wire [7:0] push_byte = recirc ? head : push_data;
 
     // A pop that leaves the cached word wants the next word read, unless it
     // empties the FIFO (the next push then serves the head directly); the
@@ -90,7 +100,7 @@ module prism_sram_fifo
     wire          read_want = (leave && (cnt_next != 0)) || rd_need;
     wire [AW-1:0] rd_word_next = leave ? rd_next[AW+1:2] : rd_word;
     wire          asm_done  = push_ok && (wr_lane == 2'd3);
-    wire        [31:0] asm_word = {push_data, asm_w};
+    wire        [31:0] asm_word = {push_byte, asm_w};
 
     always @*
     begin
@@ -141,7 +151,7 @@ module prism_sram_fifo
             begin
                 wr_ptr <= wr_ptr + 1'b1;
                 if (wr_lane != 2'd3)
-                    asm_w[wr_lane * 8 +: 8] <= push_data;
+                    asm_w[wr_lane * 8 +: 8] <= push_byte;
             end
 
             // pop: leaving the cached word invalidates it

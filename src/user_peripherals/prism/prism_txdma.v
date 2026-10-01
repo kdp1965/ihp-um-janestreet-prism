@@ -32,11 +32,18 @@
 //                  RX DMA's slot format, so a received frame can go back out
 //                  as it is; at most 2044 bytes then)
 //          [25]    interrupt enable (TinyQV interrupt 11 while done)
+//          [28:26] start block: the copy starts block * 256 bytes into the
+//                  slot (plus 4 with [24]); the VGA frame buffer keeps eight
+//                  160-byte lines per slot, one copy each (2026-09-30)
 //          [30]    acknowledge: clear done
 //          [31]    start a copy with these settings (ignored while busy or
 //                  while the TX ring is on)
 //   read:  [11:0]  bytes still to push  [23:12] slot  [24] skip  [25] irq en
-//          [30]    done  [31] busy
+//          [28:26] block  [30] done  [31] busy
+//
+// The tap pauses in a clock the PRISM re-pushes a byte itself (fifo_hold:
+// the VGA chroma's line replay, CFG3[29]), since the FIFO takes one push a
+// clock.
 //
 // TX ring (TXRING_*): frames one after another with no host work per
 // frame, for a chroma that ends its frame when FIFO B runs empty and raises
@@ -93,6 +100,7 @@ module prism_txdma
     output wire [7:0]   fifo_data,
     output wire         fifo_push,
     input  wire         fifo_room,          // room for a burst
+    input  wire         fifo_hold,          // the FIFO takes the PRISM's own push this clock
 
     // the chroma on shard 1 (TX ring)
     output wire         ring_on,            // the ring takes shard 1's host interrupt
@@ -113,6 +121,7 @@ module prism_txdma
     // ---- the copy engine (one copy, or a ring frame)
     reg  [11:0] slot;
     reg         skip;
+    reg  [2:0]  block;                                  // start block of a one-copy (256 bytes)
     reg         irq_en;
     reg  [11:0] left;                                   // bytes still to push
     reg  [9:0]  words;                                  // words still to read
@@ -158,10 +167,10 @@ module prism_txdma
     assign mem_continue = reading & more;
 
     assign fifo_data = word[7:0];
-    assign fifo_push = (nbytes != 3'd0);
+    assign fifo_push = (nbytes != 3'd0) & !fifo_hold;
     assign irq       = (done & irq_en) | (r_irq & r_irq_en);
     assign ring_on   = r_en;
-    assign rd          = {busy, done, 4'h0, irq_en, skip, slot, left};
+    assign rd          = {busy, done, 1'b0, block, irq_en, skip, slot, left};
     assign ring_cfg_rd = {4'h0, r_base, 2'b00, r_ifg, 1'b0, r_irq_en, 2'b00, r_k, r_en};
     assign ring_st_rd  = {14'h0, (r_state != R_IDLE), r_irq, 4'h0, tail, 4'h0, head};
 
@@ -171,6 +180,7 @@ module prism_txdma
         begin
             slot         <= 12'h0;
             skip         <= 1'b0;
+            block        <= 3'd0;
             irq_en       <= 1'b0;
             left         <= 12'h0;
             words        <= 10'h0;
@@ -205,10 +215,11 @@ module prism_txdma
             begin
                 slot      <= wdata[23:12];
                 skip      <= wdata[24];
+                block     <= wdata[28:26];
                 irq_en    <= wdata[25];
                 left      <= wdata[11:0];
                 words     <= wdata[11:2] + {9'h0, |wdata[1:0]};
-                woff      <= {8'h0, wdata[24]};
+                woff      <= {wdata[28:26], 6'h0} + {8'h0, wdata[24]};
                 busy      <= 1'b1;
                 done      <= 1'b0;
                 ring_copy <= 1'b0;
@@ -219,8 +230,8 @@ module prism_txdma
                 if (wdata[16]) r_irq <= 1'b0;
             end
 
-            // ---- the tap: one byte per clock
-            if (nbytes != 3'd0)
+            // ---- the tap: one byte per clock (none while the PRISM pushes)
+            if ((nbytes != 3'd0) & !fifo_hold)
             begin
                 word   <= {8'h00, word[31:8]};
                 nbytes <= nbytes - 3'd1;

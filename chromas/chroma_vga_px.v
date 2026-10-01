@@ -23,11 +23,21 @@
 // shard's line clock.  Every wait is entered by an explicit jump and every
 // exit is on the unit tick, so the line length is constant.
 //
+// Each source line is shown four times and fetched once: FIFO B holds
+// exactly the line, and on three showings out of four the pops re-push
+// the popped byte at the tail (CFG3[29]: a pop while cond_out[0] is high
+// recirculates), which this shard does by raising cond_out[0] in ST_ACT
+// while the line shard's "replay" flag (its pin_out[2], our input 27) is
+// up.  On the fourth showing the pops consume the line; the line shard
+// interrupts TinyQV as that showing starts, and TinyQV's one 160-byte TX
+// DMA copy puts the next line behind it (its tap yields to a re-push).
+//
 // Host set-up (shard 1): PRELOAD 11, COMPARE 159, CRC_EXPECTED 23,
-// COUNT3 limit 10, CFG3 = CNT_EN, PRELOAD2 = 47 | T2_RELOAD | T2_STATE(FP)
-// | T2_ONESHOT, COMM_PINS = the VGA lanes, CONST = 0 (K0 black), CFG0 |=
-// FIFO_SRAM for the SRAM FIFO; TinyQV routes all eight uo_out pins to the
-// PRISM (uo_out[0] is the UART TX otherwise).
+// COUNT3 limit 10, CFG3 = CNT_EN | FIFO_REPUSH, PRELOAD2 = 47 | T2_RELOAD
+// | T2_STATE(FP) | T2_ONESHOT, COMM_PINS = the VGA lanes, CONST = 0 (K0
+// black), CFG0 |= FIFO_SRAM for the SRAM FIFO, the first line in FIFO B;
+// TinyQV routes all eight uo_out pins to the PRISM (uo_out[0] is the UART
+// TX otherwise).
 // =======================================================
 module chroma_vga_px
 (
@@ -108,6 +118,7 @@ module chroma_vga_px
    wire count2_cmp  = in_data[11];   // count2 >= 159: last pixel byte popped
    wire cnt_ge      = in_data[22];   // counter mode: hsync units done
    wire active      = in_data[26];   // the line shard's pin_out[1]: this line carries pixels
+   wire replay      = in_data[27];   // its pin_out[2]: this showing is not the last: re-push what is popped
    wire t2_tick     = in_data[28];   // timer 2 one-shot: front porch over
    wire count3_ge   = in_data[29];   // count3 >= limit: back porch over
 
@@ -175,6 +186,8 @@ module chroma_vga_px
       case (curr_state)
       ST_LINE:                               // the back porch's last unit
          begin
+            if (replay)
+               cond_out[0] = 1'b1;           // the first pop of a replayed line re-pushes too
             if (tick && active)              // pixels: first byte on the tick, count2 from 0
             begin
                fifo_pop    = 1'b1;
@@ -192,6 +205,8 @@ module chroma_vga_px
 
       ST_ACT:
          begin
+            if (replay)
+               cond_out[0] = 1'b1;           // FIFO replay: every pop re-pushes its byte
             if (tick && !count2_cmp)         // next byte, every unit
             begin
                fifo_pop    = 1'b1;

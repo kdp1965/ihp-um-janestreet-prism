@@ -71,6 +71,7 @@ module tinyQV_peripherals (
     input   [7:0] txd_data,
     input         txd_push,
     output        txd_room,
+    output        txd_hold,       // the PRISM re-pushes into FIFO B this clock: the TX DMA's tap waits
     input         txd_ring,
     input         txd_start,
     output        txd_frame_end
@@ -452,6 +453,7 @@ module tinyQV_peripherals (
         .txd_data      ( txd_data      ),
         .txd_push      ( txd_push      ),
         .txd_room      ( txd_room      ),
+        .txd_hold      ( txd_hold      ),
         .txd_ring      ( txd_ring      ),
         .txd_start     ( txd_start     ),
         .txd_frame_end ( txd_frame_end ),

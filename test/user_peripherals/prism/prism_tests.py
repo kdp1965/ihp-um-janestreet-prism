@@ -3962,13 +3962,25 @@ class VgaTest(PrismTest):
         mode and count3).  640x480 timing at three clocks per pixel: 2400
         clocks per line; the test shortens the frame to a few lines with the
         host constants and checks the line timing, the pixel data, black in
-        the blanking and the vertical structure over two frames. '''
-    name = "vga Chromas (pixel + line shards, fractured)"
+        the blanking and the vertical structure over two frames.  Every
+        source line is shown four times from one transfer: FIFO B holds the
+        line, three showings re-push what they pop (CFG3[29] and the pixel
+        shard's cond_out[0] under the line shard's replay flag), and entering
+        the fourth the line shard interrupts the host, which pushes the next
+        line behind the one being consumed (a test coroutine here, TinyQV's
+        TX DMA on the chip). '''
+    name = "vga Chromas (pixel + line shards, fractured, four showings per line)"
 
-    A_LINES, K1, K2, K3 = 4, 1, 2, 4                # active lines; blanking = K3 + 3 lines, vsync 2 lines
-    LINE = 2400                                     # clocks per line
+    A_LINES, K1, K2, K3 = 8, 1, 2, 4                # active lines (2 source lines x 4); blanking = K3 + 3 lines, vsync 2 lines
     UNIT = 12                                       # clocks per pixel byte (four pixels)
     BYTES = 160
+    HS_UNITS = 24                                   # hsync (CRC_EXPECTED + 1)
+    BP_LIMIT = 250                                  # count3 limit: the back porch is BP_LIMIT + 2 units.  The real
+                                                    # 640x480 line uses 10 (2400 clocks); the test's host, a coroutine
+                                                    # on the TinyQV bus model, needs about 160 clocks per word pushed,
+                                                    # so the line is stretched to give it the next line's 40 words
+                                                    # between the interrupt and the line's first showing
+    LINE = (BYTES + 4 + HS_UNITS + BP_LIMIT + 2) * UNIT
 
     async def run(self):
         tqv, bench, dut = self.tqv, self.bench, self.dut
@@ -3983,9 +3995,9 @@ class VgaTest(PrismTest):
         # shard 1, the pixel shard
         await tqv.write_word_reg(REG_PRELOAD + SHARD1, self.UNIT - 1)          # count1: the 12-clock unit, free-running
         await tqv.write_byte_reg(REG_COMPARE + SHARD1, self.BYTES - 1)         # count2: the last pop
-        await tqv.write_word_reg(REG_CFG3 + SHARD1, CFG3_CNT_EN)               # the CRC register counts hsync units
-        await tqv.write_word_reg(REG_CRC_EXP + SHARD1, 23)                     # 24 units of hsync
-        await tqv.write_byte_reg(REG_COUNT3 + SHARD1 + 1, 10)                  # count3 limit: 11 units of back porch + the ST_LINE unit
+        await tqv.write_word_reg(REG_CFG3 + SHARD1, CFG3_CNT_EN | CFG3_FIFO_REPUSH | CFG3_FIFO32)   # hsync unit counter; replay; word pushes
+        await tqv.write_word_reg(REG_CRC_EXP + SHARD1, self.HS_UNITS - 1)      # units of hsync
+        await tqv.write_byte_reg(REG_COUNT3 + SHARD1 + 1, self.BP_LIMIT)       # count3 limit: BP_LIMIT + 1 units of back porch + the ST_LINE unit
         await tqv.write_word_reg(REG_PRELOAD2 + SHARD1, 47 | T2_RELOAD | T2_STATE(fp_si) | T2_ONESHOT)   # 48-clock front porch
         await tqv.write_word_reg(REG_CONST + SHARD1, 0)                        # K0 = black
         await tqv.write_word_reg(REG_COMM_PINS + SHARD1, COMM_PINS((0, 5), (1, 4), (2, 3), (4, 2), (5, 1), (6, 0)))
@@ -3994,14 +4006,30 @@ class VgaTest(PrismTest):
         await tqv.write_word_reg(REG_CFG3, CFG3_CNT_EN)
         await tqv.write_word_reg(REG_CRC, 0)                                   # line counter preset
         await tqv.write_word_reg(REG_CRC_EXP, A - 1)
+        await tqv.write_byte_reg(REG_COUNT3 + 1, 2)                            # count3 limit: three replays, then the next line
         await tqv.write_word_reg(REG_CONST, (K3 << 24) | (K2 << 16) | (K1 << 8))
 
-        # two frames of pixels, no byte 0 so the active window is visible
-        data = [[((ln * 37 + i * 11) % 63) + 1 for i in range(self.BYTES)] for ln in range(2 * A)]
-        for line in data:
-            for b in line:
-                await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
-        assert (await tqv.read_word_reg(REG_FIFO_ST + SHARD1) >> 8) & 0x3FFF == 2 * A * self.BYTES
+        # the source lines, each shown four times; no byte 0 so the active window is visible
+        src = [[((ln * 37 + i * 11) % 63) + 1 for i in range(self.BYTES)] for ln in range(A // 4)]
+        data = [line for _ in range(2) for line in src for _ in range(4)]     # what two frames show
+        for b in src[0]:                                                       # the first line, before the start
+            await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+        assert (await tqv.read_word_reg(REG_FIFO_ST + SHARD1) >> 8) & 0x3FFF == self.BYTES
+
+        served, stop = [0], [False]
+        async def cpu():
+            ''' TinyQV's part: on the line shard's interrupt push the next source line (32-bit pushes) '''
+            nxt = 1
+            while not stop[0]:
+                await self.clocks(40)
+                if not await bench.irq():
+                    continue
+                await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+                line = src[nxt % len(src)]
+                for k in range(0, self.BYTES, 4):                             # a bus write outlasts the 4-clock push machine
+                    await tqv.write_word_reg(REG_FIFO32 + SHARD1, line[k] | (line[k + 1] << 8) | (line[k + 2] << 16) | (line[k + 3] << 24))
+                served[0] += 1
+                nxt += 1
 
         colour, hsync, vsync = [], [], []
         async def watch():
@@ -4016,8 +4044,12 @@ class VgaTest(PrismTest):
                 vsync.append((uo >> 3) & 1)
         w = cocotb.start_soon(watch())
         await bench.enable()
+        c = cocotb.start_soon(cpu())                                          # the only bus user from here on
         await self.clocks(2 * FRAME * self.LINE + 3 * self.LINE)
         w.kill()
+        stop[0] = True                                                         # between transactions: the bus model stays sane
+        await c
+        self.log(f"the host served {served[0]} line requests")
 
         falls = [i for i in range(1, len(hsync)) if hsync[i - 1] and not hsync[i]]
         rises = [i for i in range(1, len(hsync)) if not hsync[i - 1] and hsync[i]]
@@ -4025,7 +4057,7 @@ class VgaTest(PrismTest):
         widths = [next(r for r in rises if r > f) - f for f in falls[:-1]]
         self.log(f"hsync: {len(falls)} pulses, periods {sorted(set(periods))}, widths {sorted(set(widths))}")
         assert periods[1:] and all(p == self.LINE for p in periods[1:]), periods
-        assert all(wd == 24 * self.UNIT - 1 for wd in widths), widths           # 24 units, less the clock the exit leg takes
+        assert all(wd == self.HS_UNITS * self.UNIT - 1 for wd in widths), widths   # HS units, less the clock the exit leg takes
 
         # the active window of every line, from its hsync's rising edge
         starts = []
@@ -4055,12 +4087,21 @@ class VgaTest(PrismTest):
         for ln, (s, e) in enumerate(spans[:2 * A]):
             assert e - s == self.BYTES * self.UNIT, (ln, s, e)
             got = [colour[s + i * self.UNIT + 6] for i in range(self.BYTES)]
-            assert got == [b & 0x3F for b in data[ln]], (ln, got[:8], data[ln][:8])
+            want = [b & 0x3F for b in data[ln]]
+            if got != want:
+                k = next(i for i in range(self.BYTES) if got[i] != want[i])
+                self.log(f"line {ln}: first mismatch at byte {k}: got {got[k:k + 12]} want {want[k:k + 12]}; "
+                         f"got[{k}:] looks like src line {[m for m in range(len(src)) if got[k:k + 8] == [b & 0x3F for b in src[m][k:k + 8]]]}")
+            assert got == want, (ln, k)
             prev_falls = [f for f in falls if f < s]
             if prev_falls:                                                     # not the first line after enable
                 r = next(r for r in rises if r > prev_falls[-1])
-                assert s - r == 12 * self.UNIT, (ln, s - r)                    # back porch: 12 units exactly
+                assert s - r == (self.BP_LIMIT + 2) * self.UNIT, (ln, s - r)   # back porch: BP_LIMIT + 2 units exactly
         assert all(colour[s - 1] == 0 and colour[e] == 0 for s, e in spans[:2 * A])
+        st = await tqv.read_word_reg(REG_FIFO_ST + SHARD1)
+        self.log(f"FIFO B after two frames: {(st >> 8) & 0x3FFF} bytes held (the next line, waiting); {served[0]} requests served")
+        assert (st >> 8) & 0x3FFF == self.BYTES, hex(st)
+        assert served[0] in (2 * A // 4, 2 * A // 4 + 1), served[0]            # one request per source line shown (the margin lines may add one)
 
         self.log("frames: A active lines, then K3 + 3 blank ones; vsync low for two lines after K1 + 1 blank ones")
         runs = []

@@ -70,6 +70,8 @@
 //                     up / down counter: OUT_CRC_CLEAR presets it (0, or all ones with CFG0[25]),
 //                     OUT_CRC_UPDATE + 1, OUT_LOAD_CRC - 1 (no shifter load); input 22 and FLAGS[10]
 //                     = count >= CRC_EXPECTED (unsigned).  CRC = the count, host readable / writable.
+//                     [29] SRAM FIFO replay (4b.12): a pop while cond_out[0] is high pushes the popped byte back
+//                     in at the tail, so a FIFO holding one line plays it again; the TX DMA's tap yields.
 //     +0x40  PRELOAD2 [23:0] timer 2 period: a 24-bit down counter reloads from it and raises input 28 (default
 //                     slot value) for one clock every PRELOAD2 + 1 clocks; 0 = off (Ethernet link pulses).
 //                     [24] restart the count on entry into state [29:25] (next SI == it, current SI != it):
@@ -225,6 +227,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     input     [7:0]   txd_data,
     input             txd_push,
     output            txd_room,       // that SRAM FIFO has room for a burst (32 bytes)
+    output            txd_hold,       // that FIFO takes shard 1's own re-push this clock (4b.12): the tap waits
     input             txd_ring,       // TX ring on: shard 1's host interrupt ends its frames (not a host IRQ)
     input             txd_start,      // TX ring: toggle shard 1's host_in[0] (start the next frame)
     output            txd_frame_end,  // shard 1's OUT_HOST_INTERRUPT rising: the frame is out
@@ -356,6 +359,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     localparam       CFG3_SMP_LATCH = 26;   //       [26] capture the in_prev flops on the edge
     localparam       CFG3_SMP_TIMER = 27;   //       [27] count1 clear / load on the edge
     localparam       CFG3_SMP_INV   = 28;   //       [28] flag2 swaps rising and falling
+    localparam       CFG3_FIFO_REPUSH = 29; //       [29] SRAM FIFO: a pop with cond_out[0] high re-pushes the popped byte (4b.12)
 
     // The flop FIFOs: shard 0 (A) FIFO_AW_A, shard 1 (B) FIFO_AW_B deep.  A
     // FIFO deeper than 16 bytes keeps CFG1's 4-bit levels in 4-byte units.
@@ -402,6 +406,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
     wire [4*SHARDS-1:0]  in_prev_cap_v;     // per shard: capture strobes from the core
     // SRAM FIFO: per-shard requests, and the one FIFO's outputs
     wire [SHARDS-1:0]    sram_sel_v, sram_push_v, sram_pop_v, sram_flush_v;
+    wire [SHARDS-1:0]    sram_repush_v;                  // replay: the pop re-pushes (CFG3[29] and cond_out[0])
     wire [8*SHARDS-1:0]  sram_pdata_v;
     wire [8*SHARDS-1:0]  sram_head_v;       // per SRAM FIFO instance (index = shard, or 0 when shared)
     wire [14*SHARDS-1:0] sram_count_v;
@@ -1072,12 +1077,18 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             if (s == SHARDS-1)
             begin : TXD_ROOM
                 assign txd_room = fifo_sram & fifo_dir & (sram_count_v[14*SI +: 14] <= SRAM_BYTES - 14'd32);
+                assign txd_hold = fifo_sram & sram_repush_v[s];
             end
             assign sram_sel_v[s]          = fifo_sram;
             assign sram_push_v[s]         = f_push;
             assign sram_pdata_v[8*s +: 8] = f_pdata;
             assign sram_pop_v[s]          = f_pop;
             assign sram_flush_v[s]        = fifo_flush;
+            // SRAM FIFO replay (4b.12): with CFG3[29] a pop while cond_out[0]
+            // is high re-pushes the popped byte, so a FIFO that holds exactly
+            // one line plays it again; the VGA pixel shard raises cond_out[0]
+            // in its pixel state while the line shard's replay flag is up
+            assign sram_repush_v[s]       = cfg3[CFG3_FIFO_REPUSH] & exec & cond_s[0];
 
             // CRC over the bit the shifter is receiving (crc_src = 0) or
             // transmitting (crc_src = 1) in the cycle OUT_CRC_UPDATE is set
@@ -1774,6 +1785,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
             );
             wire               push   = req_on & sram_push_v[si_1] & !trace_own;   // a traced SRAM takes no pushes
             wire               pop    = req_on & sram_pop_v[si_1];
+            wire               repush = req_on & sram_repush_v[si_1];
             wire               flush  = (req_on & sram_flush_v[si_1]) | (trace_own & trc_bus_arm);
             wire         [7:0] pdata  = sram_pdata_v[8*si_1 +: 8];
             wire [SRAM_AW-1:0] f_addr;
@@ -1799,6 +1811,7 @@ module tqvp_prism #( parameter SRAM_FIFO = 2, parameter SRAM_AW = 9, parameter C
                 .push         ( push                   ),
                 .push_data    ( pdata                  ),
                 .pop          ( pop                    ),
+                .repush       ( repush                 ),
                 .head         ( sram_head_v[8*n +: 8]  ),
                 .count        ( sram_cnt               ),
                 .empty        ( sram_empty_v[n]        ),

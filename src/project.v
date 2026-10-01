@@ -171,7 +171,7 @@ module tt_um_pettit_js_prism (
     wire        txd_mem_ready;
     wire [31:0] txd_mem_rdata;
     wire  [7:0] txd_data;
-    wire        txd_push, txd_room, txd_irq;
+    wire        txd_push, txd_room, txd_hold, txd_irq;
     wire        txd_ring, txd_start, txd_frame_end;
     wire [31:0] txd_rd, txr_cfg_rd, txr_st_rd;
     wire        txd_wr     = (write_n == 2'b10) && connect_peripheral == PERI_TXDMA;
@@ -303,6 +303,7 @@ module tt_um_pettit_js_prism (
         .txd_data      ( txd_data      ),
         .txd_push      ( txd_push      ),
         .txd_room      ( txd_room      ),
+        .txd_hold      ( txd_hold      ),
         .txd_ring      ( txd_ring      ),
         .txd_start     ( txd_start     ),
         .txd_frame_end ( txd_frame_end )
@@ -352,6 +353,7 @@ module tt_um_pettit_js_prism (
         .fifo_data       ( txd_data         ),
         .fifo_push       ( txd_push         ),
         .fifo_room       ( txd_room         ),
+        .fifo_hold       ( txd_hold         ),
         .ring_on         ( txd_ring         ),
         .chroma_start    ( txd_start        ),
         .frame_end       ( txd_frame_end    ),

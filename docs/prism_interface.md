@@ -193,7 +193,7 @@ registers only:
 | +0x30 | CRC expected; counter mode: the compare value |
 | +0x34 | CFG2: input slot selects for inputs 16-19 and 28-31 (4 bits each), section 4h |
 | +0x38 | CONST: K0..K3 (K3 also the comm match value), section 4h |
-| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either / 3 either edge of that input xor the next of inputs 0-7 (a Data-Strobe pair, 4b.7), actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p; [11] 32-bit FIFO access through FIFO32 (+0x54), section 4b; [13:12] sampler timer preset k (count1 <= PRELOAD >> k), [14] bit-stuff unit, [15] its transmit mode, section 4b.2; [10] counter mode: the CRC register is a 32-bit up / down counter with compare, section 4b |
+| +0x3C | CFG3: Manchester bit recoverer ([2:0] pin, [3] enable, [7:4] clocks per half bit, [8] shifter input = recovered bit, [9] double-edge sampling: [7:4] in half clocks), section 4k; edge-clocked sampler ([16] enable, [21:17] clock input, [23:22] 0 rising / 1 falling / 2 either / 3 either edge of that input xor the next of inputs 0-7 (a Data-Strobe pair, 4b.7), actions on the edge [24] shift, [25] count2 + 1, [26] in_prev capture, [27] count1 clear / load, [28] flag2 swaps rising and falling), section 4p; [11] 32-bit FIFO access through FIFO32 (+0x54), section 4b; [13:12] sampler timer preset k (count1 <= PRELOAD >> k), [14] bit-stuff unit, [15] its transmit mode, section 4b.2; [10] counter mode: the CRC register is a 32-bit up / down counter with compare, section 4b; [29] SRAM FIFO replay: a pop while cond_out[0] is high re-pushes the popped byte (4b.12) |
 | +0x40 | PRELOAD2: timer 2, [23:0] period (input 28 ticks every PRELOAD2 + 1 clocks, 0 = off), [24] restart the count on entry into state [29:25] (retriggerable timeout), [30] one-shot (with [24]: one tick per entry), section 4l |
 | +0x44 | TRACE_CFG (write-only, 21 bits): [0] enable (one shard traces at a time, shard 0 wins), [1] both SRAMs as one buffer, [6] into the other shard's SRAM (this shard's SRAM FIFO keeps running), [3:2] trigger (0 now, 1 in state [12:8], 2 that state taking a jump, 3 an edge on PRISM input [20:16]; [5:4] 0 rising, 1 falling, 2 either), section 4m |
 | +0x50 | COMM_PINS: multi-bit shift lanes, section 4r: [2:0] window base b (comm[b+5:b], b = 0-2), [3p+6:3p+4] the window lane (0-5; 6-7 read 0) uo_out[p] shows when its pinmux code is 6 and CFG0[2] is set.  Six lanes and 3-bit lane fields since 4b.11 (was comm[b+3:b] with [2k+5:2k+4] for uo_out[k+1]) |
@@ -1119,15 +1119,63 @@ lines, vsync falls at hsync A + K1 + 1 and lasts K2 - K1 + 1 lines: for
 480 / 10 / 2 / 33 use CRC_EXPECTED 479, K1 9, K2 10, K3 42.  Vsync moves
 two clocks after the semaphore, i.e. with the hsync edge.
 
-Two things the host decides.  (1) Line rate: 2400 clocks at 71.4 MHz is
+One thing the host decides: the line rate.  2400 clocks at 71.4 MHz is
 a 29.75 kHz hsync and a 56.7 Hz frame (the standard 31.47 kHz / 59.94
 Hz with a 25.175 MHz pixel clock); if a monitor will not lock that low,
 shorten the blanking to 189 units (2268 clocks: 31.5 kHz, 60.0 Hz) with
 COMPARE / CRC_EXPECTED / the count3 limit / PRELOAD2, at the price of a
-0.8 us back porch.  (2) The TX DMA must deliver 160 bytes per active
-line, each source line four times (4.6 MB/s at 60 Hz): `test_vga` pushes
-the bytes itself; a slot repeat count in the DMA is the obvious next
-feature if the CPU cannot keep up.
+0.8 us back porch.  How the lines reach FIFO B is section 4b.12.
+
+### 4b.12 Line replay: the SRAM FIFO re-pushes on pop (2026-09-30)
+
+Showing each source line four times by fetching it four times costs the
+QSPI bus 4.6 MB/s, about 16 % of TinyQV's instruction fetch, and a DMA
+start per displayed line.  Two heavier answers were built and measured
+first: a stream mode in the TX DMA (a region of PSRAM into FIFO B forever)
+with a mark / rewind in the SRAM FIFO (a held region the writer cannot
+overwrite, the read pointer put back to it).  They worked (`vga_verify`
+streamed a frame buffer across a slot boundary through them) but cost
+4.8 % of standard-cell area over the spw candidate, and three placement
+draws at densities 55-58 and keep-outs 30-60 um inflated 7-25 % and
+global-routed at 18000-22000 overflow against spw's 12776; they are not
+in the tree (the session's branch history has them).
+
+What is in the tree is the small one.  CFG3[29] makes a pop while
+cond_out[0] is high push the popped byte back in at the tail
+(`prism_sram_fifo.v` `repush`: `push_ok` includes the recirculation, the
+push byte is the head, the count stays; the flop FIFO ignores it).  A FIFO
+that holds exactly one line therefore plays it again, in order, as long as
+nothing else pushes while it circulates: the TX DMA's tap holds in a
+re-push clock (`fifo_hold`), a host push in such a clock is the host's
+mistake.  The pixel shard raises cond_out[0] in ST_LINE and ST_ACT while
+the line shard's "replay" flag (its pin_out[2], input 27) is up; the line
+shard counts a source line's showings in count3 (limit 2) with two active
+states, ST_VACT_R (replay up, three showings) and ST_VACT_A (the fourth,
+the pops consume), and on the transition into ST_VACT_A raises its host
+interrupt.  TinyQV answers each interrupt with one TX DMA copy of the next
+source line, which lands behind the line being consumed: the interrupt
+comes at the hsync before the fourth showing, so the copy has a whole line
+(2400 clocks) plus the blanking before the next line's first showing; a
+160-byte copy takes about 500.  The frame buffer keeps eight 160-byte
+lines per 2 KB slot at 256-byte spacing and TXDMA gained a start block
+field, [28:26] x 256 bytes, so a copy names its line.  Cost: one 8-bit
+mux and a strobe in the FIFO, three flops in the DMA, no new registers.
+
+`test_vga` shows the loop with a coroutine in TinyQV's place (it pushes
+the next line through FIFO32 on the interrupt; the bus model is slow, so
+the test stretches the back porch with the count3 limit); `vga_verify`
+runs it for real: the program fills the buffer, copies line 0, enables the
+pair, serves 26 interrupts over two frames with one copy each at the real
+2400-clock line, and the checker sees every pixel right and the frames
+identical.
+
+Further out: 320 x 240 with each pixel in a 2 x 2 block is the same
+machine with 320 bytes at six clocks each and two showings per line, so
+four times the DMA traffic (one 320-byte copy per two lines, 4.8 MB/s at
+56.7 Hz, the same 16 % of the bus as the four-fetch scheme was for 160 x
+120); the pixel shard's byte count outgrows count2's eight bits, so the
+counters would be reshuffled (the 32-bit counter for the bytes, count3
+and timer 2 for the porches and hsync).
 
 ## 4c. Host software (item 11, Phase 5)
 

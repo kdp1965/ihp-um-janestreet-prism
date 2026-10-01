@@ -13,11 +13,15 @@
 // (10 lines), K2 = the end of the sync pulse (12), K3 = the end of the
 // frame (45).  The line shard reads the semaphore two clocks after the
 // pixel shard sets it and clears it at once, so VSync moves with the
-// hsync edge.  Nothing else: the TX DMA feeding FIFO B (each source line
-// four times, 160 bytes per line) is the host's business.
+// hsync edge.  count3 counts the showings of a source line (limit 2):
+// the "replay" flag (pin_out[2], the pixel shard's input 27) is up for
+// three of the four, so its pops re-push the line (4b.12); entering the
+// fourth the host interrupt asks TinyQV for the next line, one 160-byte
+// TX DMA copy, which lands behind the line being consumed.
 //
 // Host set-up (shard 0): CFG3 = CNT_EN, CRC (preset) = 0, CRC_EXPECTED =
-// 479, CONST = K3 45 | K2 12 | K1 10 (the test uses shorter frames).
+// 479, COUNT3 limit 2, CONST = K3 42 | K2 10 | K1 9 (the test uses shorter
+// frames); shard 0's interrupt enabled in TinyQV.
 // =======================================================
 module chroma_vga_ln
 (
@@ -32,9 +36,10 @@ module chroma_vga_ln
 );
 
    // CFG0: comm loads from the constants (the blanking line counts); the
-   // CRC register is the active line counter (crc_mode 0, CFG3[10]); the
-   // semaphore clear wins a same-cycle set (never happens: one set per line)
-   localparam [31:0] CTRL      = 32'h4000_0000;
+   // CRC register is the active line counter (crc_mode 0, CFG3[10]); count3
+   // is commanded by pin_out[3] + OUT_COUNT3 (bit 12); the semaphore clear
+   // wins a same-cycle set (never happens: one set per line)
+   localparam [31:0] CTRL      = 32'h4000_1000;
 
    // uo_out[3] = VSync; every other pin is the pixel shard's
    localparam [2:0]  PIN_OUT0  = 3'd0, PIN_OUT1 = 3'd1, PIN_OUT2 = 3'd2, PIN_OUT3 = 3'd3;
@@ -52,12 +57,13 @@ module chroma_vga_ln
    // =======================================================
    // States
    // =======================================================
-   localparam [1:0]  ST_VACT   = 2'd0;   // active lines: the counter per line
-   localparam [1:0]  ST_VFP    = 2'd1;   // vertical front porch: count2 to K1
-   localparam [1:0]  ST_VS     = 2'd2;   // vsync low: count2 to K2
-   localparam [1:0]  ST_VBP    = 2'd3;   // vertical back porch: count2 to K3
+   localparam [2:0]  ST_VACT_R = 3'd0;   // active lines shown again next (three of four): count3 per line
+   localparam [2:0]  ST_VACT_A = 3'd1;   // the fourth showing: the line is consumed, the next one requested
+   localparam [2:0]  ST_VFP    = 3'd2;   // vertical front porch: count2 to K1
+   localparam [2:0]  ST_VS     = 3'd3;   // vsync low: count2 to K2
+   localparam [2:0]  ST_VBP    = 3'd4;   // vertical back porch: count2 to K3
 
-   reg   [1:0]    curr_state, next_state;
+   reg   [2:0]    curr_state, next_state;
 
    // =======================================================
    // Inputs
@@ -65,16 +71,21 @@ module chroma_vga_ln
    wire eq_comm     = in_data[15];   // count2 == comm (the blanking constant)
    wire cnt_ge      = in_data[22];   // counter mode: the last active line
    wire sema        = in_data[24];   // the pixel shard's line clock
+   wire count3_ge   = in_data[29];   // count3 >= limit (2): the fourth showing is next
 
    // =======================================================
    // Outputs
    // =======================================================
    reg vsync_n;                // pin_out[0] -> uo_out[3]
    reg active;                 // pin_out[1] -> the pixel shard's input 26
+   reg replay;                 // pin_out[2] -> its input 27: this showing re-pushes
+   reg count3_hi;              // pin_out[3]: count3 command bit 1 (clear = {1, 0})
    reg count2_inc;             // OUT_COUNT2_INC
    reg count2_dec;             // OUT_COUNT2_DEC (with inc: clear)
    reg crc_clear;              // OUT_CRC_CLEAR: counter preset (0)
    reg crc_update;             // OUT_CRC_UPDATE: counter + 1
+   reg count3_lo;              // OUT_COUNT3: count3 command bit 0 (+ 1 = {0, 1})
+   reg host_irq;               // OUT_HOST_INTERRUPT: the next line, please
    reg sema_clear;             // OUT_SEMA_CLEAR
    reg comm_load;              // OUT_COMM_LOAD: K[{k_sel1, k_sel0}]
    reg k_sel0;                 // OUT_K_SEL0
@@ -82,10 +93,14 @@ module chroma_vga_ln
 
    assign out_data[0]  = vsync_n;
    assign out_data[1]  = active;
+   assign out_data[2]  = replay;
+   assign out_data[3]  = count3_hi;
    assign out_data[9]  = count2_inc;
    assign out_data[10] = count2_dec;
    assign out_data[12] = crc_clear;
+   assign out_data[11] = count3_lo;
    assign out_data[13] = crc_update;
+   assign out_data[14] = host_irq;
    assign out_data[15] = sema_clear;
    assign out_data[16] = comm_load;
    assign out_data[18] = k_sel0;
@@ -97,9 +112,9 @@ module chroma_vga_ln
    always @(posedge clk or negedge rst_n)
    begin
       if (~rst_n)
-         curr_state <= 2'h0;
+         curr_state <= 3'h0;
       else
-         curr_state <= fsm_enable ? next_state : 2'h0;
+         curr_state <= fsm_enable ? next_state : 3'h0;
    end
 
    // =======================================================
@@ -111,6 +126,10 @@ module chroma_vga_ln
 
       vsync_n      = 1'b1;
       active       = 1'b0;
+      replay       = 1'b0;
+      count3_hi    = 1'b0;
+      count3_lo    = 1'b0;
+      host_irq     = 1'b0;
       count2_inc   = 1'b0;
       count2_dec   = 1'b0;
       crc_clear    = 1'b0;
@@ -125,14 +144,35 @@ module chroma_vga_ln
       ctrl_reg     = CTRL;
 
       case (curr_state)
-      ST_VACT:
+      ST_VACT_R:                             // this showing is replayed: the pops re-push
          begin
             active      = 1'b1;
-            if (sema && !cnt_ge)             // another active line
+            replay      = 1'b1;
+            if (sema && !count3_ge)          // the first or second showing is over
             begin
                sema_clear  = 1'b1;
                crc_update  = 1'b1;
-               next_state  = ST_VACT;
+               count3_lo   = 1'b1;           // count3 + 1
+               next_state  = ST_VACT_R;
+            end
+            else if (sema && count3_ge)      // the third: the fourth consumes, ask for the next line
+            begin
+               sema_clear  = 1'b1;
+               crc_update  = 1'b1;
+               count3_hi   = 1'b1;           // count3 clear
+               host_irq    = 1'b1;
+               next_state  = ST_VACT_A;
+            end
+         end
+
+      ST_VACT_A:                             // the fourth showing: the line is consumed
+         begin
+            active      = 1'b1;
+            if (sema && !cnt_ge)             // more active lines
+            begin
+               sema_clear  = 1'b1;
+               crc_update  = 1'b1;
+               next_state  = ST_VACT_R;
             end
             else if (sema && cnt_ge)         // the last one: blanking, count2 from 0
             begin
@@ -195,12 +235,12 @@ module chroma_vga_ln
                crc_clear   = 1'b1;
                count2_inc  = 1'b1;
                count2_dec  = 1'b1;
-               next_state  = ST_VACT;
+               next_state  = ST_VACT_R;
             end
          end
 
       default:
-         next_state = ST_VACT;
+         next_state = ST_VACT_R;
       endcase
    end
 endmodule
