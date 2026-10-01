@@ -41,8 +41,11 @@ from user_peripherals.prism.chroma_swd_host import *
 from user_peripherals.prism.chroma_ps2_host import *
 from user_peripherals.prism.chroma_vga_px import *
 from user_peripherals.prism.chroma_vga_ln import *
+from user_peripherals.prism.chroma_hdlc_rx import *
+from user_peripherals.prism.chroma_hdlc_tx import *
 from user_peripherals.prism import can_model as can
 from user_peripherals.prism import spw_model as spw
+from user_peripherals.prism import hdlc_model as hdlc
 
 
 # =============================================================================
@@ -4253,3 +4256,236 @@ class Ps2HostTest(PrismTest):
         await tqv.write_word_reg(REG_PRELOAD2, 0)
         dut.ui_in[2].value = 0
         dut.ui_in[3].value = 0
+
+
+class HdlcRxTest(PrismTest):
+    ''' Synchronous HDLC receiver (chroma_hdlc_rx): RXC on ui_in[2], RXD on
+        ui_in[3], 16-clock bits from hdlc_model.HdlcLine.  Frames between
+        flags land in the FIFO with their FCS, one interrupt per frame and
+        FLAGS F0 = FCS good: a plain frame, one full of ones and 0x7E (zero
+        deletion), a bad FCS, two frames sharing one flag, an abort in the
+        middle of a frame (reported with F0 = 0), a 62-byte frame, idle flags
+        and mark idle that report nothing. '''
+    name = "HDLC receiver chroma (chroma_hdlc_rx)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        line = hdlc.HdlcLine(dut, clk_pin=2, data_pin=3, half=8)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await tqv.write_byte_reg(REG_COMPARE, 5)                         # five ones in a row
+        await tqv.write_byte_reg(REG_LIMIT3, 1)                          # a frame reports with one byte or more
+        await tqv.write_word_reg(REG_CRC_POLY, 0x8408)
+        await tqv.write_word_reg(REG_CRC_EXP, hdlc.RESIDUE)
+        await bench.load_chroma(chroma_hdlc_rx, chroma_hdlc_rx_ctrlReg, chroma_hdlc_rx_pinmuxReg)
+        await line.mark(16)
+
+        async def take(what):
+            assert await bench.irq(), f"{what}: no interrupt"
+            flags = await tqv.read_word_reg(REG_FLAGS)
+            st = await tqv.read_word_reg(REG_FIFO_ST)
+            got = [await tqv.read_byte_reg(REG_FIFO) for _ in range(fifo_count(st))]
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            return got, (flags >> 6) & 1
+
+        async def frame(data, bad=False, lead=2, tail=2):
+            await line.flags(lead)
+            await line.send(hdlc.frame_bits(data, bad_fcs=bad))
+            await line.flags(tail)                                       # the first one closes the frame
+            got, ok = await take(f"frame {[hex(b) for b in data[:4]]}")
+            want = hdlc.with_fcs(data, bad=bad)
+            assert got == want, f"received {[hex(b) for b in got]}, expected {[hex(b) for b in want]}"
+            assert ok == (0 if bad else 1), f"FLAGS F0 {ok} for a {'bad' if bad else 'good'} FCS"
+
+        self.log("idle flags and mark idle: no frame, no interrupt")
+        await line.flags(6)
+        await line.mark(20)
+        await line.flags(3)
+        assert not await bench.irq(), "an interrupt from idle flags"
+        assert fifo_count(await tqv.read_word_reg(REG_FIFO_ST)) == 0, "bytes from idle flags"
+        self.log("a plain frame (address, control, information)")
+        await frame([0xFF, 0x03, 0xC0, 0x21, 0x09])
+        self.log("ones and 0x7E in the data: zero deletion")
+        await frame([0xFF] * 4 + [0x7E] * 3 + [0x3F, 0xFC, 0xF8, 0x1F, 0x00])
+        self.log("a bad FCS: the bytes arrive, F0 = 0")
+        await frame([0x01, 0x02, 0x03], bad=True)
+        self.log("and the next frame is fine")
+        await frame([0xAA, 0x55])
+        self.log("two frames sharing one flag")
+        a, b = [0x10, 0x20, 0x30], [0x40, 0x50]
+        await line.flags(1)
+        await line.send(hdlc.frame_bits(a) + hdlc.FLAG + hdlc.frame_bits(b))
+        await line.flags(2)
+        got, ok = await take("shared flag")
+        assert got == hdlc.with_fcs(a) + hdlc.with_fcs(b) and ok == 1, f"received {[hex(x) for x in got]}, F0 {ok}"
+        self.log("an abort in the middle of a frame: reported with F0 = 0")
+        await line.flags(2)
+        await line.send(hdlc.frame_bits([0x11, 0x22, 0x33, 0x44])[:24] + [1] * 9)   # three whole bytes, then seven ones and more
+        await line.mark(12)
+        got, ok = await take("abort")
+        assert ok == 0 and got == [0x11, 0x22, 0x33], f"abort: received {[hex(x) for x in got]}, F0 {ok}"
+        self.log("after mark idle, a frame")
+        await frame([0x5A, 0xA5, 0x99], lead=1)
+        self.log("a 14-byte frame: the 16-byte flop FIFO full")
+        await frame([(i * 37 + 11) & 0xFF for i in range(14)])
+        self.log("a 200-byte frame through the SRAM FIFO (CFG0 bit 31)")
+        await bench.disable()
+        await tqv.write_word_reg(REG_CFG0, chroma_hdlc_rx_ctrlReg | CFG_FIFO_SRAM)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await bench.enable()
+        await frame([(i * 37 + 11) & 0xFF for i in range(200)])
+        await bench.disable()
+        await tqv.write_word_reg(REG_CFG0, 0)
+        dut.ui_in[2].value = 0
+        dut.ui_in[3].value = 0
+
+
+class HdlcTxTest(PrismTest):
+    ''' Synchronous HDLC transmitter (chroma_hdlc_tx): TXC on uo_out[3],
+        TXD on uo_out[2], 16-clock bits (PRELOAD = 7: half a bit - 1).  It
+        idles with flags; each frame written into the FIFO and started by a
+        host_in[0] toggle goes out stuffed with its FCS and a closing flag,
+        then the interrupt.  hdlc_model.decode checks the line: a plain
+        frame, ones and 0x7E (zero insertion), one byte, 16 bytes (the flop
+        FIFO full), the clock's period, and 200 bytes from the SRAM FIFO. '''
+    name = "HDLC transmitter chroma (chroma_hdlc_tx)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        mon = hdlc.HdlcMonitor(dut, clk_pin=3, data_pin=2)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await tqv.write_byte_reg(REG_HOST, 0)
+        await tqv.write_word_reg(REG_CFG1, 8 << 4)                       # in_prev1 <- host_in[0]
+        await tqv.write_byte_reg(REG_COMPARE, 4)                         # the fifth one in a row
+        await tqv.write_word_reg(REG_PRELOAD, 7)                         # 8 clocks per half bit
+        await tqv.write_word_reg(REG_CONST, 0x7E)                        # K0 = the flag
+        await tqv.write_word_reg(REG_CRC_POLY, 0x8408)
+        await bench.load_chroma(chroma_hdlc_tx, chroma_hdlc_tx_ctrlReg, chroma_hdlc_tx_pinmuxReg)
+        mon.running = True
+        watch = cocotb.start_soon(mon.run())
+        await self.clocks(16 * 40)
+
+        self.log("idle: flags only")
+        idle = mon.raw[8:]
+        k = next(i for i in range(8) if idle[i:i + 8] == hdlc.FLAG)
+        assert idle[k:k + 24] == hdlc.FLAG * 3, f"idle line {''.join(map(str, idle[:32]))}"
+        assert hdlc.decode(mon.raw)[0] == [], "a frame while idle"
+
+        async def send(data):
+            start = len(mon.raw)
+            for b in data:
+                await tqv.write_byte_reg(REG_FIFO, b)
+            await tqv.write_byte_reg(REG_TOGGLE, 0)                      # go
+            nbits = len(hdlc.frame_bits(data)) + 16
+            for _ in range(nbits):
+                if await bench.irq():
+                    break
+                await self.clocks(16)
+            assert await bench.irq(), f"{[hex(b) for b in data[:4]]}: no interrupt"
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            await self.clocks(16 * 24)                                   # the closing flag and idle flags
+            frames, aborts = hdlc.decode(mon.raw[start:])
+            want = hdlc.with_fcs(data)
+            assert aborts == 0 and frames == [(want, True, True)], \
+                f"line decoded to {[([hex(b) for b in f], ok, al) for f, ok, al in frames]}, aborts {aborts}; expected {[hex(b) for b in want]}"
+            st = await tqv.read_word_reg(REG_FIFO_ST)
+            assert fifo_count(st) == 0, f"{fifo_count(st)} bytes left in the FIFO"
+
+        self.log("a plain frame")
+        await send([0xFF, 0x03, 0xC0, 0x21, 0x09])
+        self.log("ones and 0x7E in the data: zero insertion")
+        await send([0xFF] * 4 + [0x7E] * 3 + [0x3F, 0xFC, 0xF8, 0x1F, 0x00])
+        self.log("one byte")
+        await send([0x00])
+        self.log("16 bytes: the flop FIFO full")
+        await send([(i * 37 + 11) & 0xFF for i in range(16)])
+        odd = [(i, b - a) for i, (a, b) in enumerate(zip(mon.edges, mon.edges[1:])) if b - a != 16]
+        assert not odd, f"TXC periods other than 16 at edges {odd[:8]} of {len(mon.edges)}"
+        self.log("200 bytes through the SRAM FIFO (CFG0 bit 31)")
+        await bench.disable()
+        await tqv.write_word_reg(REG_CFG0, chroma_hdlc_tx_ctrlReg | CFG_FIFO_SRAM)
+        await tqv.write_word_reg(REG_FIFO_ST, 0)
+        await bench.enable()
+        await self.clocks(16 * 20)
+        await send([(i * 37 + 11) & 0xFF for i in range(200)])
+        mon.running = False
+        await watch
+        await bench.disable()
+        await tqv.write_word_reg(REG_CFG0, 0)
+
+
+class HdlcLoopTest(PrismTest):
+    ''' HDLC link: chroma_hdlc_tx in shard 1 (TXC uo_out[3], TXD uo_out[2])
+        looped back by the bench into chroma_hdlc_rx in shard 0 (RXC
+        ui_in[2], RXD ui_in[3]), fractured.  Frames written into shard 1's
+        FIFO arrive in shard 0's FIFO with their FCS and F0 = good, with a
+        transmit and a receive interrupt each; at 16-clock bits and at the
+        fastest the transmitter can do, 10-clock bits. '''
+    name = "HDLC link: transmitter (shard 1) to receiver (shard 0)"
+
+    async def run(self):
+        tqv, bench, dut = self.tqv, self.bench, self.dut
+        for base in (0, SHARD1):
+            await tqv.write_word_reg(REG_FIFO_ST + base, 0)
+            await tqv.write_word_reg(REG_CRC_POLY + base, 0x8408)
+        # receiver (shard 0)
+        await tqv.write_byte_reg(REG_COMPARE, 5)
+        await tqv.write_byte_reg(REG_LIMIT3, 1)
+        await tqv.write_word_reg(REG_CRC_EXP, hdlc.RESIDUE)
+        # transmitter (shard 1)
+        await tqv.write_byte_reg(REG_HOST + SHARD1, 0)
+        await tqv.write_word_reg(REG_CFG1 + SHARD1, 8 << 4)
+        await tqv.write_byte_reg(REG_COMPARE + SHARD1, 4)
+        await tqv.write_word_reg(REG_PRELOAD + SHARD1, 7)
+        await tqv.write_word_reg(REG_CONST + SHARD1, 0x7E)
+        running = True
+
+        async def mirror():
+            while running:
+                uo = int(dut.uo_out.value)
+                dut.ui_in[2].value = (uo >> 3) & 1
+                dut.ui_in[3].value = (uo >> 2) & 1
+                await RisingEdge(dut.clk)
+        wire = cocotb.start_soon(mirror())
+        await bench.load_fractured(chroma_hdlc_rx, chroma_hdlc_rx_ctrlReg, chroma_hdlc_rx_pinmuxReg,
+                                   chroma_hdlc_tx, chroma_hdlc_tx_ctrlReg, chroma_hdlc_tx_pinmuxReg)
+        await self.clocks(16 * 30)
+        assert not await bench.irq(IRQ0_MASK), "a receive interrupt from idle flags"
+
+        async def send(data):
+            for b in data:
+                await tqv.write_byte_reg(REG_FIFO + SHARD1, b)
+            await tqv.write_byte_reg(REG_TOGGLE + SHARD1, 0)
+            for _ in range(len(hdlc.frame_bits(data)) + 24):
+                if await bench.irq(IRQ0_MASK):
+                    break
+                await self.clocks(16)
+            assert await bench.irq(IRQ0_MASK), f"{[hex(b) for b in data]}: no receive interrupt"
+            assert await bench.irq(IRQ1_MASK), f"{[hex(b) for b in data]}: no transmit interrupt"
+            flags = await tqv.read_word_reg(REG_FLAGS)
+            st = await tqv.read_word_reg(REG_FIFO_ST)
+            got = [await tqv.read_byte_reg(REG_FIFO) for _ in range(fifo_count(st))]
+            want = hdlc.with_fcs(data)
+            assert got == want and (flags >> 6) & 1 == 1, \
+                f"received {[hex(b) for b in got]} F0 {(flags >> 6) & 1}, expected {[hex(b) for b in want]}"
+            await tqv.write_byte_reg(REG_INT_CLR0, 0x80)
+            await tqv.write_byte_reg(REG_INT_CLR1, 0x80)
+
+        self.log("three frames from shard 1 to shard 0")
+        await send([0xFF, 0x03, 0xC0, 0x21])
+        await send([0x7E, 0xFF, 0xFF, 0x7D, 0x00, 0x3F])
+        await send([(i * 29 + 3) & 0xFF for i in range(14)])
+        self.log("the fastest link: 10-clock bits (PRELOAD 4: five clocks per half bit)")
+        await bench.disable()                                            # (count1 must not be above a new PRELOAD)
+        await tqv.write_word_reg(REG_PRELOAD + SHARD1, 4)
+        for base in (0, SHARD1):
+            await tqv.write_word_reg(REG_FIFO_ST + base, 0)
+        await bench.enable()
+        await self.clocks(10 * 30)
+        await send([0xFF, 0xFF, 0x7E, 0x00, 0xF8, 0x1F, 0x3F, 0xFC])
+        await send([(i * 53 + 7) & 0xFF for i in range(14)])
+        running = False
+        await wire
+        await bench.disable()
+        dut.ui_in[2].value = 0
+        dut.ui_in[3].value = 0
+

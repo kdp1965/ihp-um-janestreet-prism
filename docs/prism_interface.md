@@ -1177,6 +1177,72 @@ four times the DMA traffic (one 320-byte copy per two lines, 4.8 MB/s at
 counters would be reshuffled (the 32-bit counter for the bytes, count3
 and timer 2 for the porches and hsync).
 
+### 4b.13 HDLC receiver and transmitter chromas (2026-10-01)
+
+Synchronous bit-oriented HDLC / SDLC with no RTL change: flags 0x7E, a 0
+inserted after five ones between the flags, seven ones = abort, bytes LSB
+first, the 16-bit FCS of CRC-16 / X.25 (reflected 0x1021 = CRC_POLY
+0x8408, preset 0xFFFF, sent complemented, low byte first).  The data
+changes on the clock's falling edge and is sampled on its rising edge.
+
+The hardware bit-stuff unit of 4b.2 does not fit: it stuffs after a run
+of COMPARE + 1 equal bits of either value, as CAN does, and HDLC stuffs
+only after ones (five zeros in a row are plain data).  Both chromas count
+the ones in count2 instead and decide per bit in the FSM, which also gives
+flag and abort detection for free.
+
+`chromas/chroma_hdlc_rx.v` (10 states; RXC ui_in[2], RXD ui_in[3]) follows
+RXC itself (wait low, wait high) and at each rising edge takes RXD: a 1
+after five ones is the sixth (not data: F6L / F6H decide flag or abort on
+the next bit), a 0 after five ones is a stuff bit and is dropped, any other
+bit enters the shifter through cond_out[0] (CFG0[28]) with the CRC, and a
+whole byte goes into the FIFO with count3 + 1.  Bits are committed as they
+arrive, so a closing flag has put its leading 0 and five ones into the
+shifter and the CRC before its sixth one shows it is a flag.  Frames are
+whole bytes, so those six bits never complete a byte, and a good frame's
+CRC register ends at a fixed value: the X.25 residue 0xF0B8 run on through
+0,1,1,1,1,1 = 0x9F0B, the CRC_EXPECTED.  At a flag, a frame that pushed a
+byte (count3 >= LIMIT3 = 1) ends: F0 <= crc_ok, host interrupt; then (and
+at every other flag) the CRC, count2, count3 and comm's shift count
+restart.  F1 = inside a frame: pushes happen only then, so nothing before
+the first flag is stored; an abort in a frame with bytes reports F0 = 0
+with an interrupt and hunts again; idle flags make empty frames and a line
+idling at 1 a run of aborts, neither reports.  Host: COMPARE 5, LIMIT3 1,
+CRC_POLY 0x8408, CRC_EXPECTED 0x9F0B; at each interrupt the FIFO holds the
+frame and its two FCS bytes.
+
+`chromas/chroma_hdlc_tx.v` (11 states; TXC uo_out[3] = pin_out[0], TXD
+uo_out[2] = cond_out[0]) runs count1 as a free half-bit tick (count up,
+wrap at PRELOAD = half a bit - 1) and idles with flags (K0 = 0x7E).  TXD
+is the shifter's bit in the bit states and 0 in the stuff bit's two
+states (the shifter holds).  At each falling edge a 1 counts in count2
+and the fifth in a row outside the flags is followed by a stuff bit
+(COMPARE 4); then the next bit, or at a byte's end the phase decides:
+{F1, F0} = 00 flags (a host_in[0] toggle with a frame in the FIFO pops
+its first byte, presets the CRC and sets 01; else another flag), 01 data
+(the next byte, or at an empty FIFO the FCS's low byte and 10), 10 (the
+high byte and 11), 11 (the closing flag, 00 and the interrupt).  The CRC
+takes each bit while TXC is low, except in the FCS (F1).  The frame ends
+where the FIFO runs empty, so the host writes the whole frame and then
+toggles host_in[0] (CFG1 = 8 << 4 as for the CAN transmitter).
+
+Frames up to 16 bytes fit the flop FIFOs (14 data bytes with the FCS on
+the receive side); longer ones use the shard's SRAM FIFO (CFG0 bit 31).
+Tests: `test_hdlc_rx` (16-clock bits from `hdlc_model.HdlcLine`: idle flags
+and mark idle report nothing, a plain frame, ones and 0x7E in the data, a
+bad FCS, two frames sharing a flag, an abort, 14 bytes in the flop FIFO and
+200 in the SRAM FIFO), `test_hdlc_tx` (the line decoded by
+`hdlc_model.decode`: idle flags, the same kinds of frames, 16 bytes, 200
+from the SRAM FIFO, a steady 16-clock TXC) and `test_hdlc_loop` (the
+transmitter in shard 1 looped back into the receiver in shard 0, three
+frames with both interrupts and F0 = good, then two more at 10-clock bits).
+The transmitter's decisions after a falling edge take five clocks, so its
+shortest half bit is PRELOAD = 4: 10-clock bits, 6.4 Mb/s at 64 MHz, and
+the receiver keeps up with that in the loopback.  Not in v1:
+residue bits (frames that are not whole bytes report a bad FCS), address
+filtering, the 32-bit FCS, NRZI, an abort on transmit underrun, mark idle
+and an external clock on the transmit side.
+
 ## 4c. Host software (item 11, Phase 5)
 
 The tinyQV-sdk driver (`prism.h` / `prism.c`) covers this design with
