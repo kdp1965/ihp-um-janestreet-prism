@@ -18,7 +18,8 @@
     79
   ],
   "metal_pixels": 2756,
-  "polygons": 22,
+  "rectangles": 392,
+  "merged_polygons": 22,
   "metal_area_um2": 992.16,
   "routing_obstruction": [
     "Metal4",
@@ -38,9 +39,9 @@
   "clearance": 0.6,
   "mode": "plate",
   "extent": [
-    1670.77,
-    46.05,
-    1670.97,
-    61.47
+    1624.7,
+    4.4,
+    1681.6,
+    52.1
   ]
 }

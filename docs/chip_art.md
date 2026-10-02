@@ -42,6 +42,15 @@ python tools/chip_art.py --image Calvin.png \
   50/23 over the box, so the chip-level fill leaves the dark areas
   alone; precheck lists both layers as valid), a LEF for the record,
   `art.json` for the flow step, `preview.png`.
+- **Rectangles, not merged polygons.** The metal is written as one
+  rectangle per horizontal run of pixels (392 of them).  A merged plate
+  has holes (the eyes inside the face), and GDS can only write a polygon
+  with holes as a boundary with cut lines, which visits the same vertices
+  twice.  Tiny Tapeout's 3D viewer triangulates with CDT, which throws on
+  such a polygon (an uncaught wasm exception, the viewer shows nothing),
+  as the first version of this art demonstrated.  Rectangles have no
+  holes; the DRC merges touching shapes before it checks, so it sees the
+  same geometry.
 
 ## How it gets into the tile
 

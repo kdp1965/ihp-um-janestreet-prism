@@ -117,13 +117,29 @@ def main():
     ly = kdb.Layout(); ly.dbu = 0.001
     cell = ly.create_cell(a.cell)
     l_m4 = ly.layer(*LAYER_METAL4); l_nf = ly.layer(*LAYER_NOFILL)
-    reg = kdb.Region()
+    # The metal goes into the GDS as one rectangle per horizontal run of
+    # pixels, never as merged polygons: a merged plate has holes (the eyes
+    # inside the face), which GDS can only write as a boundary with cut lines
+    # that visits the same vertices twice, and the Tiny Tapeout 3D viewer's
+    # triangulator (CDT) throws on such a polygon.  Rectangles have no holes
+    # and no repeated vertices; the DRC merges touching shapes before it
+    # checks, so the geometry it sees is the same.
     px = int(round(a.pixel * 1000))
-    for y, x in zip(*np.where(mask)):
-        x, y = int(x), int(y)
-        reg.insert(kdb.Box(x * px, y * px, (x + 1) * px, (y + 1) * px))
-    reg.merge()
-    cell.shapes(l_m4).insert(reg)
+    rects = 0
+    for y in range(h_px):
+        x = 0
+        while x < w_px:
+            if mask[y, x]:
+                x1 = x
+                while x1 < w_px and mask[y, x1]:
+                    x1 += 1
+                cell.shapes(l_m4).insert(kdb.Box(x * px, y * px, x1 * px, (y + 1) * px))
+                rects += 1
+                x = x1
+            else:
+                x += 1
+    reg = kdb.Region(cell.begin_shapes_rec(l_m4))
+    reg.merge()                                # the merged view, for the checks and the report only
     cell.shapes(l_nf).insert(kdb.Box(0, 0, w_px * px, h_px * px))
     gds = os.path.join(a.out, a.cell + ".gds")
     ly.write(gds)
@@ -151,7 +167,7 @@ def main():
         "gds": os.path.abspath(gds), "cell": a.cell, "lef": os.path.abspath(lef),
         "origin": [round(x0, 3), round(y0, 3)], "box": [round(x0, 3), round(y0, 3), round(x0 + w_px * a.pixel, 3), round(y0 + h_px * a.pixel, 3)],
         "pixel": a.pixel, "pixels": [w_px, h_px], "metal_pixels": int(mask.sum()),
-        "polygons": npoly, "metal_area_um2": round(area, 2),
+        "rectangles": rects, "merged_polygons": npoly, "metal_area_um2": round(area, 2),
         "routing_obstruction": ["Metal4", x0, y0, round(x0 + w_px * a.pixel, 3), round(y0 + h_px * a.pixel, 3)],
         "exclusions": a.exclude, "clearance": a.clearance, "mode": a.mode, "extent": [ex0, ey0, ex1, ey1],
     }
@@ -168,7 +184,7 @@ def main():
         img[max(gy0, 0):max(gy1, 0), max(gx0, 0):max(gx1, 0)] = (120, 30, 30)
     Image.fromarray(img[::-1, :, :]).save(os.path.join(a.out, "preview.png"))
     print(f"{a.cell}: {w_px} x {h_px} pixels of {a.pixel} um = {w_px * a.pixel:.1f} x {h_px * a.pixel:.1f} um at ({x0}, {y0}); "
-          f"{int(mask.sum())} metal pixels in {npoly} polygons, {area:.0f} um2 of Metal4; disc centre/radius (px) {tuple(round(float(v), 1) for v in disc)}")
+          f"{int(mask.sum())} metal pixels as {rects} rectangles ({npoly} merged polygons), {area:.0f} um2 of Metal4; disc centre/radius (px) {tuple(round(float(v), 1) for v in disc)}")
     print(f"wrote {gds}, {lef}, art.json, preview.png")
 
 
