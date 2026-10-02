@@ -223,8 +223,9 @@ class ChipArt(Step):
     inputs = [DesignFormat.GDS, DesignFormat.LEF]
     outputs = [DesignFormat.GDS, DesignFormat.KLAYOUT_GDS, DesignFormat.MAG_GDS, DesignFormat.LEF]
 
-    config_vars = [
+    config_vars = CHIP_ART_VARS = [
         Variable("CHIP_ART_JSON", Optional[Path], "tools/chip_art.py's art.json: the art GDS, its cell, its die origin and box; unset = no art.", default=None),
+        Variable("CHIP_ART_CUT_ROWS", bool, "Project.ArtKeepout cuts the standard-cell rows under the art's box (no cells, filler, decap or Metal1 rails there); pair it with ROUTING_OBSTRUCTIONS on Metal2-Metal4 over the box.", default=False),
     ]
 
     def run(self, state_in, **kwargs):
@@ -252,6 +253,31 @@ class ChipArt(Step):
         with open(os.path.join(self.step_dir, "chip_art.log"), "w") as f:
             f.write(f"{info['cell']} at {info['origin']}, box {info['box']}: {'; '.join(done)}\n")
         return views, {}
+
+
+@Step.factory.register()
+class ArtKeepout(OdbpyStep):
+    """Cuts the standard-cell rows under the chip art's box (CHIP_ART_JSON,
+    with CHIP_ART_CUT_ROWS) right after OpenROAD.CutRows and before the PDN:
+    nothing is placed there, ever (the filler and decap included), and no
+    Metal1 rails are drawn there, so the Metal4 picture lies on bare oxide.
+    "+OpenROAD.CutRows": "Project.ArtKeepout"."""
+    id = "Project.ArtKeepout"
+    name = "Chip Art Keep-out (cut rows)"
+    config_vars = ChipArt.config_vars
+
+    def get_script_path(self):
+        return os.path.join(HERE, "odb_art_keepout.py")
+
+    def get_command(self) -> List[str]:
+        import json as _json
+        box = _json.load(open(self.config["CHIP_ART_JSON"]))["box"]
+        return super().get_command() + ["--box"] + [str(v) for v in box]
+
+    def run(self, state_in, **kwargs):
+        if self.config["CHIP_ART_JSON"] is None or not self.config["CHIP_ART_CUT_ROWS"]:
+            return {}, {}
+        return super().run(state_in, **kwargs)
 
 
 @Step.factory.register()

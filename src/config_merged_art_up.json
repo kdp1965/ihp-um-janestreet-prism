@@ -1,0 +1,399 @@
+{
+  "meta": {
+    "flow": "Classic",
+    "substituting_steps": {
+      "+Yosys.Synthesis": "Project.SwapMacroCells",
+      "+Odb.ManualMacroPlacement": "Project.MouthKeepouts",
+      "+OpenROAD.GeneratePDN": "Project.ExtendPowerStripes",
+      "+OpenROAD.ResizerTimingPostCTS": "Project.DiodesOnSramPins",
+      "+Checker.TrDRC": "Project.DropKeepouts",
+      "+Odb.AddRoutingObstructions": "Project.AnchorSequential",
+      "+OpenROAD.GlobalPlacement": "Project.ReleaseAnchors",
+      "+Magic.WriteLEF": "Project.ChipArt",
+      "+OpenROAD.CutRows": "Project.ArtKeepout"
+    }
+  },
+  "//1": "pdngen's connectivity check runs before flow.py's stripe step bridges the macro pins; LVS is the verdict",
+  "PL_TARGET_DENSITY_PCT": 57,
+  "CLOCK_PERIOD": 14,
+  "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
+  "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,
+  "//rsz": "Timing repair on global-route parasitics (runs/txdma_rsz, 2026-09-27): the post-CTS repair works on placement estimates and signs the slow corner off at +0.2 ns, but the routed wires then cost this tile 6 ns there, and with the TX DMA's extra routing the typical corner missed by 0.82 ns (a weak gate driving a long wire after the FIFO head). This step's repair (148 buffers, 285 upsizes, +0.3 % area) and its own re-placement / re-route gave typ +0.56, slow -5.29 (better than rtl16's -5.78) and a detailed route clean at pass 59 instead of 77; it takes about 50 min on one core. Keep-out width and placement density were not the lever (30/35/45/60 um, 55 % all worse or no better).",
+  "RUN_POST_GRT_RESIZER_TIMING": true,
+  "RUN_LINTER": 1,
+  "LINTER_INCLUDE_PDK_MODELS": 1,
+  "SYNTH_STRATEGY": "AREA 0",
+  "USE_LIGHTER": 0,
+  "FALLBACK_SDC_FILE": "src/base.sdc",
+  "DESIGN_REPAIR_MAX_SLEW_PCT": 25,
+  "DESIGN_REPAIR_REMOVE_BUFFERS": 1,
+  "RUN_HEURISTIC_DIODE_INSERTION": 0,
+  "RUN_ANTENNA_REPAIR": 1,
+  "HEURISTIC_ANTENNA_THRESHOLD": 200,
+  "DRT_ANTENNA_REPAIR_ITERS": 6,
+  "CLOCK_PORT": "clk",
+  "RUN_KLAYOUT_XOR": 0,
+  "RUN_KLAYOUT_DRC": 1,
+  "DESIGN_REPAIR_BUFFER_OUTPUT_PORTS": 0,
+  "TOP_MARGIN_MULT": 1,
+  "BOTTOM_MARGIN_MULT": 1,
+  "LEFT_MARGIN_MULT": 6,
+  "RIGHT_MARGIN_MULT": 6,
+  "FP_SIZING": "absolute",
+  "GRT_ALLOW_CONGESTION": 1,
+  "DRT_SAVE_DRC_REPORT_ITERS": 4,
+  "FP_IO_HLENGTH": 2,
+  "FP_IO_VLENGTH": 2,
+  "FP_PDN_VPITCH": 44.96,
+  "FP_PDN_VWIDTH": 2.1,
+  "RUN_CTS": 1,
+  "FP_PDN_MULTILAYER": 0,
+  "PDN_CFG": "dir::pdn_cfg.tcl",
+  "//stripes": "Project.ExtendPowerStripes: the SRAMs get the tile grid's stripes moved onto their own supply columns plus complete pairs per region, and (EXTEND_STRIPES_SRAM_ARRAY_EVERY_OTHER) a VPWR/VGND pair on every other pair position of each bit-cell array, with the band's outer pairs from the grid moves; no SRAM column stripe lands within 0.5 um of a macro's Metal4 signal pin, and one crossing an SRAM-aligned macro (CFGMEMS_LEFT[1].cfgmem_lo as CFGMEM_IHP_LEFT16_SRAM, see //swap) lands on one of its rails.  Result per SRAM: array L 8 pairs, band 2, array R 7, all 24 stripes across that macro on its rails (the plain LEFT16 there got 4 of its 15 rails fed).  CFGMEMS_LEFT[1].cfgmem_lo sits at the top left by the tile pins (the band layout, x 132.47).  runs/sram16 (2026-09-26) signed off with exactly this config.",
+  "EXTEND_STRIPES_SRAM_ALL_COLUMNS": false,
+  "EXTEND_STRIPES_SRAM_ARRAY_EVERY_OTHER": true,
+  "EXTEND_STRIPES_PIN_FACE_MARGIN": 0,
+  "//keepout_width": "40 um (runs/can_ko40, 2026-09-28): the CAN tree at 60 um placed with +13.9 % inflation (runs/can, stopped) and at 40 um with +3.9 %, which routed clean in 16 passes.  Before that 60 um was the good draw for txring2 (40 / 30 um placed at ~28 %).  One draw each: placement changes wholesale with any netlist change.",
+  "MOUTH_KEEPOUT_WIDTH": 40,
+  "MOUTH_KEEPOUT_MARGIN": 20,
+  "MOUTH_KEEPOUT_MAX_DENSITY": 0.25,
+  "MOUTH_KEEPOUT_INWARD": 0,
+  "MAGIC_DEF_LABELS": 0,
+  "MAGIC_WRITE_LEF_PINONLY": 1,
+  "FP_MACRO_HORIZONTAL_HALO": 2.0,
+  "FP_MACRO_VERTICAL_HALO": 0.48,
+  "DIODE_CELL": "sg13cmos5l_antennanp/A",
+  "ERROR_ON_PDN_VIOLATIONS": 0,
+  "//swap": "CFGMEMS_LEFT[1].cfgmem_lo is CFGMEM_IHP_LEFT16_SRAM in the RTL (src/peripherals.v writes the left column out; model src/user_peripherals/cfgmem/cfgmem_left_sram.v): the LEFT16 netlist and pins built with its Metal4 rails on SRAM[1]'s supply columns for this spot (DFFRAM make left_cmos5l_sram), so the SRAM stripes run through it on its rails.  runs/rtl16 (2026-09-26) signed off with exactly this.  Project.SwapMacroCells stays in the flow for post-synthesis swaps (MACRO_CELL_SWAPS, unset); branch dma keeps the swap variant (runs/sram16).",
+  "EXTRA_VERILOG_MODELS": [
+    "src/user_peripherals/cfgmem/cfgmem.v",
+    "src/user_peripherals/cfgmem/cfgmem_left.v",
+    "src/user_peripherals/cfgmem/cfgmem_left_sram.v"
+  ],
+  "MACROS": {
+    "CFGMEM_IHP_LEFT16": {
+      "instances": {
+        "i_peripherals.CFGMEMS_LEFT[0].cfgmem_lo": {
+          "location": [
+            537.11,
+            3.78
+          ],
+          "orientation": "FS"
+        },
+        "i_peripherals.CFGMEMS_LEFT[0].cfgmem_hi": {
+          "location": [
+            537.11,
+            257.04
+          ],
+          "orientation": "N"
+        },
+        "i_peripherals.CFGMEMS_LEFT[1].cfgmem_hi": {
+          "location": [
+            537.11,
+            619.92
+          ],
+          "orientation": "N"
+        }
+      },
+      "gds": [
+        "macros/CFGMEM_IHP_LEFT16/CFGMEM_IHP_LEFT16.gds"
+      ],
+      "lef": [
+        "macros/CFGMEM_IHP_LEFT16/CFGMEM_IHP_LEFT16.lef"
+      ],
+      "nl": [
+        "macros/CFGMEM_IHP_LEFT16/CFGMEM_IHP_LEFT16.nl.v"
+      ],
+      "spef": {
+        "nom_*": [
+          "macros/CFGMEM_IHP_LEFT16/spef/CFGMEM_IHP_LEFT16.nom.spef"
+        ]
+      },
+      "lib": {
+        "nom_typ_1p20V_25C": [
+          "macros/CFGMEM_IHP_LEFT16/lib/CFGMEM_IHP_LEFT16__nom_typ_1p20V_25C.lib"
+        ],
+        "nom_fast_1p32V_m40C": [
+          "macros/CFGMEM_IHP_LEFT16/lib/CFGMEM_IHP_LEFT16__nom_fast_1p32V_m40C.lib"
+        ],
+        "nom_slow_1p08V_125C": [
+          "macros/CFGMEM_IHP_LEFT16/lib/CFGMEM_IHP_LEFT16__nom_slow_1p08V_125C.lib"
+        ]
+      }
+    },
+    "CFGMEM_IHP_LEFT16_SRAM": {
+      "instances": {
+        "i_peripherals.CFGMEMS_LEFT[1].cfgmem_lo": {
+          "location": [
+            132.47,
+            619.92
+          ],
+          "orientation": "N"
+        }
+      },
+      "gds": [
+        "macros/CFGMEM_IHP_LEFT16_SRAM/CFGMEM_IHP_LEFT16_SRAM.gds"
+      ],
+      "lef": [
+        "macros/CFGMEM_IHP_LEFT16_SRAM/CFGMEM_IHP_LEFT16_SRAM.lef"
+      ],
+      "nl": [
+        "macros/CFGMEM_IHP_LEFT16_SRAM/CFGMEM_IHP_LEFT16_SRAM.nl.v"
+      ],
+      "spef": {
+        "nom_*": [
+          "macros/CFGMEM_IHP_LEFT16_SRAM/spef/CFGMEM_IHP_LEFT16_SRAM.nom.spef"
+        ]
+      },
+      "lib": {
+        "nom_typ_1p20V_25C": [
+          "macros/CFGMEM_IHP_LEFT16_SRAM/lib/CFGMEM_IHP_LEFT16_SRAM__nom_typ_1p20V_25C.lib"
+        ],
+        "nom_fast_1p32V_m40C": [
+          "macros/CFGMEM_IHP_LEFT16_SRAM/lib/CFGMEM_IHP_LEFT16_SRAM__nom_fast_1p32V_m40C.lib"
+        ],
+        "nom_slow_1p08V_125C": [
+          "macros/CFGMEM_IHP_LEFT16_SRAM/lib/CFGMEM_IHP_LEFT16_SRAM__nom_slow_1p08V_125C.lib"
+        ]
+      }
+    },
+    "CFGMEM_IHP16": {
+      "instances": {
+        "i_peripherals.CFGMEMS[2].cfgmem_lo": {
+          "location": [
+            1346.39,
+            3.78
+          ],
+          "orientation": "FS"
+        },
+        "i_peripherals.CFGMEMS[2].cfgmem_hi": {
+          "location": [
+            1346.39,
+            257.04
+          ],
+          "orientation": "N"
+        },
+        "i_peripherals.CFGMEMS[3].cfgmem_lo": {
+          "location": [
+            1346.39,
+            366.66
+          ],
+          "orientation": "FS"
+        },
+        "i_peripherals.CFGMEMS[3].cfgmem_hi": {
+          "location": [
+            1346.39,
+            619.92
+          ],
+          "orientation": "N"
+        }
+      },
+      "gds": [
+        "macros/CFGMEM_IHP16/CFGMEM_IHP16.gds"
+      ],
+      "lef": [
+        "macros/CFGMEM_IHP16/CFGMEM_IHP16.lef"
+      ],
+      "nl": [
+        "macros/CFGMEM_IHP16/CFGMEM_IHP16.nl.v"
+      ],
+      "spef": {
+        "nom_*": [
+          "macros/CFGMEM_IHP16/spef/CFGMEM_IHP16.nom.spef"
+        ]
+      },
+      "lib": {
+        "nom_typ_1p20V_25C": [
+          "macros/CFGMEM_IHP16/lib/CFGMEM_IHP16__nom_typ_1p20V_25C.lib"
+        ],
+        "nom_fast_1p32V_m40C": [
+          "macros/CFGMEM_IHP16/lib/CFGMEM_IHP16__nom_fast_1p32V_m40C.lib"
+        ],
+        "nom_slow_1p08V_125C": [
+          "macros/CFGMEM_IHP16/lib/CFGMEM_IHP16__nom_slow_1p08V_125C.lib"
+        ]
+      }
+    },
+    "RM_IHPSG13_1P_512x32_c2_bm_bist": {
+      "gds": [
+        "pdk_dir::libs.ref/sg13cmos5l_sram/gds/RM_IHPSG13_1P_512x32_c2_bm_bist.gds"
+      ],
+      "lef": [
+        "pdk_dir::libs.ref/sg13cmos5l_sram/lef/RM_IHPSG13_1P_512x32_c2_bm_bist.lef"
+      ],
+      "nl": [],
+      "spef": {},
+      "spice": [
+        "pdk_dir::libs.ref/sg13cmos5l_sram/cdl/RM_IHPSG13_1P_512x32_c2_bm_bist.cdl"
+      ],
+      "lib": {
+        "nom_typ_1p20V_25C": [
+          "pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_typ_1p20V_25C.lib"
+        ],
+        "nom_fast_1p32V_m40C": [
+          "pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_fast_1p32V_m55C.lib"
+        ],
+        "nom_slow_1p08V_125C": [
+          "pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x32_c2_bm_bist_slow_1p08V_125C.lib"
+        ]
+      },
+      "instances": {
+        "i_peripherals.i_prism.SRAM[0].M512.i_sram": {
+          "location": [
+            3.36,
+            3.78
+          ],
+          "orientation": "FS"
+        },
+        "i_peripherals.i_prism.SRAM[1].M512.i_sram": {
+          "location": [
+            3.36,
+            340.2
+          ],
+          "orientation": "N"
+        }
+      }
+    }
+  },
+  "PDN_MACRO_CONNECTIONS": [
+    "i_peripherals\\.CFGMEMS_LEFT\\\\?\\[0\\\\?\\]\\.cfgmem_lo VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS_LEFT\\\\?\\[0\\\\?\\]\\.cfgmem_hi VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS_LEFT\\\\?\\[1\\\\?\\]\\.cfgmem_lo VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS_LEFT\\\\?\\[1\\\\?\\]\\.cfgmem_hi VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS\\\\?\\[2\\\\?\\]\\.cfgmem_lo VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS\\\\?\\[2\\\\?\\]\\.cfgmem_hi VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS\\\\?\\[3\\\\?\\]\\.cfgmem_lo VPWR VGND VPWR VGND",
+    "i_peripherals\\.CFGMEMS\\\\?\\[3\\\\?\\]\\.cfgmem_hi VPWR VGND VPWR VGND",
+    "i_peripherals\\.i_prism\\.SRAM\\\\?\\[0\\\\?\\]\\.M512\\.i_sram VPWR VGND VDD! VSS!",
+    "i_peripherals\\.i_prism\\.SRAM\\\\?\\[0\\\\?\\]\\.M512\\.i_sram VPWR VGND VDDARRAY! VSS!",
+    "i_peripherals\\.i_prism\\.SRAM\\\\?\\[1\\\\?\\]\\.M512\\.i_sram VPWR VGND VDD! VSS!",
+    "i_peripherals\\.i_prism\\.SRAM\\\\?\\[1\\\\?\\]\\.M512\\.i_sram VPWR VGND VDDARRAY! VSS!"
+  ],
+  "MAX_TRANSITION_CONSTRAINT": 0.75,
+  "MAX_FANOUT_CONSTRAINT": 8,
+  "PNR_CORNERS": [
+    "nom_typ_1p20V_25C",
+    "nom_slow_1p08V_125C"
+  ],
+  "VERILOG_DEFINES": [
+    "PRISM_SRAM_AW=9",
+    "PRISM_SRAM_FIFO=2"
+  ],
+  "FP_PDN_VSPACING": 3.52,
+  "FP_PDN_VOFFSET": 6.15,
+  "RUN_MAGIC_DRC": 0,
+  "KLAYOUT_DRC_RUNSET": "pdk_dir::libs.tech/klayout/tech/drc/ihp-sg13cmos5l.drc",
+  "//layout": "Two columns on the 44.96 um grid (regenerated CFGMEM rails at 11.44/17.06 + 44.96k, tile VOFFSET 6.15 so the SRAM flush left at 3.36 has its columns on the stripes): LEFT16 at -2.41 + 44.96*12 = 537.11 (117 um corridor to the SRAM; 31 um failed, 81 um routed), IHP16 at -2.41 + 44.96*30 = 1346.39 (channel 478 um). Magic DRC off (no notion of the SRAM bit cells), KLayout deck on, 2 um halo for NW.b at the SRAM edge.",
+  "ERROR_ON_ILLEGAL_OVERLAPS": 0,
+  "//illegal_overlap": "Magic extracts the SRAM from its LEF abstract, whose Metal4 OBS includes a keep-out bar at the VDD!/VDDARRAY! column break (LEF y 39-45); the GDS has no metal there, so a VPWR stripe across it only bridges the two supply pins the PDN ties together anyway. 22 such spots, all on VDD columns; KLayout DRC (precheck deck) and LVS are clean, so this check is waived.",
+  "//srams": "Two 512x32 SRAM FIFOs (one per shard, 2 KB each: Ethernet RX and TX) stacked flush left with their pin faces toward each other: SRAM[0] FS at y 3.78 (pins on top at 195.12), SRAM[1] N at y 294.84 (pins at its bottom); the 99.7 um gap holds both wrappers. All 1P x32 macros share the 416.64 um width and the same power-column x positions, so the stripes on the columns serve both.",
+  "ROUTING_OBSTRUCTIONS": [
+    "Metal2 3.36 3.78 420.0 192.5",
+    "Metal2 3.36 342.8 420.0 531.54",
+    "Metal3 3.36 3.78 420.0 192.5",
+    "Metal3 3.36 342.8 420.0 531.54",
+    "Metal4 3.36 3.78 420.0 192.5",
+    "Metal4 3.36 342.8 420.0 531.54",
+    [
+      "Metal2",
+      1634.9,
+      464.0,
+      1670.9,
+      511.4
+    ],
+    [
+      "Metal3",
+      1634.9,
+      464.0,
+      1670.9,
+      511.4
+    ],
+    [
+      "Metal4",
+      1634.9,
+      464.0,
+      1670.9,
+      511.4
+    ]
+  ],
+  "PL_RESIZER_SETUP_SLACK_MARGIN": 0.25,
+  "DIODE_PADDING": 2,
+  "DPL_CELL_PADDING": 2,
+  "CELL_PAD_EXCLUDE": [
+    "CFGMEM*",
+    "RM*",
+    "sg13cmos5l_a2*",
+    "sg13cmos5l_and*",
+    "sg13cmos5l_buf*",
+    "sg13cmos5l_decap*",
+    "sg13cmos5l_dfrbp*",
+    "sg13cmos5l_dlhq*",
+    "sg13cmos5l_dlhr*",
+    "sg13cmos5l_dllr*",
+    "sg13cmos5l_dlygate*",
+    "sg13cmos5l_ebufn*",
+    "sg13cmos5l_einvn*",
+    "sg13cmos5l_fill*",
+    "sg13cmos5l_inv*",
+    "sg13cmos5l_lgcp*",
+    "sg13cmos5l_mux*",
+    "sg13cmos5l_nand*",
+    "sg13cmos5l_nor*",
+    "sg13cmos5l_o*",
+    "sg13cmos5l_sdfbbp*",
+    "sg13cmos5l_sdfrbp*",
+    "sg13cmos5l_sighold*",
+    "sg13cmos5l_slgcp*",
+    "sg13cmos5l_tiehi*",
+    "sg13cmos5l_tielo*",
+    "sg13cmos5l_xnor*",
+    "sg13cmos5l_xor*"
+  ],
+  "DESIGN_NAME": "tt_um_pettit_js_prism",
+  "VERILOG_FILES": [
+    "dir::project.v",
+    "dir::peripherals.v",
+    "dir::user_peripherals/uart/peri_uart.v",
+    "dir::user_peripherals/uart/uart_rx.v",
+    "dir::user_peripherals/uart/uart_tx.v",
+    "dir::user_peripherals/prism/prism_periph.v",
+    "dir::user_peripherals/prism/prism_datapath.v",
+    "dir::user_peripherals/prism/prism_fifo.v",
+    "dir::user_peripherals/prism/prism_dma.v",
+    "dir::user_peripherals/prism/prism_txdma.v",
+    "dir::user_peripherals/prism/prism_sram_fifo.v",
+    "dir::user_peripherals/prism/prism_trace_port.v",
+    "dir::user_peripherals/prism/prism_mrx.v",
+    "dir::user_peripherals/prism/sram_2048x32_bb.v",
+    "dir::user_peripherals/prism/prism_crc.v",
+    "dir::user_peripherals/prism/latch_shift_reg.v",
+    "dir::user_peripherals/prism/latch_loader.v",
+    "dir::user_peripherals/prism/prism.v",
+    "dir::user_peripherals/prism/prism_sr_sit.v",
+    "dir::user_peripherals/prism/prism_latch_sit.v",
+    "dir::user_peripherals/prism/prism_latch_reg.v",
+    "dir::user_peripherals/cfgmem/cfgmem_periph.v",
+    "dir::tinyQV/cpu/tinyqv.v",
+    "dir::tinyQV/cpu/alu.v",
+    "dir::tinyQV/cpu/core.v",
+    "dir::tinyQV/cpu/counter.v",
+    "dir::tinyQV/cpu/cpu.v",
+    "dir::tinyQV/cpu/decode.v",
+    "dir::tinyQV/cpu/mem_ctrl.v",
+    "dir::tinyQV/cpu/qspi_ctrl.v",
+    "dir::tinyQV/cpu/register.v",
+    "dir::tinyQV/cpu/latch_reg.v",
+    "dir::tinyQV/cpu/time.v",
+    "dir::tinyQV/peri/uart/uart_tx.v"
+  ],
+  "DIE_AREA": "0 0 1724.16 710.64",
+  "FP_DEF_TEMPLATE": "dir::../tt/tech/ihp-sg13cmos5l/def/tt_block_8x4_pgvdd.def",
+  "VDD_PIN": "VPWR",
+  "GND_PIN": "VGND",
+  "RT_MAX_LAYER": "Metal4",
+  "//spw": "runs/spw (2026-09-29): count3 8e375bf plus the uncommitted SpaceWire link RTL (sampler edge code 3 = Data-Strobe clock; fractured inputs 26-27 = the other shard's pin_out[1:2]); the can_ko40 recipe otherwise (keep-out 40).",
+  "ANCHOR_SEQ_TABLE": "dir::../tools/placements/vga3_anchor_placed_seq.json",
+  "ANCHOR_SEQ_STATUS": "FIRM",
+  "CHIP_ART_JSON": "dir::../macros/CALVIN_UP/art.json",
+  "CHIP_ART_CUT_ROWS": true
+}

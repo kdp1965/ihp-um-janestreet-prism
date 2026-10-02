@@ -74,6 +74,37 @@ stripes that cross it.  Instead:
 additions and the registers anchored to vga3_anchor's own placement
 (`tools/placements/vga3_anchor_placed_seq.json`).
 
+## The bare-oxide variant: cut the rows under the picture
+
+`macros/CALVIN_UP` and `src/config_merged_art_up.json` (runs/art_up) put
+the same picture in the standard-cell channel between the second-row and
+top-row CFGMEMs, x 1634.9 to 1670.9, y 464.0 to 511.4 (10 um above the
+lower macro's top-face pins), and empty the box on every layer so the
+Metal4 lies on bare oxide instead of on logic:
+
+- `Project.ArtKeepout` (`"+OpenROAD.CutRows"`, `CHIP_ART_CUT_ROWS`) cuts
+  the standard-cell rows under the box before the PDN is made
+  (odb_art_keepout.py: 14 rows split into left and right segments on the
+  site grid).  No cell, filler or decap can ever be placed there, and no
+  Metal1 rails are drawn there, since the rails follow the rows; the row
+  segments on each side still meet a stripe pair.
+- `ROUTING_OBSTRUCTIONS` on Metal2, Metal3 and Metal4 over the box keep
+  the router out; `--nofill all` puts the fill-exclusion marker of every
+  layer (Activ, GatPoly, Metal1 to Metal4) over the box for the chip-level
+  fill.
+- One anchored register sat in the box and was snapped to the nearest row
+  segment by the anchor step.
+
+Cost, measured on the same anchored skeleton: global placement inflated
+19.7 % instead of 15.4 %, global routing overflow 20716 instead of 19571
+(the detours, all on Metal3), 0.9 % more wire, 259 Metal2 and 159 Metal3
+segments displaced.  Sign-off: DRT 0 at pass 57 plus two antenna rounds,
+KLayout 0 on the full deck, LVS 0, antenna 0, typ setup +0.360 (the art
+run: +0.322), hold +0.223, IR drop unchanged.  Note that the post-GRT
+timing repair's table ended at -2.1 ns with 503 endpoints for this run:
+that table tracks the slow corner, not the typ sign-off, and is not a
+reason to kill a run.
+
 ## The corner, for the record
 
 Die 1724.16 x 710.64 um.  The top-right CFGMEM_IHP16 sits at x 1346.39

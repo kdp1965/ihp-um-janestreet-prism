@@ -34,6 +34,28 @@ import klayout.db as kdb
 
 LAYER_METAL4 = (50, 0)
 LAYER_NOFILL = (50, 23)
+# the fill-exclusion markers of every layer that chip-level fill touches
+# (sg13cmos5l.lyp; precheck lists them all as valid): --nofill all
+NOFILL_ALL = {"Activ": (1, 23), "GatPoly": (5, 23), "Metal1": (8, 23), "Metal2": (10, 23), "Metal3": (30, 23), "Metal4": (50, 23)}
+
+
+def load_mask_gds(path, w_px, h_px, pixel):
+    """A hand-edited art cell back onto the pixel grid: the Metal4 (50/0) of
+    the GDS's top cell, in cell coordinates (0, 0 = the box's lower-left), a
+    pixel being metal when at least half of it is covered.  On-grid edits
+    come back exactly; off-grid strays are snapped; the checkerboard
+    clean-up then removes corner-only contacts.  Row 0 is the bottom."""
+    ly = kdb.Layout()
+    ly.read(path)
+    reg = kdb.Region(ly.top_cell().begin_shapes_rec(ly.layer(*LAYER_METAL4)))
+    reg.merge()
+    px = int(round(pixel / ly.dbu))
+    mask = np.zeros((h_px, w_px), bool)
+    for y in range(h_px):
+        for x in range(w_px):
+            cell = kdb.Region(kdb.Box(x * px, y * px, (x + 1) * px, (y + 1) * px))
+            mask[y, x] = (reg & cell).area() * 2 >= px * px
+    return mask, (w_px / 2.0, h_px / 2.0, 0.0)
 
 
 def load_mask(path, w_px, h_px, mode, threshold, disc):
@@ -79,7 +101,7 @@ def clean(mask):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--image", required=True)
+    ap.add_argument("--image", required=True, help="the bitmap; or a .gds of a hand-edited art cell (its Metal4 is re-gridded, see load_mask_gds)")
     ap.add_argument("--box", nargs=4, type=float, required=True, metavar=("X0", "Y0", "X1", "Y1"), help="the drawn window, die coordinates, um")
     ap.add_argument("--extent", nargs=4, type=float, default=None, metavar=("X0", "Y0", "X1", "Y1"), help="where the whole image goes (default: the box); a larger extent is clipped to the box, e.g. a disc wider than the channel between two PDN pairs")
     ap.add_argument("--pixel", type=float, default=0.6, help="pixel size, um")
@@ -88,6 +110,7 @@ def main():
     ap.add_argument("--mode", choices=("plate", "ink"), default="plate")
     ap.add_argument("--threshold", type=float, default=128)
     ap.add_argument("--no-disc", action="store_true", help="do not clip to the avatar's disc")
+    ap.add_argument("--nofill", choices=("metal4", "all"), default="metal4", help="fill-exclusion markers over the box: Metal4 only, or every layer (for a box whose rows are cut out so nothing lies under the art)")
     ap.add_argument("--cell", default="tt_um_pettit_calvin")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -97,8 +120,11 @@ def main():
     # the whole image on the extent's grid, then the box's window of it; the
     # box is snapped to that grid so the pixels line up
     we_px, he_px = int(round((ex1 - ex0) / a.pixel)), int(round((ey1 - ey0) / a.pixel))
-    full, disc = load_mask(a.image, we_px, he_px, a.mode, a.threshold, not a.no_disc)
-    full = full[::-1, :]                      # the image's row 0 is the top: die orientation has row 0 at the bottom
+    if a.image.lower().endswith((".gds", ".gds2", ".oas")):
+        full, disc = load_mask_gds(a.image, we_px, he_px, a.pixel)       # already in die orientation
+    else:
+        full, disc = load_mask(a.image, we_px, he_px, a.mode, a.threshold, not a.no_disc)
+        full = full[::-1, :]                  # the image's row 0 is the top: die orientation has row 0 at the bottom
     cx0, cy0 = int(round((x0 - ex0) / a.pixel)), int(round((y0 - ey0) / a.pixel))
     cx1, cy1 = int(round((x1 - ex0) / a.pixel)), int(round((y1 - ey0) / a.pixel))
     cx0, cy0, cx1, cy1 = max(cx0, 0), max(cy0, 0), min(cx1, we_px), min(cy1, he_px)
@@ -140,7 +166,8 @@ def main():
                 x += 1
     reg = kdb.Region(cell.begin_shapes_rec(l_m4))
     reg.merge()                                # the merged view, for the checks and the report only
-    cell.shapes(l_nf).insert(kdb.Box(0, 0, w_px * px, h_px * px))
+    for lname, ld in (NOFILL_ALL.items() if a.nofill == "all" else [("Metal4", LAYER_NOFILL)]):
+        cell.shapes(ly.layer(*ld)).insert(kdb.Box(0, 0, w_px * px, h_px * px))
     gds = os.path.join(a.out, a.cell + ".gds")
     ly.write(gds)
 
@@ -169,7 +196,7 @@ def main():
         "pixel": a.pixel, "pixels": [w_px, h_px], "metal_pixels": int(mask.sum()),
         "rectangles": rects, "merged_polygons": npoly, "metal_area_um2": round(area, 2),
         "routing_obstruction": ["Metal4", x0, y0, round(x0 + w_px * a.pixel, 3), round(y0 + h_px * a.pixel, 3)],
-        "exclusions": a.exclude, "clearance": a.clearance, "mode": a.mode, "extent": [ex0, ey0, ex1, ey1],
+        "exclusions": a.exclude, "clearance": a.clearance, "mode": a.mode, "extent": [ex0, ey0, ex1, ey1], "nofill": a.nofill,
     }
     with open(os.path.join(a.out, "art.json"), "w") as f:
         json.dump(info, f, indent=2)
