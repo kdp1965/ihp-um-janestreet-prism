@@ -4,7 +4,7 @@ design__lint_timing_construct__count,0
 design__lint_warning__count,37
 design__inferred_latch__count,0
 design__instance__count,72586
-design__instance__area,1.18659E+6
+design__instance__area,1186590
 design__instance_unmapped__count,0
 synthesis__check_error__count,0
 design__max_slew_violation__count__corner:nom_fast_1p32V_m40C,696
@@ -12,16 +12,16 @@ design__max_fanout_violation__count__corner:nom_fast_1p32V_m40C,513
 design__max_cap_violation__count__corner:nom_fast_1p32V_m40C,45
 power__internal__total,0.01185264065861702
 power__switching__total,0.0037240658421069384
-power__leakage__total,0.00002759978269750718
+power__leakage__total,2.759978269750718e-05
 power__total,0.015604306012392044
 clock__skew__worst_hold__corner:nom_fast_1p32V_m40C,-0.5543201610178703
 clock__skew__worst_setup__corner:nom_fast_1p32V_m40C,0.6889629062264528
 timing__hold__ws__corner:nom_fast_1p32V_m40C,0.049306449208016835
 timing__setup__ws__corner:nom_fast_1p32V_m40C,1.0027241543125671
-timing__hold__tns__corner:nom_fast_1p32V_m40C,0.0
-timing__setup__tns__corner:nom_fast_1p32V_m40C,0.0
+timing__hold__tns__corner:nom_fast_1p32V_m40C,0
+timing__setup__tns__corner:nom_fast_1p32V_m40C,0
 timing__hold__wns__corner:nom_fast_1p32V_m40C,0
-timing__setup__wns__corner:nom_fast_1p32V_m40C,0.0
+timing__setup__wns__corner:nom_fast_1p32V_m40C,0
 timing__hold_vio__count__corner:nom_fast_1p32V_m40C,0
 timing__hold_r2r__ws__corner:nom_fast_1p32V_m40C,0.049306
 timing__hold_r2r_vio__count__corner:nom_fast_1p32V_m40C,0
@@ -35,7 +35,7 @@ clock__skew__worst_hold__corner:nom_slow_1p08V_125C,-0.6781098097199807
 clock__skew__worst_setup__corner:nom_slow_1p08V_125C,0.8529097669541885
 timing__hold__ws__corner:nom_slow_1p08V_125C,0.504903799727307
 timing__setup__ws__corner:nom_slow_1p08V_125C,-6.115728541136928
-timing__hold__tns__corner:nom_slow_1p08V_125C,0.0
+timing__hold__tns__corner:nom_slow_1p08V_125C,0
 timing__setup__tns__corner:nom_slow_1p08V_125C,-2473.1389902676738
 timing__hold__wns__corner:nom_slow_1p08V_125C,0
 timing__setup__wns__corner:nom_slow_1p08V_125C,-6.115728541136928
@@ -52,10 +52,10 @@ clock__skew__worst_hold__corner:nom_typ_1p20V_25C,-0.5985180298558964
 clock__skew__worst_setup__corner:nom_typ_1p20V_25C,0.7556956385664401
 timing__hold__ws__corner:nom_typ_1p20V_25C,0.2263622686697607
 timing__setup__ws__corner:nom_typ_1p20V_25C,0.3223612579226905
-timing__hold__tns__corner:nom_typ_1p20V_25C,0.0
-timing__setup__tns__corner:nom_typ_1p20V_25C,0.0
+timing__hold__tns__corner:nom_typ_1p20V_25C,0
+timing__setup__tns__corner:nom_typ_1p20V_25C,0
 timing__hold__wns__corner:nom_typ_1p20V_25C,0
-timing__setup__wns__corner:nom_typ_1p20V_25C,0.0
+timing__setup__wns__corner:nom_typ_1p20V_25C,0
 timing__hold_vio__count__corner:nom_typ_1p20V_25C,0
 timing__hold_r2r__ws__corner:nom_typ_1p20V_25C,0.226362
 timing__hold_r2r_vio__count__corner:nom_typ_1p20V_25C,0
@@ -69,7 +69,7 @@ clock__skew__worst_hold,-0.5543201610178703
 clock__skew__worst_setup,0.6889629062264528
 timing__hold__ws,0.049306449208016835
 timing__setup__ws,-6.115728541136928
-timing__hold__tns,0.0
+timing__hold__tns,0
 timing__setup__tns,-2473.1389902676738
 timing__hold__wns,0
 timing__setup__wns,-6.115728541136928
@@ -82,8 +82,8 @@ timing__setup_r2r_vio__count,809
 design__die__bbox,0.0 0.0 1724.16 710.64
 design__core__bbox,2.88 3.78 1721.28 706.86
 design__io,45
-design__die__area,1.22526E+6
-design__core__area,1.20817E+6
+design__die__area,1225260
+design__core__area,1208170
 design__instance__count__stdcell,31322
 design__instance__area__stdcell,446898
 design__instance__count__macros,10
@@ -125,7 +125,7 @@ timing__drv__floating__pins,0
 design__instance__displacement__total,4633.68
 design__instance__displacement__mean,0.148
 design__instance__displacement__max,27.36
-route__wirelength__estimated,1.93873E+6
+route__wirelength__estimated,1938730
 design__violations,0
 design__instance__count__class:timing_repair_buffer,6789
 design__instance__area__class:timing_repair_buffer,80811.6
@@ -280,7 +280,7 @@ design_powergrid__voltage__worst__net:VPWR__corner:nom_slow_1p08V_125C,1.19959
 design_powergrid__drop__average__net:VPWR__corner:nom_slow_1p08V_125C,1.19995
 design_powergrid__drop__worst__net:VPWR__corner:nom_slow_1p08V_125C,0.000414369
 design_powergrid__voltage__worst__net:VGND__corner:nom_slow_1p08V_125C,0.000266543
-design_powergrid__drop__average__net:VGND__corner:nom_slow_1p08V_125C,0.0000448791
+design_powergrid__drop__average__net:VGND__corner:nom_slow_1p08V_125C,4.48791e-05
 design_powergrid__drop__worst__net:VGND__corner:nom_slow_1p08V_125C,0.000266543
 flow__warnings__count:STA-1648,292
 flow__warnings__count:STA-1650,1001
@@ -290,9 +290,9 @@ design_powergrid__drop__worst,0.000414369
 design_powergrid__drop__worst__net:VPWR,0.000414369
 design_powergrid__voltage__worst__net:VGND,0.000266543
 design_powergrid__drop__worst__net:VGND,0.000266543
-ir__voltage__worst,1.1999999999999999555910790149937383830547332763671875
-ir__drop__avg,0.0000464999999999999986369410287512238255658303387463092803955078125
-ir__drop__worst,0.000413999999999999979995168875035460587241686880588531494140625
+ir__voltage__worst,1.2
+ir__drop__avg,4.65e-05
+ir__drop__worst,0.000414
 klayout__drc_error__count,0
 magic__illegal_overlap__count,92
 design__lvs_device_difference__count,0
