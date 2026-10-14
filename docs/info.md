@@ -21,7 +21,7 @@ single- or quad-lane master), I2C (master and slave), 1-Wire, WS2812, a
 quadrature encoder, a 24-bit GPIO expander, a USB low-speed device, and
 10BASE-T Ethernet transmit and receive at once.
 
-![](prism_periph.png)
+![](prism_block.png)
 
 ## What is on the tile
 
